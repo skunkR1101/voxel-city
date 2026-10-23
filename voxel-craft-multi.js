@@ -13,7 +13,7 @@
 'use strict';
 
 // ★★★ 作った人が一度だけ書き換える（例：https://voxel-city-xxxx.deno.dev）★★★
-const DEFAULT_SERVER = 'https://icy-stingray-3668.skunkr1101.deno.net';
+const DEFAULT_SERVER = 'https://YOUR-PROJECT.deno.dev';
 
 const PROTOCOL = 1;
 const CFG_KEY = 'voxelcraft_multi';
@@ -32,6 +32,8 @@ let outbox = [];
 let flushT = null;
 let pollT = null, syncT = null, pollBusy = false;
 let applyingRemote = false;
+let joining = false;             // 参加時に部屋の状態を受け取っている最中か
+const ROOMS_KEY = 'voxelcraft_rooms_v1';
 const handlers = new Map();      // 接頭語 -> 受け取り関数
 let panelEl = null, statusEl = null, msgEl = null, msgT = 0;
 
@@ -186,11 +188,11 @@ function stopStream() {
 // ============================================================
 // 部屋の作成・参加・退室
 // ============================================================
-async function createRoom(name, password) {
+async function createRoom(name, password, tag) {
   if (password.length < 4) throw new Error('パスワードは4文字以上にしてください');
   const seed = window.VoxelWorld ? VoxelWorld.getSeed() : null;
   const j = await api('/api/rooms', { name, password, seed }, 'POST');
-  await joinRoom(j.id, password, true, name);
+  await joinRoom(j.id, password, true, name, tag);
   // 今のワールドを、そのまま部屋に持ち込む
   const local = window.VoxelWorld ? VoxelWorld.buildSave().base.edits : [];
   for (const [cx, cy, cz, list] of local) {
@@ -201,11 +203,13 @@ async function createRoom(name, password) {
   }
   return j.id;
 }
-async function joinRoom(id, password, keepLocal, name) {
+async function joinRoom(id, password, keepLocal, name, tag) {
   disconnect(false);
   const j = await api(`/api/rooms/${id}/join`, { password }, 'POST');
-  conn = { id, pw: password, server: cfg.server, seq: 0, name: j.name || name || '' };
+  conn = { id, pw: password, server: cfg.server, seq: 0, name: j.name || name || '', tag: (tag || cfg.tag || '').trim() };
+  if (conn.tag) { cfg.tag = conn.tag; }
   if (window.VoxelWorld) VoxelWorld.applySeed(j.seed, !keepLocal);
+  joining = true;
   applyingRemote = true;
   try {
     for (const [key, val] of j.kv) {
@@ -214,10 +218,62 @@ async function joinRoom(id, password, keepLocal, name) {
     }
   } finally { applyingRemote = false; }
   conn.seq = j.seq;
+  joining = false;
   startStream();
   setStatus(`接続中：「${conn.name}」`);
   saveCfg();
+  saveRoomEntry({ id, name: j.name || name || '', server: cfg.server, pw: password, tag: conn.tag });
   return j;
+}
+
+// ============================================================
+// 保存した部屋・ゲーマータグの一覧（この端末のブラウザに保存）
+// ============================================================
+function loadRooms() {
+  try { return JSON.parse(localStorage.getItem(ROOMS_KEY) || '[]'); } catch (e) { return []; }
+}
+function saveRoomEntry(e) {
+  try {
+    const list = loadRooms().filter(r => r.id !== e.id);
+    list.unshift({ ...e, lastUsed: Date.now() });
+    localStorage.setItem(ROOMS_KEY, JSON.stringify(list.slice(0, 30)));
+  } catch (err) {}
+}
+function removeRoomEntry(id) {
+  try { localStorage.setItem(ROOMS_KEY, JSON.stringify(loadRooms().filter(r => r.id !== id))); } catch (e) {}
+}
+function renderRooms() {
+  const box = document.getElementById('mpRooms');
+  if (!box) return;
+  const list = loadRooms();
+  if (!list.length) { box.innerHTML = '<p class="note">まだ保存された部屋はありません。</p>'; return; }
+  box.innerHTML = '';
+  for (const r of list) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;align-items:center;margin:6px 0;flex-wrap:wrap';
+    const label = document.createElement('div');
+    label.style.cssText = 'flex:1;min-width:120px;font-size:13px';
+    label.textContent = (r.name || '部屋') + '（タグ：' + (r.tag || '未設定') + '）';
+    const join = document.createElement('button');
+    join.className = 'btn'; join.style.width = 'auto'; join.style.marginTop = '0'; join.textContent = '参加';
+    join.addEventListener('click', async () => {
+      try {
+        cfg.server = r.server || cfg.server; saveCfg();
+        await joinRoom(r.id, r.pw, false, r.name, r.tag);
+        refreshShare(); toast('参加しました');
+        close(); startIfNeeded();
+      } catch (e) { toast(e.message); }
+    });
+    const del = document.createElement('button');
+    del.className = 'btn danger'; del.style.width = 'auto'; del.style.marginTop = '0'; del.textContent = '削除';
+    del.addEventListener('click', () => { removeRoomEntry(r.id); renderRooms(); });
+    row.append(label, join, del);
+    box.appendChild(row);
+  }
+}
+function tagVal() {
+  const el = document.getElementById('mpTag');
+  return el ? el.value.trim() : (cfg.tag || '');
 }
 function disconnect(notify) {
   if (!conn) return;
@@ -277,6 +333,11 @@ function buildUI() {
     <p id="mpStatus"></p>
     <h3>部屋情報</h3>
     <div id="mpInfo" class="note"></div>
+    <h3>ゲーマータグ</h3>
+    <input id="mpTag" placeholder="例：たろう（何語でもOK）" maxlength="20">
+    <p class="note">部屋で使う名前です。ブロックやオブジェクトに重ならないときだけ、頭の上に表示されます。</p>
+    <h3>保存した部屋</h3>
+    <div id="mpRooms"></div>
     <h3>部屋を作る</h3>
     <input id="mpNewName" placeholder="部屋の名前">
     <input id="mpNewPw" placeholder="パスワード（8文字以上を推奨）" type="password" autocomplete="new-password">
@@ -313,13 +374,17 @@ function buildUI() {
 
   const $ = id => document.getElementById(id);
   $('mpServer').value = cfg.server;
+  $('mpTag').value = cfg.tag || '';
+  $('mpTag').addEventListener('change', () => { cfg.tag = tagVal(); saveCfg(); });
   $('mpServer').addEventListener('change', () => {
     cfg.server = $('mpServer').value.trim().replace(/\/+$/, '') || (SERVER_IS_SET ? DEFAULT_SERVER : location.origin);
     saveCfg();
   });
   $('mpCreate').addEventListener('click', async () => {
     try {
-      const id = await createRoom($('mpNewName').value.trim() || '共同都市', $('mpNewPw').value);
+      if (!tagVal()) { toast('ゲーマータグを入力してください'); return; }
+      cfg.tag = tagVal(); saveCfg();
+      const id = await createRoom($('mpNewName').value.trim() || '共同都市', $('mpNewPw').value, tagVal());
       $('mpJoinId').value = id; $('mpJoinPw').value = $('mpNewPw').value;
       refreshShare();
       toast('部屋を作りました。共有リンクを友達に渡してください');
@@ -334,7 +399,9 @@ function buildUI() {
   $('mpJoin').addEventListener('click', async () => {
     try {
       cfg.server = $('mpServer').value.trim().replace(/\/+$/, '') || cfg.server; saveCfg();
-      await joinRoom($('mpJoinId').value.trim(), $('mpJoinPw').value, false);
+      if (!tagVal()) { toast('ゲーマータグを入力してください'); return; }
+      cfg.tag = tagVal(); saveCfg();
+      await joinRoom($('mpJoinId').value.trim(), $('mpJoinPw').value, false, '', tagVal());
       refreshShare();
       toast('参加しました');
       close(); startIfNeeded();
@@ -360,7 +427,7 @@ function refreshShare() {
       (gameUrl() ? '' : '<br><b>※このアドレスは友達に渡せません。ゲームをインターネット上のアドレスから開いてください</b>')
     : '部屋には参加していません（一人で遊べます）。';
 }
-function open() { refreshShare(); panelEl.classList.add('show'); }
+function open() { refreshShare(); renderRooms(); panelEl.classList.add('show'); }
 function close() { panelEl.classList.remove('show'); }
 function startIfNeeded() { if (window.VoxelWorld) VoxelWorld.start(); }
 
@@ -385,6 +452,9 @@ function prefillFromHash() {
 // ============================================================
 window.VoxelMulti = {
   PROTOCOL,
+  peer,
+  tag: () => (conn ? conn.tag : cfg.tag) || '',
+  isJoining: () => joining,
   open,
   close,
   connected: () => !!conn,
