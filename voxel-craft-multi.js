@@ -20,7 +20,12 @@ const CFG_KEY = 'voxelcraft_multi';
 const SHARE_PREFIX = 'vc1:';
 const FLUSH_MS = 150;
 const MAX_BATCH = 300;
-const POLL_MS = 2000;
+const POLL_ACTIVE_MS = 1500;     // 人が動いているときの問い合わせ間隔
+const POLL_IDLE_MS = 4000;       // 誰も動いていないときの問い合わせ間隔
+const ACTIVE_WINDOW_MS = 20000;
+let lastActive = 0;
+let blockEncoder = null;         // (x,y,z,種類) -> 送る値（カスタムブロックは定義を添える）
+let blockResolver = null;        // (x,y,z,操作) -> 置く種類（まだ定義がなければ null）
 const FULL_SYNC_MS = 60000;
 const SERVER_IS_SET = !DEFAULT_SERVER.includes('YOUR-PROJECT');
 
@@ -108,16 +113,20 @@ async function flush() {
   if (outbox.length) flushT = setTimeout(flush, FLUSH_MS);
 }
 // 任意の値を部屋に書く（ほかの機能用）。del=true で消す
-function send(key, value, del) {
+// eph=true は履歴に残さない一時的な情報（位置など）。書き込みを少なくできる
+function send(key, value, del, eph) {
   if (!conn) return;
-  enqueue({ key, v: del ? undefined : value, ts: Date.now(), peer, del: !!del });
+  enqueue({ key, v: del ? undefined : value, ts: Date.now(), peer, del: !!del, eph: !!eph });
 }
 
 // ブロックの置く・壊すを横取りして送る（ローカルの変更は普通どおり行う）
 const origSetBlock = window.setBlock;
 window.setBlock = function (x, y, z, t) {
   origSetBlock(x, y, z, t);
-  if (conn && !applyingRemote) enqueue({ key: 'b:' + x + ',' + y + ',' + z, v: t, ts: Date.now(), peer });
+  if (conn && !applyingRemote) {
+    const v = blockEncoder ? blockEncoder(x, y, z, t) : t;
+    enqueue({ key: 'b:' + x + ',' + y + ',' + z, v, ts: Date.now(), peer });
+  }
 };
 
 // ============================================================
@@ -129,8 +138,8 @@ function applyOp(rec) {
   if (key.startsWith('b:')) {
     const p = key.slice(2).split(',').map(Number);
     if (p.length !== 3 || p.some(n => !Number.isInteger(n))) return;
-    const t = rec.del ? AIR : rec.v;
-    if (!Number.isInteger(t)) return;
+    const t = blockResolver ? blockResolver(p[0], p[1], p[2], rec) : (rec.del ? AIR : rec.v);
+    if (t === null || t === undefined || !Number.isInteger(t)) return;
     applyingRemote = true;
     try { origSetBlock(p[0], p[1], p[2], t); } finally { applyingRemote = false; }
     return;
@@ -154,6 +163,10 @@ async function pollOnce() {
       applyOp(r);
       if (r.seq > c.seq) c.seq = r.seq;
     }
+    // 一時的な情報（位置など）：自分以外の項目が1つでもあれば「動いている」とみなす
+    const others = (j.eph || []).filter(r => r.key !== 'pl:' + PEER);
+    if (j.ops.length || others.length) lastActive = Date.now();
+    for (const r of (j.eph || [])) applyOp(r);
     setStatus(`接続中：「${c.name}」`);
   } catch (e) {
     setStatus('通信できません。つながるまで待っています…');
@@ -175,13 +188,23 @@ async function fullResync() {
   } finally { applyingRemote = false; }
   if (conn === c) c.seq = j.seq;
 }
+// 問い合わせは「前の結果が返ってきてから」次を予約する（重なって送られないように）
+function schedulePoll(delay) {
+  clearTimeout(pollT);
+  pollT = setTimeout(async () => {
+    await pollOnce();
+    if (conn) schedulePoll(Date.now() - lastActive < ACTIVE_WINDOW_MS ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+  }, delay);
+}
 function startStream() {
   stopStream();
-  pollT = setInterval(pollOnce, POLL_MS);
+  lastActive = 0;
+  schedulePoll(0);
   syncT = setInterval(() => { fullResync().catch(() => {}); }, FULL_SYNC_MS);
 }
 function stopStream() {
-  clearInterval(pollT); clearInterval(syncT);
+  clearTimeout(pollT);
+  clearInterval(syncT);
   pollT = syncT = null;
 }
 
@@ -198,7 +221,7 @@ async function createRoom(name, password, tag) {
   for (const [cx, cy, cz, list] of local) {
     for (const [i, t] of list) {
       const x = cx * 16 + (i & 15), y = cy * 16 + ((i >> 4) & 15), z = cz * 16 + ((i >> 8) & 15);
-      enqueue({ key: 'b:' + x + ',' + y + ',' + z, v: t, ts: Date.now(), peer });
+      enqueue({ key: 'b:' + x + ',' + y + ',' + z, v: blockEncoder ? blockEncoder(x, y, z, t) : t, ts: Date.now(), peer });
     }
   }
   return j.id;
@@ -453,6 +476,13 @@ function prefillFromHash() {
 window.VoxelMulti = {
   PROTOCOL,
   peer,
+  // カスタムブロックの定義の受け渡し用（voxel-craft-custom.js が使う）
+  setBlockEncoder: fn => { blockEncoder = fn; },
+  setBlockResolver: fn => { blockResolver = fn; },
+  applyBlock: (x, y, z, t) => {
+    applyingRemote = true;
+    try { origSetBlock(x, y, z, t); } finally { applyingRemote = false; }
+  },
   tag: () => (conn ? conn.tag : cfg.tag) || '',
   isJoining: () => joining,
   open,
