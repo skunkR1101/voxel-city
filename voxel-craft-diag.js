@@ -137,11 +137,11 @@ window.doPlace = function () {
 };
 const prevBreak = window.doBreak;
 window.doBreak = function () {
-  const p = pickTarget();
+  let p = null;
+  try { p = pickTarget(); } catch (e) { p = null; }
   if (p && p.kind === 'tilt' && p.ent && p.ent.diag) {
     const r = recs.get(p.ent.diag);
-    if (r) removeDiag(r);
-    return;
+    if (r) { removeDiag(r); return; }
   }
   return prevBreak();
 };

@@ -82,6 +82,7 @@ function setState(x, y, z, s) {
   else blockState.delete(keyOf(x, y, z));
 }
 
+VoxelMulti.setStateGetter(stateOf);
 VoxelMulti.setBlockEncoder((x, y, z, t) => {
   if (t < CUSTOM_BASE) return t;
   const def = ext.defs.find(d => d.id === t);

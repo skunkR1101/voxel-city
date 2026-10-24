@@ -174,27 +174,44 @@ layoutPanel.addEventListener('pointerdown', e => { if (e.target === layoutPanel)
 let eraseCooldown = 0;
 const prevBreak = window.doBreak;
 window.doBreak = function () {
-  const roadOn = typeof rs !== 'undefined' && rs.mode;
-  if (!roadOn && typeof cursorTarget === 'function' && typeof st !== 'undefined') {
-    const t = cursorTarget();
-    const pc = t ? nearestGroup(t.p, 1.4) : null;      // 道路・線路の近くなら、道路を消す
-    if (pc) {
-      const now = performance.now();
-      if (now > eraseCooldown) { eraseCooldown = now + 350; eraseNear(pc); }
-      return;
+  // 道路を消すのは、「道路が、狙っているブロックより手前にあるとき」だけ。
+  // 道路が消えなかったとき・例外が出たときは、普通の破壊をそのまま行う（壊れなくなるのを防ぐ）。
+  try {
+    const roadOn = typeof rs !== 'undefined' && rs.mode;
+    if (!roadOn && typeof cursorTarget === 'function' && typeof st !== 'undefined') {
+      const t = cursorTarget();
+      const pc = t && t.p ? nearestGroup(t.p, 1.4) : null;
+      if (pc) {
+        const pt = pickTarget();
+        const dRoad = camera.position.distanceTo(t.p);
+        const roadFirst = !pt || dRoad < pt.dist - 0.05;
+        const now = performance.now();
+        if (roadFirst && now > eraseCooldown) {
+          eraseCooldown = now + 350;
+          if (eraseNear(pc)) return;                    // 道路を消せたときだけ、ここで止める
+        }
+      }
     }
+  } catch (e) {
+    reportError(e);
   }
   return prevBreak();
 };
+function reportError(e) {
+  console.error(e);
+  if (typeof toast === 'function') toast('エラー：' + (e && e.message || e));
+}
+window.addEventListener('error', ev => reportError(ev.error || ev.message));
 function eraseNear(pc) {
   const d2 = (ax, az, bx, bz) => Math.hypot(ax - bx, az - bz);
   const before = st.pieces.length + st.nodes.length;
   st.pieces = st.pieces.filter(p => !(p.g === pc.g && d2(p.x, p.z, pc.x, pc.z) <= ERASE_R));
   st.nodes = st.nodes.filter(n => !(n.g === pc.g && d2(n.p.x, n.p.z, pc.x, pc.z) <= ERASE_R));
-  if (st.pieces.length + st.nodes.length === before) return;
+  if (st.pieces.length + st.nodes.length === before) return false;
   rebuildMain();
   saveAll();
   if (typeof toast === 'function') toast('道路・線路の一部を削除しました');
+  return true;
 }
 
 // ============================================================

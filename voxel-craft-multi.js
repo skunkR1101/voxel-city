@@ -103,16 +103,82 @@ function send(key, value, del, eph) {
   if (!conn || !window.VoxelNet || !VoxelNet.active()) return;
   VoxelNet.send(key, value, del, eph);
 }
-function sendBlock(x, y, z, t) {
-  const v = blockEncoder ? blockEncoder(x, y, z, t) : t;
-  send('b:' + x + ',' + y + ',' + z, v, false, false);
+// ============================================================
+// ブロックの同期：1マスずつ送る（同じ場所は、後から変わった値が勝つ）
+//  ・ワールドの保存内容（editsByChunk）を一定間隔で見て、変わったマスだけを送る
+//    → 設置・破壊の呼ばれ方に左右されず、ローカルの変更を必ず拾える
+//  ・受け取った側は、そのマスだけを書き換える（ほかのマスは消えない）
+//  ・一定間隔で、受け取った値と実際のワールドを照らし合わせ、ずれていれば直す
+// ============================================================
+const SCAN_MS = 250;
+const FIX_R = 48;                       // 照らし合わせる範囲（プレイヤーからのマス数）
+const known = new Map();                // "x,y,z" -> { x, y, z, t, s }  この端末が知っている値
+const blockStats = { sent: 0, recv: 0, applied: 0, fixed: 0, waiting: 0 };
+let stateGetter = null;                 // (x,y,z) -> カスタムブロックの色・向き（custom.js が渡す）
+
+function connectedNow() { return !!conn && !!window.VoxelNet && VoxelNet.active(); }
+function stateStr(x, y, z, t) {
+  if (t < CUSTOM_BASE || !stateGetter) return '';
+  return JSON.stringify(stateGetter(x, y, z) || null);
 }
-// ブロックの置く・壊すを横取りして送る（ローカルの変更は普通どおり行う）
-// 送るのは、設置の処理（色・向きの設定まで）が終わったあと。そのため、マイクロタスクで送る
-window.setBlock = function (x, y, z, t) {
-  origSetBlock(x, y, z, t);
-  if (conn && !applyingRemote) queueMicrotask(() => { if (conn) sendBlock(x, y, z, t); });
-};
+function sendCell(x, y, z, t) {
+  const v = blockEncoder ? blockEncoder(x, y, z, t) : t;   // カスタムブロックは「しるし＋状態」にする
+  send('b:' + x + ',' + y + ',' + z, v, false, false);
+  blockStats.sent++;
+}
+// 変わったマスを探して送る
+function scanBlocks() {
+  for (const [ck, ed] of editsByChunk) {
+    if (!ed || !ed.size) continue;
+    const c = VoxelWorld.decodeKey(ck);
+    if (!c) continue;
+    for (const [li, t] of ed) {
+      const x = c.cx * CS + (li & 15), y = c.cy * CS + ((li >> 4) & 15), z = c.cz * CS + ((li >> 8) & 15);
+      const key = x + ',' + y + ',' + z;
+      const s = stateStr(x, y, z, t);
+      const k = known.get(key);
+      if (k && k.t === t && k.s === s) continue;
+      known.set(key, { x, y, z, t, s });
+      sendCell(x, y, z, t);
+    }
+  }
+}
+// 受け取った1マスを、ワールドへ反映する（送り返さないよう、known に記録する）
+function applyCell(x, y, z, t, s) {
+  known.set(x + ',' + y + ',' + z, { x, y, z, t, s });
+  applyingRemote = true;
+  try { origSetBlock(x, y, z, t); } finally { applyingRemote = false; }
+  blockStats.applied++;
+}
+function applyRemoteCell(key, rec) {
+  const p = key.slice(2).split(',').map(Number);
+  if (p.length !== 3 || p.some(n => !Number.isInteger(n))) return;
+  blockStats.recv++;
+  let t = null;
+  if (rec.del) t = AIR;
+  else if (blockResolver) t = blockResolver(p[0], p[1], p[2], rec);
+  else if (typeof rec.v === 'number') t = rec.v;
+  if (t === null || t === undefined || !Number.isInteger(t)) { blockStats.waiting++; return; }   // 定義が届くまで待つ
+  applyCell(p[0], p[1], p[2], t, stateStr(p[0], p[1], p[2], t));
+}
+// 受け取った値と実際のワールドが違えば、受け取った値に直す（範囲は近くだけ）
+function fixBlocks() {
+  if (typeof player === 'undefined' || !player) return;
+  const pp = player.pos;
+  for (const k of known.values()) {
+    if (Math.abs(k.x - pp.x) > FIX_R || Math.abs(k.z - pp.z) > FIX_R || Math.abs(k.y - pp.y) > FIX_R) continue;
+    if (k.y <= BOTTOM) continue;
+    if (getBlock(k.x, k.y, k.z) === k.t) continue;
+    applyingRemote = true;
+    try { origSetBlock(k.x, k.y, k.z, k.t); } finally { applyingRemote = false; }
+    blockStats.fixed++;
+  }
+}
+setInterval(() => {
+  if (!connectedNow()) return;           // つながっているときだけ（オフラインの変更は送らない・直さない）
+  scanBlocks();
+  fixBlocks();
+}, SCAN_MS);
 
 // ============================================================
 // 受信（届いた変更を、ワールドとほかの機能へ反映）
@@ -120,15 +186,7 @@ window.setBlock = function (x, y, z, t) {
 function applyOp(rec) {
   if (!rec || typeof rec.key !== 'string') return;
   const key = rec.key;
-  if (key.startsWith('b:')) {
-    const p = key.slice(2).split(',').map(Number);
-    if (p.length !== 3 || p.some(n => !Number.isInteger(n))) return;
-    const t = blockResolver ? blockResolver(p[0], p[1], p[2], rec) : (rec.del ? AIR : rec.v);
-    if (t === null || t === undefined || !Number.isInteger(t)) return;
-    applyingRemote = true;
-    try { origSetBlock(p[0], p[1], p[2], t); } finally { applyingRemote = false; }
-    return;
-  }
+  if (key.startsWith('b:')) { applyRemoteCell(key, rec); return; }
   if (key === 'seed') return;
   const prefix = key.split(':')[0];
   const fn = handlers.get(prefix);
@@ -155,7 +213,9 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
   const proof = await proofOf(id, password);
   conn = { id, pw: password, name: name || '', tag: (tag || cfg.tag || '').trim(), seed: seed ?? null };
   if (conn.tag) { cfg.tag = conn.tag; saveCfg(); }
-  if (window.VoxelWorld && conn.seed != null) VoxelWorld.applySeed(conn.seed, !keepLocal);
+  known.clear();
+  // 参加するときは、この端末の編集データも空にする（シードが無いときは今のシードを使う）
+  if (window.VoxelWorld) VoxelWorld.applySeed(conn.seed != null ? conn.seed : VoxelWorld.getSeed(), !keepLocal);
 
   // 部屋に入るときは、この端末の道路・駅・ダイヤを、部屋の状態に合わせて入れ替える（作るときは除く）
   if (!keepLocal && window.VoxelSync && VoxelSync.resetLocal) VoxelSync.resetLocal();
@@ -189,13 +249,6 @@ async function createRoom(name, password, tag) {
   saveRoomEntry({ id, name, pw: password, tag: conn ? conn.tag : tag, seed });
   // 今のワールドと、道路・駅・ダイヤなどを、そのまま部屋に持ち込む
   if (window.VoxelSync && VoxelSync.announceAll) VoxelSync.announceAll();
-  const local = window.VoxelWorld ? VoxelWorld.buildSave().base.edits : [];
-  for (const [cx, cy, cz, list] of local) {
-    for (const [i, t] of list) {
-      const x = cx * 16 + (i & 15), y = cy * 16 + ((i >> 4) & 15), z = cz * 16 + ((i >> 8) & 15);
-      sendBlock(x, y, z, t);
-    }
-  }
   return id;
 }
 
@@ -278,7 +331,7 @@ function refreshShare() {
   const st = window.VoxelNet ? VoxelNet.stats() : { sent: 0, recv: 0, fail: 0 };
   const info = document.getElementById('mpInfo');
   if (info) info.innerHTML = conn
-    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）<br><small>通信部品 v${VoxelNet.version || 1}／送信${st.sent} / 受信${st.recv} / 失敗${st.fail}</small>` +
+    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）<br><small>ブロック：送${blockStats.sent}／受${blockStats.recv}（反映${blockStats.applied}）<br>通信部品 v${VoxelNet.version || 1}／送信${st.sent} / 受信${st.recv} / 失敗${st.fail}</small>` +
       (gameUrl() ? '' : '<br><b>※このアドレスは友達に渡せません。ゲームをインターネット上のアドレスから開いてください</b>')
     : '部屋には参加していません（一人で遊べます）。';
 }
@@ -428,10 +481,9 @@ window.VoxelMulti = {
   // カスタムブロックの定義の受け渡し用
   setBlockEncoder: fn => { blockEncoder = fn; },
   setBlockResolver: fn => { blockResolver = fn; },
-  applyBlock: (x, y, z, t) => {
-    applyingRemote = true;
-    try { origSetBlock(x, y, z, t); } finally { applyingRemote = false; }
-  },
+  applyBlock: (x, y, z, t) => applyCell(x, y, z, t, stateStr(x, y, z, t)),
+  setStateGetter: fn => { stateGetter = fn; },
+  blockStats: () => ({ ...blockStats }),
   // 接頭語（例 "road"）の変更を受け取る。値は rec.v、消えたときは rec.del が true
   onOp: (prefix, fn) => handlers.set(prefix, fn),
   // 任意の値を送る。キーは「接頭語:名前」（例 "road:p123"）。eph=true は記録に残さない一時的な情報
