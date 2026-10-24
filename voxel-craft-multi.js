@@ -1,53 +1,35 @@
-/* voxel-craft-multi.js (v2)  マルチプレイ（共同都市）のブラウザ側
- * 読み込み順：…→ save → multi    本体HTMLは変更しない
+/* voxel-craft-multi.js (v3)  マルチプレイ（共同都市）：サーバーなし版
+ * 読み込み順： … save → net → multi → custom → players → ui   本体HTMLは変更しない
  *
- * ★ 作った人が一度だけ書き換える場所：下の DEFAULT_SERVER（Deno Deploy のアドレス）
- *
- * 考え方（完全共同制）：
- *  ・部屋に管理者はいない。部屋ID＋パスワード（または共有リンク）を知っている人は、いつでも参加・編集できる。
- *  ・ブロックの置く・壊すは「b:x,y,z」というキーで同期する。
- *  ・ほかの機能は VoxelMulti.onOp("接頭語", 受け取り関数) と VoxelMulti.send("接頭語:名前", 値) で同期に参加できる。
- *  ・変更の受け取りは2秒ごとの問い合わせ。60秒ごとに全体も取り直して、取りこぼしを防ぐ。
+ * 通信は voxel-craft-net.js が担当（端末どうしを直接つなぐ。部屋ごとに最大8人）。
+ * このファイルは、部屋の作成・参加・共有リンク・保存した部屋の一覧・ブロックの同期を担当する。
  */
 (function () {
 'use strict';
 
-// ★★★ 作った人が一度だけ書き換える（例：https://voxel-city-xxxx.deno.dev）★★★
-const DEFAULT_SERVER = 'https://YOUR-PROJECT.deno.dev';
-
-const PROTOCOL = 1;
 const CFG_KEY = 'voxelcraft_multi';
+const ROOMS_KEY = 'voxelcraft_rooms_v1';
 const SHARE_PREFIX = 'vc1:';
-const FLUSH_MS = 150;
-const MAX_BATCH = 300;
-const POLL_ACTIVE_MS = 1500;     // 人が動いているときの問い合わせ間隔
-const POLL_IDLE_MS = 4000;       // 誰も動いていないときの問い合わせ間隔
-const ACTIVE_WINDOW_MS = 20000;
-let lastActive = 0;
+const FLUSH_MS = 0;
+const AIR = 0;
+const peer = Math.random().toString(36).slice(2, 10);   // 表示や一時情報の識別（通信の席とは別）
+
+let cfg = { tag: '' };
+let conn = null;                 // { id, pw, name, tag, seed }
+let joining = false;             // 参加直後、全体を受け取っている最中
+let applyingRemote = false;
+let pendingSeed = null;          // 共有リンクから来たシード
+const handlers = new Map();      // 接頭語 -> 受け取り関数
 let blockEncoder = null;         // (x,y,z,種類) -> 送る値（カスタムブロックは定義を添える）
 let blockResolver = null;        // (x,y,z,操作) -> 置く種類（まだ定義がなければ null）
-const FULL_SYNC_MS = 60000;
-const SERVER_IS_SET = !DEFAULT_SERVER.includes('YOUR-PROJECT');
-
-const peer = Math.random().toString(36).slice(2, 10);
-const AIR = 0;
-let cfg = { server: SERVER_IS_SET ? DEFAULT_SERVER : location.origin };
-let conn = null;                 // { id, pw, server, name, seq }
-let outbox = [];
-let flushT = null;
-let pollT = null, syncT = null, pollBusy = false;
-let applyingRemote = false;
-let joining = false;             // 参加時に部屋の状態を受け取っている最中か
-const ROOMS_KEY = 'voxelcraft_rooms_v1';
-const handlers = new Map();      // 接頭語 -> 受け取り関数
 let panelEl = null, statusEl = null, msgEl = null, msgT = 0;
+const origSetBlock = window.setBlock;
 
 // ============================================================
 // 補助
 // ============================================================
 function loadCfg() {
   try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) {}
-  if (!cfg.server) cfg.server = SERVER_IS_SET ? DEFAULT_SERVER : location.origin;
 }
 function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) {} }
 function toast(t) {
@@ -67,70 +49,72 @@ function decShare(s) {
   const raw = String(s || '').trim();
   const at = raw.indexOf(SHARE_PREFIX);
   if (at < 0) return null;
-  const t = raw.slice(at);
-  let b = t.slice(SHARE_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/');
+  let b = raw.slice(at + SHARE_PREFIX.length).replace(/-/g, '+').replace(/_/g, '/');
   while (b.length % 4) b += '=';
   try { return JSON.parse(decodeURIComponent(escape(atob(b)))); } catch (e) { return null; }
 }
-async function api(path, body, method) {
-  const base = conn ? conn.server : cfg.server;
-  let r;
+async function proofOf(roomId, pw) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('vc:' + roomId + ':' + pw));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function newRoomId() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const b = crypto.getRandomValues(new Uint8Array(10));
+  let s = '';
+  for (const x of b) s += chars[x % chars.length];
+  return s;
+}
+
+// 保存領域（端末のデータベース）。部屋の記録を、再読み込みや退出のあとも残す
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('voxelcraft-net', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbGet(k) {
   try {
-    r = await fetch(base + path, {
-      method: method || (body ? 'POST' : 'GET'),
-      headers: { 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined
+    const db = await idbOpen();
+    return await new Promise((res, rej) => {
+      const q = db.transaction('kv').objectStore('kv').get(k);
+      q.onsuccess = () => res(q.result);
+      q.onerror = () => rej(q.error);
     });
-  } catch (e) {
-    throw new Error('サーバーに接続できません。アドレスと通信を確認してください');
-  }
-  let j = {};
-  try { j = await r.json(); } catch (e) {}
-  if (!r.ok) throw new Error(j.error || ('サーバーエラー（' + r.status + '）'));
-  if (j.protocol !== undefined && j.protocol !== PROTOCOL) throw new Error('サーバーとプロトコルが違います');
-  return j;
+  } catch (e) { return undefined; }
 }
-
-// ============================================================
-// 送信（ブロックの置く・壊す、ほかの機能の変更）
-// ============================================================
-function enqueue(op) {
-  outbox.push(op);
-  if (!flushT) flushT = setTimeout(flush, FLUSH_MS);
-}
-async function flush() {
-  flushT = null;
-  if (!conn || !outbox.length) return;
-  const batch = outbox.splice(0, MAX_BATCH);
+async function idbSet(k, v) {
   try {
-    await api(`/api/rooms/${conn.id}/ops`, { password: conn.pw, ops: batch });
-  } catch (e) {
-    outbox = batch.concat(outbox);        // 失敗したら残して、あとで送り直す
-    setStatus('送信できません。つながるまで待っています…');
-    flushT = setTimeout(flush, 3000);
-    return;
-  }
-  if (outbox.length) flushT = setTimeout(flush, FLUSH_MS);
-}
-// 任意の値を部屋に書く（ほかの機能用）。del=true で消す
-// eph=true は履歴に残さない一時的な情報（位置など）。書き込みを少なくできる
-function send(key, value, del, eph) {
-  if (!conn) return;
-  enqueue({ key, v: del ? undefined : value, ts: Date.now(), peer, del: !!del, eph: !!eph });
+    const db = await idbOpen();
+    await new Promise((res, rej) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(v, k);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  } catch (e) {}
 }
 
+// ============================================================
+// 送信（ブロック・ほかの機能の変更）
+// ============================================================
+function send(key, value, del, eph) {
+  if (!conn || !window.VoxelNet || !VoxelNet.active()) return;
+  VoxelNet.send(key, value, del, eph);
+}
+function sendBlock(x, y, z, t) {
+  const v = blockEncoder ? blockEncoder(x, y, z, t) : t;
+  send('b:' + x + ',' + y + ',' + z, v, false, false);
+}
 // ブロックの置く・壊すを横取りして送る（ローカルの変更は普通どおり行う）
-const origSetBlock = window.setBlock;
 window.setBlock = function (x, y, z, t) {
   origSetBlock(x, y, z, t);
-  if (conn && !applyingRemote) {
-    const v = blockEncoder ? blockEncoder(x, y, z, t) : t;
-    enqueue({ key: 'b:' + x + ',' + y + ',' + z, v, ts: Date.now(), peer });
-  }
+  if (conn && !applyingRemote) sendBlock(x, y, z, t);
 };
 
 // ============================================================
-// 受信
+// 受信（届いた変更を、ワールドとほかの機能へ反映）
 // ============================================================
 function applyOp(rec) {
   if (!rec || typeof rec.key !== 'string') return;
@@ -150,107 +134,78 @@ function applyOp(rec) {
   if (fn) { try { fn(rec); } catch (e) { console.error(e); } }
 }
 
-// 2秒ごとに「前回から後の変更」を聞く
-async function pollOnce() {
-  if (!conn || pollBusy) return;
-  pollBusy = true;
-  const c = conn;
-  try {
-    const j = await api(`/api/rooms/${c.id}/poll`, { password: c.pw, since: c.seq });
-    if (conn !== c) return;
-    if (j.resync) { await fullResync(); return; }
-    for (const r of j.ops) {
-      applyOp(r);
-      if (r.seq > c.seq) c.seq = r.seq;
-    }
-    // 一時的な情報（位置など）：自分以外の項目が1つでもあれば「動いている」とみなす
-    const others = (j.eph || []).filter(r => r.key !== 'pl:' + PEER);
-    if (j.ops.length || others.length) lastActive = Date.now();
-    for (const r of (j.eph || [])) applyOp(r);
-    setStatus(`接続中：「${c.name}」`);
-  } catch (e) {
-    setStatus('通信できません。つながるまで待っています…');
-  } finally {
-    pollBusy = false;
-  }
-}
-// 部屋の状態をすべて受け取る（参加時・定期・取りこぼし時）
-async function fullResync() {
-  const c = conn;
-  if (!c || outbox.length) return;      // 送信待ちがあるときは、送ってから取り直す
-  const j = await api(`/api/rooms/${c.id}/join`, { password: c.pw });
-  applyingRemote = true;
-  try {
-    for (const [key, val] of j.kv) {
-      if (key === 'seed') continue;
-      applyOp({ key, v: val.v, del: val.del });
-    }
-  } finally { applyingRemote = false; }
-  if (conn === c) c.seq = j.seq;
-}
-// 問い合わせは「前の結果が返ってきてから」次を予約する（重なって送られないように）
-function schedulePoll(delay) {
-  clearTimeout(pollT);
-  pollT = setTimeout(async () => {
-    await pollOnce();
-    if (conn) schedulePoll(Date.now() - lastActive < ACTIVE_WINDOW_MS ? POLL_ACTIVE_MS : POLL_IDLE_MS);
-  }, delay);
-}
-function startStream() {
-  stopStream();
-  lastActive = 0;
-  schedulePoll(0);
-  syncT = setInterval(() => { fullResync().catch(() => {}); }, FULL_SYNC_MS);
-}
-function stopStream() {
-  clearTimeout(pollT);
-  clearInterval(syncT);
-  pollT = syncT = null;
-}
-
 // ============================================================
 // 部屋の作成・参加・退室
 // ============================================================
+function netHooks() {
+  return {
+    onEntry: rec => applyOp(rec),
+    onEph: rec => applyOp(rec),
+    onSnapDone: () => { joining = false; refreshShare(); toast('部屋の状態を受け取りました'); },
+    onLinks: () => refreshShare(),
+    save: kv => { if (conn) idbSet('room:' + conn.id, [...kv.entries()]); }
+  };
+}
+
+async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
+  disconnect(false);
+  if (!id || !password) throw new Error('部屋IDとパスワードを入力してください');
+  if (!window.VoxelNet) throw new Error('通信部品が読み込めていません');
+  const proof = await proofOf(id, password);
+  conn = { id, pw: password, name: name || '', tag: (tag || cfg.tag || '').trim(), seed: seed ?? null };
+  if (conn.tag) { cfg.tag = conn.tag; saveCfg(); }
+  if (window.VoxelWorld && conn.seed != null) VoxelWorld.applySeed(conn.seed, !keepLocal);
+
+  // 前に保存しておいた部屋の記録を、まず自分のワールドへ反映（一人でも続きから遊べる）
+  const saved = await idbGet('room:' + id);
+  const kv = new Map(Array.isArray(saved) ? saved : []);
+  joining = true;
+  applyingRemote = true;
+  try {
+    for (const [key, val] of kv) applyOp({ key, v: val.v, del: val.del, ts: val.ts, peer: val.peer });
+  } finally { applyingRemote = false; }
+
+  try {
+    await VoxelNet.start({ roomId: id, proof, tag: conn.tag, kv, creator: !!creator, hooks: netHooks() });
+  } catch (e) {
+    conn = null; joining = false;
+    throw e;
+  }
+  saveRoomEntry({ id, name: conn.name, pw: password, tag: conn.tag, seed: conn.seed });
+  refreshShare();
+  setStatus(`接続中：「${conn.name || '共同都市'}」`);
+  return id;
+}
+
 async function createRoom(name, password, tag) {
   if (password.length < 4) throw new Error('パスワードは4文字以上にしてください');
+  const id = newRoomId();
   const seed = window.VoxelWorld ? VoxelWorld.getSeed() : null;
-  const j = await api('/api/rooms', { name, password, seed }, 'POST');
-  await joinRoom(j.id, password, true, name, tag);
+  await joinRoom(id, password, true, name, tag, seed, true);
+  if (conn) conn.name = name;
+  saveRoomEntry({ id, name, pw: password, tag: conn ? conn.tag : tag, seed });
   // 今のワールドを、そのまま部屋に持ち込む
   const local = window.VoxelWorld ? VoxelWorld.buildSave().base.edits : [];
   for (const [cx, cy, cz, list] of local) {
     for (const [i, t] of list) {
       const x = cx * 16 + (i & 15), y = cy * 16 + ((i >> 4) & 15), z = cz * 16 + ((i >> 8) & 15);
-      enqueue({ key: 'b:' + x + ',' + y + ',' + z, v: blockEncoder ? blockEncoder(x, y, z, t) : t, ts: Date.now(), peer });
+      sendBlock(x, y, z, t);
     }
   }
-  return j.id;
+  return id;
 }
-async function joinRoom(id, password, keepLocal, name, tag) {
-  disconnect(false);
-  const j = await api(`/api/rooms/${id}/join`, { password }, 'POST');
-  conn = { id, pw: password, server: cfg.server, seq: 0, name: j.name || name || '', tag: (tag || cfg.tag || '').trim() };
-  if (conn.tag) { cfg.tag = conn.tag; }
-  if (window.VoxelWorld) VoxelWorld.applySeed(j.seed, !keepLocal);
-  joining = true;
-  applyingRemote = true;
-  try {
-    for (const [key, val] of j.kv) {
-      if (key === 'seed') continue;
-      applyOp({ key, v: val.v, del: val.del });
-    }
-  } finally { applyingRemote = false; }
-  conn.seq = j.seq;
+
+function disconnect(notify) {
+  if (!conn) return;
+  try { if (window.VoxelNet) VoxelNet.stop(); } catch (e) {}
+  conn = null;
   joining = false;
-  startStream();
-  setStatus(`接続中：「${conn.name}」`);
-  saveCfg();
-  saveRoomEntry({ id, name: j.name || name || '', server: cfg.server, pw: password, tag: conn.tag });
-  return j;
+  setStatus('オフライン（一人で遊べます）');
+  if (notify !== false) toast('部屋から退室しました');
 }
 
 // ============================================================
-// 保存した部屋・ゲーマータグの一覧（この端末のブラウザに保存）
+// 保存した部屋・ゲーマータグの一覧（この端末に保存）
 // ============================================================
 function loadRooms() {
   try { return JSON.parse(localStorage.getItem(ROOMS_KEY) || '[]'); } catch (e) { return []; }
@@ -281,8 +236,7 @@ function renderRooms() {
     join.className = 'btn'; join.style.width = 'auto'; join.style.marginTop = '0'; join.textContent = '参加';
     join.addEventListener('click', async () => {
       try {
-        cfg.server = r.server || cfg.server; saveCfg();
-        await joinRoom(r.id, r.pw, false, r.name, r.tag);
+        await joinRoom(r.id, r.pw, false, r.name, r.tag, r.seed);
         refreshShare(); toast('参加しました');
         close(); startIfNeeded();
       } catch (e) { toast(e.message); }
@@ -298,29 +252,30 @@ function tagVal() {
   const el = document.getElementById('mpTag');
   return el ? el.value.trim() : (cfg.tag || '');
 }
-function disconnect(notify) {
-  if (!conn) return;
-  stopStream();
-  conn = null;
-  outbox = [];
-  clearTimeout(flushT); flushT = null;
-  setStatus('オフライン（一人で遊べます）');
-  if (notify !== false) toast('部屋から退室しました');
-}
 
 // ============================================================
-// 共有リンク
+// 共有リンク（部屋ID・パスワード・シードを含む。端末の住所は含まない）
 // ============================================================
-// ゲームを開いているアドレス（https で開いている場合のみ。自分の端末の中だけのアドレスは渡せない）
 function gameUrl() {
   if (!/^https?:/.test(location.protocol)) return '';
   if (/^(localhost|127\.|192\.168\.|10\.)/.test(location.hostname)) return '';
   return location.origin + location.pathname;
 }
 function shareUrl() {
-  const code = encShare({ s: conn.server, id: conn.id, pw: conn.pw, n: conn.name });
+  const code = encShare({ id: conn.id, pw: conn.pw, n: conn.name, sd: conn.seed });
   const g = gameUrl();
   return g ? g + '#vc=' + code : code;
+}
+function refreshShare() {
+  const out = document.getElementById('mpShareOut');
+  if (out) out.value = conn ? shareUrl() : '';
+  const n = window.VoxelNet && VoxelNet.active() ? VoxelNet.linkCount() : 0;
+  setStatus(conn ? `接続中：「${conn.name || '共同都市'}」（${n}人）` : 'オフライン（一人で遊べます）');
+  const info = document.getElementById('mpInfo');
+  if (info) info.innerHTML = conn
+    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）` +
+      (gameUrl() ? '' : '<br><b>※このアドレスは友達に渡せません。ゲームをインターネット上のアドレスから開いてください</b>')
+    : '部屋には参加していません（一人で遊べます）。';
 }
 
 // ============================================================
@@ -363,7 +318,7 @@ function buildUI() {
     <div id="mpRooms"></div>
     <h3>部屋を作る</h3>
     <input id="mpNewName" placeholder="部屋の名前">
-    <input id="mpNewPw" placeholder="パスワード（8文字以上を推奨）" type="password" autocomplete="new-password">
+    <input id="mpNewPw" placeholder="パスワード（4文字以上・8文字以上推奨）" type="password" autocomplete="new-password">
     <button class="btn" id="mpCreate">部屋を作ってこのワールドを持ち込む</button>
     <p class="note">作った人がいなくても、部屋IDとパスワードを知っていれば誰でも参加・編集できます。</p>
     <h3>部屋に参加する</h3>
@@ -376,9 +331,7 @@ function buildUI() {
     <button class="btn sub" id="mpCopy">共有リンクをコピー</button>
     <button class="btn danger" id="mpLeave">退室する（一人で遊ぶ）</button>
     <button class="btn sub" id="mpClose">閉じる</button>
-    <h3>サーバー（通常は変更不要）</h3>
-    <input id="mpServer" placeholder="https://…deno.dev">
-    <p class="note">共有リンクには部屋IDとパスワードが入っています。信頼できる人だけに渡してください。</p>
+    <p class="note">共有リンクには部屋IDとパスワードが入っています。信頼できる人だけに渡してください。通信は端末どうしの直接接続のため、データ量の上限はありません。</p>
   </div>`;
   document.body.appendChild(panelEl);
   statusEl = document.getElementById('mpStatus');
@@ -396,13 +349,8 @@ function buildUI() {
   document.body.appendChild(openBtn);
 
   const $ = id => document.getElementById(id);
-  $('mpServer').value = cfg.server;
   $('mpTag').value = cfg.tag || '';
   $('mpTag').addEventListener('change', () => { cfg.tag = tagVal(); saveCfg(); });
-  $('mpServer').addEventListener('change', () => {
-    cfg.server = $('mpServer').value.trim().replace(/\/+$/, '') || (SERVER_IS_SET ? DEFAULT_SERVER : location.origin);
-    saveCfg();
-  });
   $('mpCreate').addEventListener('click', async () => {
     try {
       if (!tagVal()) { toast('ゲーマータグを入力してください'); return; }
@@ -410,6 +358,7 @@ function buildUI() {
       const id = await createRoom($('mpNewName').value.trim() || '共同都市', $('mpNewPw').value, tagVal());
       $('mpJoinId').value = id; $('mpJoinPw').value = $('mpNewPw').value;
       refreshShare();
+      renderRooms();
       toast('部屋を作りました。共有リンクを友達に渡してください');
       close(); startIfNeeded();
     } catch (e) { toast(e.message); }
@@ -417,15 +366,16 @@ function buildUI() {
   $('mpShare').addEventListener('change', () => {
     const d = decShare($('mpShare').value);
     if (!d) { toast('共有リンクの形式が違います'); return; }
-    $('mpServer').value = d.s || cfg.server; $('mpJoinId').value = d.id || ''; $('mpJoinPw').value = d.pw || '';
+    $('mpJoinId').value = d.id || ''; $('mpJoinPw').value = d.pw || '';
+    pendingSeed = d.sd ?? null;
   });
   $('mpJoin').addEventListener('click', async () => {
     try {
-      cfg.server = $('mpServer').value.trim().replace(/\/+$/, '') || cfg.server; saveCfg();
       if (!tagVal()) { toast('ゲーマータグを入力してください'); return; }
       cfg.tag = tagVal(); saveCfg();
-      await joinRoom($('mpJoinId').value.trim(), $('mpJoinPw').value, false, '', tagVal());
-      refreshShare();
+      await joinRoom($('mpJoinId').value.trim(), $('mpJoinPw').value, false, '', tagVal(), pendingSeed);
+      pendingSeed = null;
+      refreshShare(); renderRooms();
       toast('参加しました');
       close(); startIfNeeded();
     } catch (e) { toast(e.message); }
@@ -438,17 +388,6 @@ function buildUI() {
   $('mpLeave').addEventListener('click', () => { disconnect(); refreshShare(); });
   $('mpClose').addEventListener('click', close);
   refreshShare();
-}
-function refreshShare() {
-  const out = document.getElementById('mpShareOut');
-  if (!out) return;
-  out.value = conn ? shareUrl() : '';
-  setStatus(conn ? `接続中：「${conn.name}」` : 'オフライン（一人で遊べます）');
-  const info = document.getElementById('mpInfo');
-  if (info) info.innerHTML = conn
-    ? `部屋名：${esc(conn.name)}<br>部屋ID：<code>${esc(conn.id)}</code><br>サーバー：${esc(conn.server)}` +
-      (gameUrl() ? '' : '<br><b>※このアドレスは友達に渡せません。ゲームをインターネット上のアドレスから開いてください</b>')
-    : '部屋には参加していません（一人で遊べます）。';
 }
 function open() { refreshShare(); renderRooms(); panelEl.classList.add('show'); }
 function close() { panelEl.classList.remove('show'); }
@@ -463,8 +402,8 @@ function prefillFromHash() {
   if (!d) return;
   setTimeout(() => {
     const $ = id => document.getElementById(id);
-    $('mpServer').value = d.s || cfg.server; $('mpJoinId').value = d.id || ''; $('mpJoinPw').value = d.pw || '';
-    $('mpShare').value = '';
+    $('mpJoinId').value = d.id || ''; $('mpJoinPw').value = d.pw || '';
+    pendingSeed = d.sd ?? null;
     open();
     toast('共有リンクを読み込みました。「参加する」を押してください');
   }, 300);
@@ -474,24 +413,23 @@ function prefillFromHash() {
 // 公開する窓口（将来の機能はここに参加する）
 // ============================================================
 window.VoxelMulti = {
-  PROTOCOL,
   peer,
-  // カスタムブロックの定義の受け渡し用（voxel-craft-custom.js が使う）
+  tag: () => (conn ? conn.tag : cfg.tag) || '',
+  isJoining: () => joining,
+  open,
+  close,
+  connected: () => !!conn && !!window.VoxelNet && VoxelNet.active(),
+  roomId: () => conn ? conn.id : null,
+  // カスタムブロックの定義の受け渡し用
   setBlockEncoder: fn => { blockEncoder = fn; },
   setBlockResolver: fn => { blockResolver = fn; },
   applyBlock: (x, y, z, t) => {
     applyingRemote = true;
     try { origSetBlock(x, y, z, t); } finally { applyingRemote = false; }
   },
-  tag: () => (conn ? conn.tag : cfg.tag) || '',
-  isJoining: () => joining,
-  open,
-  close,
-  connected: () => !!conn,
-  roomId: () => conn ? conn.id : null,
   // 接頭語（例 "road"）の変更を受け取る。値は rec.v、消えたときは rec.del が true
   onOp: (prefix, fn) => handlers.set(prefix, fn),
-  // 任意の値を送る。キーは「接頭語:名前」（例 "road:p123"）
+  // 任意の値を送る。キーは「接頭語:名前」（例 "road:p123"）。eph=true は記録に残さない一時的な情報
   send,
   disconnect: () => disconnect()
 };

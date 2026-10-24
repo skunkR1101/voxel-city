@@ -465,7 +465,7 @@ function sendPresence() {
     yaw: player.yaw + (settings.flip ? Math.PI : 0),
     skin: mySkin,
     ts: Date.now()
-  });
+  }, false, true);   // eph：記録に残さない一時情報
 }
 
 // ============================================================
@@ -476,9 +476,21 @@ VoxelMulti.onOp('chat', onChat);
 VoxelMulti.onOp('sk', chunkAdd);
 
 buildChatUI();
-setInterval(sendPresence, PRESENCE_MS);
+// 動いているときは速めに、止まっているときはゆっくり送る（通信量を減らす）
+let lastPos = null, movedAt = 0;
+(function presenceLoop() {
+  sendPresence();
+  const moving = performance.now() - movedAt < 1000;
+  setTimeout(presenceLoop, moving ? 250 : 2000);
+})();
+setInterval(() => {
+  if (typeof player === "undefined") return;
+  const p = player.pos;
+  if (!lastPos || Math.abs(p.x - lastPos.x) + Math.abs(p.y - lastPos.y) + Math.abs(p.z - lastPos.z) > 0.01) movedAt = performance.now();
+  lastPos = { x: p.x, y: p.y, z: p.z };
+}, 100);
 window.addEventListener('pagehide', () => {
-  if (VoxelMulti.connected()) VoxelMulti.send(`pl:${PEER}`, undefined, true);
+  if (VoxelMulti.connected()) VoxelMulti.send(`pl:${PEER}`, undefined, true, true);
 });
 requestAnimationFrame(frame);
 
