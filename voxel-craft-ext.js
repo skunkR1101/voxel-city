@@ -394,6 +394,68 @@ window.disposeEntry = function (e) {
 };
 
 // 透明テクスチャの隣の面も描くため、カスタムブロックと標準ブロックは互いに面を隠さない
+// 発光ブロックの色（テクスチャの平均色）
+function glowColorOf(rt) {
+  if (rt.glowCol) return rt.glowCol;
+  let col = [1, 1, 1];
+  try {
+    const img = rt.tex && rt.tex.image;
+    if (img && (img.width || img.naturalWidth)) {
+      const c = document.createElement('canvas');
+      c.width = 8; c.height = 8;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0, 8, 8);
+      const px = g.getImageData(0, 0, 8, 8).data;
+      let r = 0, gg = 0, b = 0, n = 0;
+      for (let i = 0; i < px.length; i += 4) if (px[i + 3] > 128) { r += px[i]; gg += px[i + 1]; b += px[i + 2]; n++; }
+      if (n) col = [r / n / 255, gg / n / 255, b / n / 255];
+    }
+  } catch (e) {}
+  rt.glowCol = col;
+  return col;
+}
+// このチャンクの中にある発光ブロック（チャンクの外へは光を広げない）
+function glowSourcesOf(dd) {
+  const out = [];
+  if (!ext.defs.some(df => df.alpha === 'glow')) return out;
+  for (let li = 0; li < 4096; li++) {
+    const t = dd[li];
+    if (t < CUSTOM_BASE) continue;
+    const rt = defRT.get(t);
+    if (!rt || !rt.ready || !rt.def || rt.def.alpha !== 'glow') continue;
+    const col = glowColorOf(rt);
+    out.push({ x: (li & 15) + 0.5, y: ((li >> 4) & 15) + 0.5, z: ((li >> 8) & 15) + 0.5,
+      r: col[0], g: col[1], b: col[2], power: rt.def.glowPower || 1.5 });
+  }
+  return out;
+}
+// 頂点の色へ光を足す。格子点ごとに一度だけ計算して、頂点はそこから引く（発光の数が多くても軽い）
+function applyGlowLight(bufs, srcs) {
+  if (!srcs.length) return;
+  const N = 17;
+  const L = new Float32Array(N * N * N * 3);
+  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    let r = 0, g = 0, b = 0;
+    for (const sc of srcs) {
+      const dx = x - sc.x, dy = y - sc.y, dz = z - sc.z;
+      const k = sc.power / (1 + 0.05 * Math.sqrt(dx * dx + dy * dy + dz * dz));   // 遠くても消えにくい
+      r += sc.r * k; g += sc.g * k; b += sc.b * k;
+    }
+    const i = (x + y * N + z * N * N) * 3;
+    L[i] = r; L[i + 1] = g; L[i + 2] = b;
+  }
+  const cell = v => Math.min(16, Math.max(0, Math.round(v)));
+  for (const buf of bufs) {
+    const p = buf.p, c = buf.c;
+    for (let v = 0; v < p.length; v += 3) {
+      const i = (cell(p[v]) + cell(p[v + 1]) * N + cell(p[v + 2]) * N * N) * 3;
+      c[v] = Math.min(2.5, c[v] + L[i]);
+      c[v + 1] = Math.min(2.5, c[v + 1] + L[i + 1]);
+      c[v + 2] = Math.min(2.5, c[v + 2] + L[i + 2]);
+    }
+  }
+}
+
 window.buildMesh = function (e) {
   if (!e.gen) generateEntry(e);
   e.dirty = false;
@@ -477,6 +539,7 @@ window.buildMesh = function (e) {
     }
   }
 
+  applyGlowLight([SB, WB, PB, ...CB.values()], glowSourcesOf(d));
   if (SB.p.length) {
     const m = new THREE.Mesh(makeGeom(SB), solidMat);
     m.position.set(ox, oy, oz);
@@ -1606,9 +1669,15 @@ function closeSkinEditor() {
 // 新規ブロック作成（インポート）
 // ============================================================
 let draft = null;
+function glowOf(v) { return Math.min(5, Math.max(0.2, Number(v) || 1.5)); }
+function syncGlowUI() {
+  const w = document.getElementById('extGlowWrap');
+  if (w) w.style.display = (draft && draft.look === 'glow') ? 'inline-block' : 'none';
+}
 function newDraft() {
   return {
     kind: 'cube', name: '', category: ext.categories[0] || '未分類', colorable: false,
+    look: 'cut', glow: 1.5,
     texData: null, model: null, modelTex: null, template: null,
     orient: 'fixed',
     scaleMode: 'auto', customScale: 1, resolvedScale: null,
@@ -1634,6 +1703,9 @@ function fillImportForm() {
   document.getElementById('extImpCat').innerHTML = ext.categories.map(c =>
     `<option value="${esc(c)}" ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('');
   document.getElementById('extColorable').checked = d.colorable;
+  document.getElementById('extLook').value = d.look || 'cut';
+  document.getElementById('extGlow').value = String(glowOf(d.glow));
+  syncGlowUI();
   document.getElementById('extCubeSec').style.display = d.kind === 'cube' ? 'flex' : 'none';
   document.getElementById('extModelSec').style.display = d.kind === 'model' ? 'block' : 'none';
   document.getElementById('extCubePrev').src = d.texData || blankTexUrl();
@@ -1680,11 +1752,14 @@ async function saveDraft() {
     model: draft.kind === 'model' ? { format: draft.model.format, data: draft.model.data } : null,
     orient: draft.kind === 'model' ? draft.orient : undefined,
     scale: draft.kind === 'model' ? (draft.resolvedScale ?? 1) : undefined,
-    sounds: draft.sounds
+    sounds: draft.sounds,
+    alpha: draft.look || 'cut',
+    glowPower: draft.look === 'glow' ? glowOf(draft.glow) : undefined
   };
   ext.defs.push(def);
   if (!saveExt()) { ext.defs.pop(); return; }
   await registerDef(def);
+  if (window.VoxelFx && VoxelFx.apply) VoxelFx.apply(def);
   closeImport();
   renderInventory();
   toast(`「${name}」を登録しました`);
@@ -1848,6 +1923,16 @@ function buildDOM() {
       <input class="ext-input" id="extName" placeholder="ブロック名" style="flex:1;min-width:160px">
       <select class="ext-input" id="extImpCat"></select>
       <label><input type="checkbox" id="extColorable"> カラーブロック</label>
+      <label>見え方
+        <select class="ext-input" id="extLook">
+          <option value="cut">くり抜き（標準）</option>
+          <option value="blend">半透過（半透明の部分が透ける）</option>
+          <option value="glow">発光（光って周りを照らす）</option>
+        </select>
+      </label>
+      <label id="extGlowWrap" style="display:none">明るさ
+        <input class="ext-input" id="extGlow" type="number" min="0.2" max="5" step="0.1" value="1.5" style="width:70px">
+      </label>
     </div>
     <div id="extCubeSec" class="ext-row" style="margin-top:10px">
       <button class="ext-btn" id="extSkinOpen">スキンを描く・編集</button>
@@ -2037,6 +2122,8 @@ function wire() {
   document.getElementById('extName').addEventListener('input', e => { draft.name = e.target.value; });
   document.getElementById('extImpCat').addEventListener('change', e => { draft.category = e.target.value; });
   document.getElementById('extColorable').addEventListener('change', e => { draft.colorable = e.target.checked; });
+  document.getElementById('extLook').addEventListener('change', e => { draft.look = e.target.value; syncGlowUI(); });
+  document.getElementById('extGlow').addEventListener('change', e => { draft.glow = glowOf(e.target.value); e.target.value = String(draft.glow); });
   document.getElementById('extOrient').addEventListener('change', e => { draft.orient = e.target.value; });
   document.getElementById('extScaleMode').addEventListener('change', async e => {
     draft.scaleMode = e.target.value;
@@ -2272,7 +2359,7 @@ init();
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
 window.VoxelExt = {
   CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
-  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef
+  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals
 };
 
 })();

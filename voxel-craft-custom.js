@@ -47,7 +47,8 @@ function payloadOf(def) {
     model: def.model || null,
     orient: def.orient ?? null,
     scale: def.scale ?? null,
-    alpha: def.alpha || 'cut'
+    alpha: def.alpha || 'cut',
+    glow: def.alpha === 'glow' ? (def.glowPower ?? 1.5) : null
   });
 }
 const hashCache = new WeakMap();   // 定義の物（オブジェクト）ごとに一度だけ計算
@@ -153,7 +154,7 @@ async function adoptDef(H, p) {
     id, name: String(p.name || 'カスタムブロック'), kind: p.kind === 'model' ? 'model' : 'cube',
     category: (ext.categories && ext.categories[0]) || '未分類', colorable: !!p.colorable,
     texData: p.texData || null, model: p.model || null,
-    orient: p.orient ?? undefined, scale: p.scale ?? undefined, alpha: p.alpha || 'cut',
+    orient: p.orient ?? undefined, scale: p.scale ?? undefined, alpha: p.alpha || 'cut', glowPower: p.glow ?? undefined,
     sounds: { break: { type: 'none' }, place: { type: 'none' } }
   };
   ext.defs.push(def);

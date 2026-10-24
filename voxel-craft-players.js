@@ -45,8 +45,27 @@ function publishSkin() {
 function rebuildPayload() {
   if (!curModel && !curTex) myPayload = null;
   else myPayload = { kind: curModel ? curModel.kind : 'default', text: curModel ? curModel.text : '', tex: curTex };
+  saveMySkin();
   publishSkin();
 }
+// 自分のスキンを端末に保存（再読み込み・入り直しのあとも残す）
+const MYSKIN_KEY = 'voxelcraft_myskin_v1';
+function saveMySkin() {
+  try {
+    if (!curModel && !curTex) localStorage.removeItem(MYSKIN_KEY);
+    else localStorage.setItem(MYSKIN_KEY, JSON.stringify({ model: curModel, tex: curTex }));
+  } catch (e) { if (typeof toast === 'function') toast('スキンを保存できませんでした（画像やモデルが大きすぎます）'); }
+}
+function loadMySkin() {
+  try {
+    const s = JSON.parse(localStorage.getItem(MYSKIN_KEY) || 'null');
+    if (!s) return;
+    curModel = s.model || null;
+    curTex = s.tex || null;
+    myPayload = (!curModel && !curTex) ? null : { kind: curModel ? curModel.kind : 'default', text: curModel ? curModel.text : '', tex: curTex };
+  } catch (e) {}
+}
+loadMySkin();
 function readAs(file, mode) {
   return new Promise((res, rej) => {
     const r = new FileReader();

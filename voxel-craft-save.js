@@ -18,6 +18,7 @@
 const FORMAT = 'voxelcraft-world';
 const VERSION = 1;
 const SEED_KEY = 'voxelcraft_world_seed';
+let autoDirty = false;             // ローカルの世界が変わり、まだ自動保存していない
 const IDB_NAME = 'voxelcraft', IDB_STORE = 'kv', PENDING = 'pendingWorld';
 
 // 本体の関数（定義は本体HTML）
@@ -97,6 +98,8 @@ function applySeed(v, fresh) {
     else localStorage.setItem(SEED_KEY, String(seedNum));
   } catch (e) {}
   if (fresh) editsByChunk.clear();
+  autoDirty = true;
+  if (fresh) window.dispatchEvent(new CustomEvent('voxelworld:fresh', { detail: { room: isRoomOn() } }));
   regenerate();
 }
 
@@ -285,14 +288,49 @@ function hookStart() {
 }
 
 // ============================================================
+// ローカルの世界の自動保存（退出して入り直しても、続きから）
+//  ・部屋に入っている間は、ローカルの世界は保存しない（部屋の世界は部屋ごとに保存される）
+//  ・部屋を出たら、入る前のローカルの世界に戻す
+// ============================================================
+const AUTO_KEY = 'autosave';
+function isRoomOn() { return !!(window.VoxelMulti && VoxelMulti.roomId && VoxelMulti.roomId()); }
+(function () {
+  const sb = window.setBlock;
+  window.setBlock = function (x, y, z, t) { sb(x, y, z, t); if (!isRoomOn()) autoDirty = true; };
+})();
+let autoSaving = false;
+async function autoSaveNow() {
+  if (!autoDirty || isRoomOn() || autoSaving) return;
+  autoSaving = true;
+  try {
+    const s = buildSave();
+    await idbPut(AUTO_KEY, { seed: seedNum, edits: s.base.edits });
+    autoDirty = false;
+  } catch (e) {} finally { autoSaving = false; }
+}
+async function restoreAuto() {
+  let a = null;
+  try { a = await idbGet(AUTO_KEY); } catch (e) {}
+  editsByChunk.clear();
+  if (a) for (const [cx, cy, cz, list] of a.edits || []) editsByChunk.set(ckey(cx, cy, cz), new Map(list));
+  applySeed(a ? a.seed : localStorage.getItem(SEED_KEY), false);
+  autoDirty = false;
+}
+let wasInRoom = false;
+setInterval(() => {
+  const now = isRoomOn();
+  if (wasInRoom && !now) restoreAuto();     // 部屋を出た → ローカルの世界に戻す
+  wasInRoom = now;
+  autoSaveNow();
+}, 1500);
+window.addEventListener('pagehide', () => { autoSaveNow(); });
+
+// ============================================================
 // 初期化
 // ============================================================
 async function init() {
   const hadPending = await restorePending().catch(() => false);
-  if (!hadPending) {
-    const saved = localStorage.getItem(SEED_KEY);
-    applySeed(saved === null ? null : saved, false);
-  }
+  if (!hadPending) await restoreAuto();
   buildUI(hadPending);
   showTitle();
   hookStart();

@@ -51,10 +51,20 @@ function loadPeerJs() {
   });
 }
 
+// 通信の経路（STUN：直接つなぐ。TURN：直接つながらないときの中継。TURN は設定画面で任意に入れる）
+const TURN_KEY = 'voxelcraft_turn_v1';
+function iceConfig() {
+  const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+  try {
+    const t = JSON.parse(localStorage.getItem(TURN_KEY) || 'null');
+    if (t && t.url) iceServers.push({ urls: t.url, username: t.user || undefined, credential: t.pass || undefined });
+  } catch (e) {}
+  return { iceServers, iceCandidatePoolSize: 4 };
+}
 // 席を1つ取る。取れなければ null（その席は使用中）
 function tryOpen(id) {
   return new Promise((res, rej) => {
-    const p = new window.Peer(id, { debug: 0 });
+    const p = new window.Peer(id, { debug: 0, config: iceConfig() });
     let done = false;
     p.on('open', () => { if (!done) { done = true; res(p); } });
     p.on('error', e => {
