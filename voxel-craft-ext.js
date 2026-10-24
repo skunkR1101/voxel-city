@@ -1235,6 +1235,14 @@ function setSlotVisual(i) {
   const el = slotEls[i];
   const sw = el && el.querySelector('.sw');
   if (!sw) return;
+  if (!id) {                                  // 空欄のスロット
+    sw.style.background = 'transparent';
+    sw.style.border = '2px dashed rgba(255,255,255,.45)';
+    sw.textContent = '';
+    sw.style.display = '';
+    return;
+  }
+  sw.style.border = '';
   if (isTool(id)) {
     sw.style.background = '#2b3a4a';
     sw.textContent = TOOLS[id].icon;
@@ -1292,15 +1300,18 @@ function renderToolsSection() {
       <button class="ext-btn ${o.air ? 'on' : 'sub'}" data-act="air">空気も貼る</button>
     </div>`;
 }
+// 標準ブロック（インベントリから取り出せる。岩盤と水は除く）
+const DEFAULT_IDS = [1, 2, 3, 4, 5, 6, 8, 9, 11, 12];
 function renderInventory() {
   const catsEl = document.getElementById('extCats');
   const gridEl = document.getElementById('extGrid');
   if (!catsEl || !gridEl) return;
 
-  const all = ['全て', '道具', ...ext.categories];
+  const all = ['全て', '道具', '標準', ...ext.categories];
   catsEl.innerHTML = all.map(c => {
     let n;
-    if (c === '全て') n = ext.defs.length + 5;
+    if (c === '全て') n = ext.defs.length + 5 + DEFAULT_IDS.length;
+    else if (c === '標準') n = DEFAULT_IDS.length;
     else if (c === '道具') n = 5;
     else n = ext.defs.filter(d => d.category === c).length;
     return `<div class="ext-cat ${c === ext.curCat ? 'sel' : ''}" data-c="${esc(c)}"><span>${esc(c)}</span><span>${n}</span></div>`;
@@ -1308,7 +1319,7 @@ function renderInventory() {
   `<div class="ext-row" style="margin-top:6px">
      <button class="ext-btn sub" data-act="addcat">＋ カテゴリ</button>
    </div>` +
-  (ext.curCat !== '全て' && ext.curCat !== '道具' && ext.curCat !== '未分類'
+  (ext.curCat !== '全て' && ext.curCat !== '道具' && ext.curCat !== '標準' && ext.curCat !== '未分類'
     ? `<div class="ext-row" style="margin-top:4px">
          <button class="ext-btn sub" data-act="rencat">名前変更</button>
          <button class="ext-btn danger" data-act="delcat">削除</button>
@@ -1317,7 +1328,7 @@ function renderInventory() {
   renderToolsSection();
 
   const items = ext.defs.filter(d => ext.curCat === '全て' || d.category === ext.curCat);
-  gridEl.innerHTML = items.length ? items.map(d => {
+  const customHtml = items.map(d => {
     const rt = defRT.get(d.id);
     const thumb = thumbOf(d);
     const opts = ext.categories.map(c => `<option value="${esc(c)}" ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('');
@@ -1332,7 +1343,16 @@ function renderInventory() {
         <button class="ext-btn danger" data-del="${d.id}">削除</button>
       </div>
     </div>`;
-  }).join('') : (ext.curCat === '道具' ? '' : '<p class="note">このカテゴリにブロックはありません。「＋ 新規ブロック」から作成できます。</p>');
+  }).join('');
+  const defHtml = (ext.curCat === '全て' || ext.curCat === '標準') ? DEFAULT_IDS.map(id => `<div class="ext-item">
+      <div style="height:72px;border-radius:6px;background:${BLOCK_INFO[id].color}"></div>
+      <div>${esc(BLOCK_INFO[id].name)}</div>
+      <div style="font-size:11px;color:#9fb3c8">標準ブロック</div>
+      <div class="ext-row" style="justify-content:center;margin-top:4px">
+        <button class="ext-btn" data-use="${id}">使う</button>
+      </div>
+    </div>`).join('') : '';
+  gridEl.innerHTML = (defHtml + customHtml) || (ext.curCat === '道具' ? '' : '<p class="note">このカテゴリにブロックはありません。「＋ 新規ブロック」から作成できます。</p>');
 }
 function renderInventoryIfOpen() {
   if (panelOpen === 'extInv') renderInventory();
@@ -1344,7 +1364,7 @@ function useSlotItem(id) {
   selectSlot(selIdx);
 }
 function useItem(id) {
-  if (!defRT.get(id)) return;
+  if (!defRT.get(id) && !DEFAULT_IDS.includes(id)) return;
   useSlotItem(id);
   toast(`「${BLOCK_INFO[id].name}」をホットバーに入れました`);
   closePanel();

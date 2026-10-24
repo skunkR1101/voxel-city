@@ -6,7 +6,7 @@
 (function () {
 'use strict';
 // ext.js の内部の名前を、window.VoxelExt から受け取る（ext.js は外から見えないため）
-const { CUSTOM_BASE, ext, blockState, keyOf, nextId, saveExt, renderInventory, registerDef } = window.VoxelExt;
+const { CUSTOM_BASE, ext, defRT, blockState, keyOf, nextId, saveExt, renderInventory, registerDef } = window.VoxelExt;
 
 const CHUNK = 16000;               // 定義を分けて送る1かけらの文字数（1通の上限に収まる大きさ）
 const AIR_ = 0;
@@ -58,6 +58,47 @@ function defHash(def) {
   return h;
 }
 function defByHash(H) { return ext.defs.find(d => defHash(d) === H) || null; }
+
+// 中身だけで同じかを判定する鍵（古い版で作られた定義とも一致するように、欠けている項目は既定値にそろえる）
+function contentKey(o) {
+  const alpha = o.alpha || 'cut';
+  return JSON.stringify({
+    name: String(o.name || ''), kind: o.kind === 'model' ? 'model' : 'cube', colorable: !!o.colorable,
+    texData: o.texData || null, model: o.model || null, orient: o.orient ?? null, scale: o.scale ?? null,
+    alpha, glow: alpha === 'glow' ? (o.glowPower ?? o.glow ?? 1.5) : null
+  });
+}
+function defByContent(o) {
+  const k = contentKey(o);
+  return ext.defs.find(d => contentKey(d) === k) || null;
+}
+
+// 同じ中身のブロックが複数あれば1つにまとめる（先に作られた方を残す）
+// 残した方のIDへ、ワールドの配置・ホットバーも付け替える
+function dedupeDefs() {
+  const keep = new Map();      // 中身の鍵 -> 残すID
+  const remap = new Map();     // 消すID -> 残すID
+  for (const d of ext.defs) {
+    const k = contentKey(d);
+    if (keep.has(k)) remap.set(d.id, keep.get(k));
+    else keep.set(k, d.id);
+  }
+  if (!remap.size) return false;
+  for (let i = ext.defs.length - 1; i >= 0; i--) {
+    if (remap.has(ext.defs[i].id)) { const gone = ext.defs.splice(i, 1)[0]; if (defRT) defRT.delete(gone.id); }
+  }
+  if (typeof editsByChunk !== "undefined") {
+    for (const ed of editsByChunk.values()) {
+      for (const [i, t] of ed) if (remap.has(t)) ed.set(i, remap.get(t));
+    }
+  }
+  if (typeof HOTBAR !== "undefined") for (let i = 0; i < HOTBAR.length; i++) if (remap.has(HOTBAR[i])) HOTBAR[i] = remap.get(HOTBAR[i]);
+  saveExt();
+  if (window.VoxelWorld && VoxelWorld.getSeed) VoxelWorld.applySeed(VoxelWorld.getSeed(), false);
+  if (typeof renderInventory === 'function') renderInventory();
+  return true;
+}
+setInterval(() => { try { dedupeDefs(); } catch (e) { console.error(e); } }, 2000);
 
 // ============================================================
 // 3. 送る側：定義（中身）を部屋へ送り、ブロックには「しるし＋状態」だけを載せる
@@ -146,7 +187,7 @@ async function tryAdopt(H) {
 }
 
 async function adoptDef(H, p) {
-  const have = defByHash(H);
+  const have = defByHash(H) || defByContent(p);   // 同じ中身が既にあれば、新しく増やさない
   if (have) return have.id;
   const id = nextId();
   if (id < 0) { if (window.VoxelWorld) VoxelWorld.toast('カスタムブロックの上限に達したため、受け取れませんでした'); return -1; }

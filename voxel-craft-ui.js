@@ -227,6 +227,9 @@ window.VoxelUI = { openLayout: openLayoutPanel, closeLayout: closeLayoutPanel, s
 // 5. ホットバー：スティックで移動中でも、押した瞬間に持ち替える
 //    （押した指が移動用のスティックとして取られないよう、先に処理して止める）
 // ============================================================
+// 空欄（アイテムなし）のスロット。ホットバーを空にできるように、ID 0 を定義する
+if (!BLOCK_INFO[0]) BLOCK_INFO[0] = { name: '空欄', color: 'transparent' };
+
 (function () {
   const hb = document.getElementById('hotbar');
   if (!hb) return;
@@ -235,14 +238,50 @@ window.VoxelUI = { openLayout: openLayoutPanel, closeLayout: closeLayoutPanel, s
     if (!slot) return -1;
     return [...hb.children].indexOf(slot);
   };
+  // スロットを空欄にする（ダブルクリック／ダブルタップ用）
+  const clearSlot = (i) => {
+    HOTBAR[i] = 0;
+    if (window.VoxelExt && VoxelExt.refreshHotbarVisuals) VoxelExt.refreshHotbarVisuals();
+    selectSlot(i);
+  };
+  // 2回のタップが350ms以内に同じスロットなら空欄にする
+  let lastI = -1, lastT = 0;
+  const countTap = (i) => {
+    const now = Date.now();
+    if (i === lastI && now - lastT < 350) { lastI = -1; clearSlot(i); }
+    else { lastI = i; lastT = now; }
+  };
   const pick = (e) => {
     const i = slotIndexOf(e.target);
     if (i < 0 || typeof selectSlot !== 'function') return false;
     selectSlot(i);
-    return true;
+    return i;
   };
-  hb.addEventListener('touchstart', e => { if (pick(e)) e.stopPropagation(); }, { capture: true, passive: true });
-  hb.addEventListener('pointerdown', e => { if (e.pointerType !== 'mouse') pick(e); }, { capture: true });
+  hb.addEventListener('touchstart', e => {
+    const i = pick(e);
+    if (i !== false) { countTap(i); e.stopPropagation(); }
+  }, { capture: true, passive: true });
+  hb.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;
+    const i = pick(e);
+    // タッチは touchstart 側で数えるため、ペンだけここで数える
+    if (i !== false && e.pointerType === 'pen') countTap(i);
+  }, { capture: true });
+  // マウスのダブルクリック
+  hb.addEventListener('dblclick', e => {
+    const i = slotIndexOf(e.target);
+    if (i >= 0) clearSlot(i);
+  });
+})();
+
+// 空欄のスロットでは設置しない（道路・線路の敷設を含む、外側でのガード）
+(function () {
+  const origPlace = window.doPlace;
+  if (typeof origPlace !== 'function') return;
+  window.doPlace = function () {
+    if (HOTBAR[selIdx] === 0) return;
+    return origPlace.apply(this, arguments);
+  };
 })();
 
 // ============================================================

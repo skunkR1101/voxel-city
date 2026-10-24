@@ -803,6 +803,8 @@ function updateMidBtn() {
   if (!mb) return;
   const show = !!rs.mode && started && !menuOpen && !rdOpen && !paused;
   mb.style.display = show ? 'block' : 'none';
+  const xb = document.getElementById('rdExitBtn');
+  if (xb) xb.style.display = show ? 'block' : 'none';
   mb.classList.toggle('on', rs.nextMid);
   mb.classList.toggle('set', !!rs.mid && !rs.nextMid);
   mb.textContent = rs.nextMid ? '中間点を置く' : (rs.mid ? '中間点 ✓' : '中間点');
@@ -1042,6 +1044,9 @@ function buildUI() {
   #rdMidBtn{position:fixed;right:12px;top:200px;z-index:8;display:none;background:rgba(0,0,0,.6);color:#fff;
     border:2px solid #fff;border-radius:12px;padding:14px 18px;font-size:16px;font-weight:bold;
     touch-action:manipulation;cursor:pointer;min-width:120px;text-align:center}
+  #rdExitBtn{position:fixed;right:12px;top:272px;z-index:8;display:none;background:rgba(120,30,30,.85);color:#fff;
+    border:2px solid #ffb3b3;border-radius:12px;padding:12px 16px;font-size:15px;font-weight:bold;
+    touch-action:manipulation;cursor:pointer;min-width:120px;text-align:center}
   #rdMidBtn.on{background:#2f7a3c;border-color:#bff5c9}
   #rdMidBtn.set{background:#6a5a1e;border-color:#ffe38a}
   #rdHud{position:fixed;left:50%;bottom:118px;transform:translateX(-50%);z-index:7;background:rgba(0,0,0,.6);
@@ -1084,6 +1089,16 @@ function buildUI() {
   mb.addEventListener('touchstart', midTap, { passive: false });
   mb.addEventListener('touchend', e => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
   mb.addEventListener('click', e => { e.stopPropagation(); toggleMid(); });
+
+  // 敷設モード終了（押すと通常のブロック配置に戻る）
+  const xb = document.createElement('button');
+  xb.id = 'rdExitBtn';
+  xb.textContent = '敷設モード終了';
+  document.body.appendChild(xb);
+  const exitTap = e => { e.preventDefault(); e.stopPropagation(); if (rs.mode) setMode(rs.mode); updateMidBtn(); };
+  xb.addEventListener('touchstart', exitTap, { passive: false });
+  xb.addEventListener('touchend', e => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+  xb.addEventListener('click', e => { e.stopPropagation(); if (rs.mode) setMode(rs.mode); updateMidBtn(); });
 
   const hud = document.createElement('div');
   hud.id = 'rdHud';
