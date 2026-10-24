@@ -1,12 +1,15 @@
-/* voxel-craft-net.js (v1)  サーバーなしの通信（端末どうしを直接つなぐ）
+/* voxel-craft-net.js (v2)  サーバーなしの通信（端末どうしを直接つなぐ）
  *
  * 仕組み
  *  ・部屋ごとに「席」を最大8つ用意する。席の番号つきの名前（ID）を、公開の仲介サービス（PeerJS）で取る。
  *    席に座った人どうしが直接つながる（WebRTC）。仲介は最初の接続の手配だけに使い、データは通らない。
- *  ・変更は全員に届く。届かない相手へは、間にいる人が中継する（同じ変更は一度だけ処理する）。
+ *  ・相手と複数の接続ができても、開いているすべての接続に送る（どれか1本が切れても届く）。
+ *    同じ変更が複数の経路で届いても、一度だけ処理する。
+ *  ・変更は全員に届く。届かない相手へは、間にいる人が中継する。
  *  ・同じ場所を同時に変えたら、時刻の新しい方が勝つ。
- *  ・新しく入った人は、つながった人から部屋の全体（変更の記録）をもらう。
- *  ・各自のブラウザが記録を持つので、作った人がいなくても続けられる。
+ *  ・新しく入った人、または再接続した人は、つながった人から部屋の全体をもらう。
+ *  ・1通の大きさは上限以下に分けて送る（ブラウザの通信は1通約256KBまで）。
+ *  ・20秒ごとに全体の印（件数とハッシュ）を比べ、ずれが続けば全体を取り直す。
  *
  * 注意
  *  ・直接つながらない回線（一部のスマホ回線など）では、接続できないことがある。
@@ -17,16 +20,18 @@
 
 const PEERJS_URL = 'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js';
 const MAX_SLOTS = 8;
-const MSG_MAX = 60000;           // 1通の大きさの上限（文字数）。ブラウザの通信は約256KBが上限
-const SUM_MS = 20000;            // 全体の一致を確かめる間隔
+const MSG_MAX = 60000;           // 1通の大きさの上限（文字数）
 const FLUSH_MS = 120;            // 変更をまとめて送る間隔
-const stats = { sent: 0, recv: 0, fail: 0, sumMis: 0 };
-let kvVer = 0, sumCache = null;
 const SEEN_MAX = 20000;
 const RETRY_MS = 10000;
 const SAVE_MS = 3000;
+const SUM_MS = 20000;            // 全体の一致を確かめる間隔
+const RESYNC_MS = 60000;         // 再接続のとき全体を取り直すまでの最短間隔
 
+const stats = { sent: 0, recv: 0, fail: 0, sumMis: 0 };
 let S = null;                    // 現在の接続（1つだけ）
+let linkSeq = 0;
+let kvVer = 0, sumCache = null;
 
 function newer(a, b) {
   if (!b) return true;
@@ -62,6 +67,11 @@ function tryOpen(id) {
   });
 }
 
+function safeSend(conn, msg) {
+  try { conn.send(msg); stats.sent++; }
+  catch (e) { stats.fail++; console.error('送信できませんでした', e && e.message); }
+}
+
 function applyEntry(s, key, val) {
   const cur = s.kv.get(key);
   if (cur && !newer(val, cur)) return false;
@@ -70,29 +80,28 @@ function applyEntry(s, key, val) {
   return true;
 }
 
+// 相手ごとに「つながっている人数」を数える（同じ相手の複数の接続は1人と数える）
+function peerCount(s) {
+  const ids = new Set();
+  for (const L of s.links.values()) if (L.ok) ids.add(L.pid);
+  return ids.size;
+}
 function notifyLinks(s) {
-  let n = 0;
-  for (const L of s.links.values()) if (L.ok) n++;
-  s.hooks.onLinks && s.hooks.onLinks(n + 1);   // 自分を含む人数
+  s.hooks.onLinks && s.hooks.onLinks(peerCount(s) + 1);   // 自分を含む人数
 }
 
 function sendHello(s, L) {
   if (!L.conn.open) return;
-  L.conn.send({ t: 'hello', proof: s.proof, tag: s.tag });
+  safeSend(L.conn, { t: 'hello', proof: s.proof, tag: s.tag });
   L.helloSent = true;
 }
 
 function attach(s, conn) {
-  const id = conn.peer;
-  const old = s.links.get(id);
-  if (old && old.conn !== conn) { try { old.conn.close(); } catch (_) {} }
-  const L = { conn, ok: false, name: '', helloSent: false, t: Date.now() };
-  s.links.set(id, L);
+  const L = { id: ++linkSeq, pid: conn.peer, conn, ok: false, name: '', helloSent: false, t: Date.now(), mis: 0 };
+  s.links.set(L.id, L);
   conn.on('open', () => { if (!L.helloSent) sendHello(s, L); });
-  conn.on('data', m => onData(s, L, m));
-  const drop = () => {
-    if (s.links.get(id) === L) { s.links.delete(id); notifyLinks(s); }
-  };
+  conn.on('data', m => { try { onData(s, L, m); } catch (e) { console.error(e); } });
+  const drop = () => { if (s.links.delete(L.id)) notifyLinks(s); };
   conn.on('close', drop);
   conn.on('error', drop);
   if (conn.open) sendHello(s, L);
@@ -103,7 +112,7 @@ function onData(s, L, m) {
   if (m.t === 'hello') {
     if (m.proof !== s.proof) {                 // 合言葉が違う相手は切る
       try { L.conn.close(); } catch (_) {}
-      if (s.links.get(L.conn.peer) === L) s.links.delete(L.conn.peer);
+      s.links.delete(L.id);
       return;
     }
     const first = !L.ok;
@@ -112,7 +121,11 @@ function onData(s, L, m) {
     if (!L.helloSent) sendHello(s, L);
     if (first) {
       notifyLinks(s);
-      if (!s.haveSnap) L.conn.send({ t: 'need' });
+      const now = Date.now();
+      if (!s.haveSnap || now - (s.lastNeed || 0) > RESYNC_MS) {
+        s.lastNeed = now;
+        safeSend(L.conn, { t: 'need' });       // 全体をもらう（初めて入った人・再接続した人）
+      }
     }
     return;
   }
@@ -122,15 +135,10 @@ function onData(s, L, m) {
     case 'sum': checkSum(s, L, m); break;
     case 'need': sendSnapshot(s, L); break;
     case 'snap': applySnapshot(s, m); break;
-    case 'ops': onOps(s, m.ops, L.conn.peer); break;
+    case 'ops': onOps(s, m.ops, L.pid); break;
   }
 }
 
-function sendSnapshot(s, L) {
-  const parts = packBy([...s.kv.entries()], MSG_MAX);
-  if (!parts.length) { safeSend(L.conn, { t: 'snap', i: 0, last: true, e: [] }); return; }
-  parts.forEach((p, i) => safeSend(L.conn, { t: 'snap', i, last: i === parts.length - 1, e: p }));
-}
 // 1通の大きさを上限以下に保って、配列を分ける
 function packBy(items, max) {
   const out = []; let cur = [], size = 2;
@@ -142,9 +150,11 @@ function packBy(items, max) {
   if (cur.length) out.push(cur);
   return out;
 }
-function safeSend(conn, msg) {
-  try { conn.send(msg); stats.sent++; }
-  catch (e) { stats.fail++; console.error('送信できませんでした', e && e.message); }
+
+function sendSnapshot(s, L) {
+  const parts = packBy([...s.kv.entries()], MSG_MAX);
+  if (!parts.length) { safeSend(L.conn, { t: 'snap', i: 0, last: true, e: [] }); return; }
+  parts.forEach((p, i) => safeSend(L.conn, { t: 'snap', i, last: i === parts.length - 1, e: p }));
 }
 
 function applySnapshot(s, m) {
@@ -161,13 +171,13 @@ function applySnapshot(s, m) {
   }
 }
 
-function onOps(s, ops, from) {
+function onOps(s, ops, fromPid) {
   if (!Array.isArray(ops)) return;
   const fwd = [];
   for (const op of ops) {
     if (!op || typeof op.key !== 'string' || typeof op.ts !== 'number') continue;
     const id = op.peer + '|' + op.ts + '|' + op.key + '|' + (op.del ? 1 : 0);
-    if (s.seen.has(id)) continue;
+    if (s.seen.has(id)) continue;                // 同じ変更は一度だけ
     rememberSeen(s, id);
     fwd.push(op);
     if (op.eph) { s.hooks.onEph && s.hooks.onEph(op); continue; }
@@ -177,8 +187,39 @@ function onOps(s, ops, from) {
       persistSoon(s);
     }
   }
-  if (fwd.length) broadcast(s, fwd, from);     // 届いた変更は、ほかの人へ中継する
+  if (fwd.length) broadcast(s, fwd, fromPid);    // 届いた変更は、ほかの人へ中継する（届いた相手以外へ）
 }
+function rememberSeen(s, id) {
+  s.seen.add(id);
+  if (s.seen.size > SEEN_MAX) s.seen = new Set([...s.seen].slice(SEEN_MAX / 2));
+}
+
+// 開いているすべての接続へ送る（exceptPid の相手は除く）
+function broadcast(s, ops, exceptPid) {
+  for (const part of packBy(ops, MSG_MAX)) {
+    for (const L of s.links.values()) {
+      if (!L.ok || !L.conn.open) continue;
+      if (exceptPid && L.pid === exceptPid) continue;
+      safeSend(L.conn, { t: 'ops', ops: part });
+    }
+  }
+}
+
+function flush(s) {
+  s.flushT = null;
+  if (!s.queue.length) return;
+  const q = s.queue.splice(0, s.queue.length);
+  broadcast(s, q, null);
+}
+
+function persistSoon(s) {
+  if (s.saveT) return;
+  s.saveT = setTimeout(() => {
+    s.saveT = null;
+    s.hooks.save && s.hooks.save(s.kv);
+  }, SAVE_MS);
+}
+
 // 全体の一致の確認：件数と中身の印（ハッシュ）が違うときだけ、相手から全体を取り直す
 function digest(s) {
   if (sumCache && sumCache.v === kvVer) return sumCache;
@@ -203,44 +244,19 @@ function sendSums(s) {
   for (const L of s.links.values()) if (L.ok && L.conn.open) safeSend(L.conn, { t: 'sum', n: d.n, h: d.h });
 }
 
-function rememberSeen(s, id) {
-  s.seen.add(id);
-  if (s.seen.size > SEEN_MAX) s.seen = new Set([...s.seen].slice(SEEN_MAX / 2));
-}
-
-function broadcast(s, ops, exceptId) {
-  for (const part of packBy(ops, MSG_MAX)) {
-    for (const [id, L] of s.links) {
-      if (!L.ok || id === exceptId || !L.conn.open) continue;
-      safeSend(L.conn, { t: 'ops', ops: part });
-    }
-  }
-}
-
-function flush(s) {
-  s.flushT = null;
-  if (!s.queue.length) return;
-  const q = s.queue.splice(0, s.queue.length);
-  broadcast(s, q, null);
-}
-
-function persistSoon(s) {
-  if (s.saveT) return;
-  s.saveT = setTimeout(() => {
-    s.saveT = null;
-    s.hooks.save && s.hooks.save(s.kv);
-  }, SAVE_MS);
-}
-
 function connectAll(s) {
   if (!s || !s.peer) return;
   const now = Date.now();
   for (let k = 0; k < MAX_SLOTS; k++) {
     if (k === s.slot) continue;
     const id = slotId(s.roomId, k);
-    const L = s.links.get(id);
-    if (L && (L.ok || now - L.t < 8000)) continue;
-    if (L) { try { L.conn.close(); } catch (_) {} s.links.delete(id); }
+    let alive = false;
+    for (const L of [...s.links.values()]) {
+      if (L.pid !== id) continue;
+      if (L.ok || now - L.t < 8000) alive = true;             // つながっている、またはつながり中
+      else { try { L.conn.close(); } catch (_) {} s.links.delete(L.id); }   // 古い、つながらなかった接続は捨てる
+    }
+    if (alive) continue;
     try { attach(s, s.peer.connect(id, { reliable: true })); } catch (_) {}
   }
 }
@@ -262,7 +278,8 @@ async function start(opts) {
   const s = {
     roomId: opts.roomId, proof: opts.proof, tag: opts.tag || '', peer, slot,
     links: new Map(), kv: opts.kv || new Map(), seen: new Set(), queue: [],
-    flushT: null, retryT: null, saveT: null, haveSnap: !!opts.creator, hooks: opts.hooks || {}
+    flushT: null, retryT: null, saveT: null, sumT: null, haveSnap: !!opts.creator, lastNeed: 0,
+    hooks: opts.hooks || {}
   };
   S = s;
   sumCache = null;
@@ -311,7 +328,7 @@ function stop() {
   try { s.peer.destroy(); } catch (_) {}
 }
 
-function linkCount() { if (!S) return 0; let n = 0; for (const L of S.links.values()) if (L.ok) n++; return n + 1; }
+function linkCount() { return S ? peerCount(S) + 1 : 0; }
 
 window.VoxelNet = {
   start, send, stop, linkCount,
@@ -319,6 +336,7 @@ window.VoxelNet = {
   stats: () => ({ ...stats }),
   kv: () => (S ? S.kv : null),
   slotId,
-  MAX_SLOTS
+  MAX_SLOTS,
+  version: 2
 };
 })();

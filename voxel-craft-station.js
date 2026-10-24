@@ -958,6 +958,9 @@ window.VoxelStation = {
   clock: () => gclock,
   stations: () => sdb.stations
 };
+window.VoxelSync = window.VoxelSync || {};
+VoxelSync.station = { reload: () => { load(); rebuildWaitCoords(); renderPanel(); } };
+
 init();
 
 })();

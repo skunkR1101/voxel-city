@@ -1141,6 +1141,9 @@ function init() {
   renderPanel();
   requestAnimationFrame(diaFrame);
 }
+window.VoxelSync = window.VoxelSync || {};
+VoxelSync.dia = { reload: () => { load(); rebuildViz(); renderPanel(); } };
+
 init();
 
 })();

@@ -1339,6 +1339,9 @@ function init() {
   requestAnimationFrame(renderPreview);
   requestAnimationFrame(trnLoop);
 }
+window.VoxelSync = window.VoxelSync || {};
+VoxelSync.train = { reload: () => { loadLib(); } };
+
 init();
 
 })();

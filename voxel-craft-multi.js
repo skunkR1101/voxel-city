@@ -157,6 +157,8 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
   if (conn.tag) { cfg.tag = conn.tag; saveCfg(); }
   if (window.VoxelWorld && conn.seed != null) VoxelWorld.applySeed(conn.seed, !keepLocal);
 
+  // 部屋に入るときは、この端末の道路・駅・ダイヤを、部屋の状態に合わせて入れ替える（作るときは除く）
+  if (!keepLocal && window.VoxelSync && VoxelSync.resetLocal) VoxelSync.resetLocal();
   // 前に保存しておいた部屋の記録を、まず自分のワールドへ反映（一人でも続きから遊べる）
   const saved = await idbGet('room:' + id);
   const kv = new Map(Array.isArray(saved) ? saved : []);
@@ -185,7 +187,8 @@ async function createRoom(name, password, tag) {
   await joinRoom(id, password, true, name, tag, seed, true);
   if (conn) conn.name = name;
   saveRoomEntry({ id, name, pw: password, tag: conn ? conn.tag : tag, seed });
-  // 今のワールドを、そのまま部屋に持ち込む
+  // 今のワールドと、道路・駅・ダイヤなどを、そのまま部屋に持ち込む
+  if (window.VoxelSync && VoxelSync.announceAll) VoxelSync.announceAll();
   const local = window.VoxelWorld ? VoxelWorld.buildSave().base.edits : [];
   for (const [cx, cy, cz, list] of local) {
     for (const [i, t] of list) {
@@ -275,7 +278,7 @@ function refreshShare() {
   const st = window.VoxelNet ? VoxelNet.stats() : { sent: 0, recv: 0, fail: 0 };
   const info = document.getElementById('mpInfo');
   if (info) info.innerHTML = conn
-    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）<br><small>通信：送信${st.sent} / 受信${st.recv} / 失敗${st.fail}</small>` +
+    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）<br><small>通信部品 v${VoxelNet.version || 1}／送信${st.sent} / 受信${st.recv} / 失敗${st.fail}</small>` +
       (gameUrl() ? '' : '<br><b>※このアドレスは友達に渡せません。ゲームをインターネット上のアドレスから開いてください</b>')
     : '部屋には参加していません（一人で遊べます）。';
 }

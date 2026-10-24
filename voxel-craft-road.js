@@ -1183,6 +1183,9 @@ function init() {
   ensureAll();
   requestAnimationFrame(roadFrame);
 }
+window.VoxelSync = window.VoxelSync || {};
+VoxelSync.road = { reload: () => { loadAll(); rebuildMain(); if (typeof ensureAll === 'function') ensureAll(); } };
+
 init();
 
 })();
