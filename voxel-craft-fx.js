@@ -7,6 +7,8 @@
  */
 (function () {
 'use strict';
+// ext.js の内部の名前を、window.VoxelExt から受け取る（ext.js は外から見えないため）
+const { CUSTOM_BASE, ext, defRT, tiltList, saveExt } = window.VoxelExt;
 
 const MODES = [
   ['cut', 'くり抜き（従来どおり）'],

@@ -7,6 +7,8 @@
  */
 (function () {
 'use strict';
+// ext.js の内部の名前を、window.VoxelExt から受け取る（ext.js は外から見えないため）
+const { CUSTOM_BASE, ext, defRT, tiltList, addTilt, removeTilt, pickTarget, pushHistory, isTool } = window.VoxelExt;
 
 const KEY = 'voxelcraft_diag_v1';
 const DEG_KEY = 'voxelcraft_diag_deg';

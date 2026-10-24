@@ -5,6 +5,8 @@
  */
 (function () {
 'use strict';
+// ext.js の内部の名前を、window.VoxelExt から受け取る（ext.js は外から見えないため）
+const { CUSTOM_BASE, ext, blockState, keyOf, nextId, saveExt, renderInventory, registerDef } = window.VoxelExt;
 
 const CHUNK = 16000;               // 定義を分けて送る1かけらの文字数（1通の上限に収まる大きさ）
 const AIR_ = 0;

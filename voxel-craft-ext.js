@@ -2268,4 +2268,11 @@ function init() {
 }
 init();
 
+// ── 他の機能ファイル（通信・カスタム・斜め配置・見え方）が使う内部の名前を公開する ──
+// ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
+window.VoxelExt = {
+  CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
+  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef
+};
+
 })();

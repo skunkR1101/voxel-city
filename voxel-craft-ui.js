@@ -6,6 +6,8 @@
  */
 (function () {
 'use strict';
+// ext.js の内部の名前を、window.VoxelExt から受け取る（ext.js は外から見えないため）
+const { pickTarget } = window.VoxelExt;
 
 const LAYOUT_KEY = 'voxelcraft_touch_layout_v1';
 const DEF = {                       // 本体の初期配置（right / bottom の px）
