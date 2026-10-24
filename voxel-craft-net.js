@@ -17,9 +17,11 @@
 
 const PEERJS_URL = 'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js';
 const MAX_SLOTS = 8;
-const SNAP_BATCH = 150;          // 全体を渡すときの1回の件数
+const MSG_MAX = 60000;           // 1通の大きさの上限（文字数）。ブラウザの通信は約256KBが上限
+const SUM_MS = 20000;            // 全体の一致を確かめる間隔
 const FLUSH_MS = 120;            // 変更をまとめて送る間隔
-const OPS_BATCH = 200;
+const stats = { sent: 0, recv: 0, fail: 0, sumMis: 0 };
+let kvVer = 0, sumCache = null;
 const SEEN_MAX = 20000;
 const RETRY_MS = 10000;
 const SAVE_MS = 3000;
@@ -64,6 +66,7 @@ function applyEntry(s, key, val) {
   const cur = s.kv.get(key);
   if (cur && !newer(val, cur)) return false;
   s.kv.set(key, val);
+  kvVer++; sumCache = null;
   return true;
 }
 
@@ -114,7 +117,9 @@ function onData(s, L, m) {
     return;
   }
   if (!L.ok) return;                           // 合言葉を確かめる前の相手の情報は使わない
+  stats.recv++;
   switch (m.t) {
+    case 'sum': checkSum(s, L, m); break;
     case 'need': sendSnapshot(s, L); break;
     case 'snap': applySnapshot(s, m); break;
     case 'ops': onOps(s, m.ops, L.conn.peer); break;
@@ -122,11 +127,24 @@ function onData(s, L, m) {
 }
 
 function sendSnapshot(s, L) {
-  const all = [...s.kv.entries()];
-  if (!all.length) { L.conn.send({ t: 'snap', i: 0, last: true, e: [] }); return; }
-  for (let i = 0, n = 0; i < all.length; i += SNAP_BATCH, n++) {
-    L.conn.send({ t: 'snap', i: n, last: i + SNAP_BATCH >= all.length, e: all.slice(i, i + SNAP_BATCH) });
+  const parts = packBy([...s.kv.entries()], MSG_MAX);
+  if (!parts.length) { safeSend(L.conn, { t: 'snap', i: 0, last: true, e: [] }); return; }
+  parts.forEach((p, i) => safeSend(L.conn, { t: 'snap', i, last: i === parts.length - 1, e: p }));
+}
+// 1通の大きさを上限以下に保って、配列を分ける
+function packBy(items, max) {
+  const out = []; let cur = [], size = 2;
+  for (const it of items) {
+    const n = JSON.stringify(it).length + 1;
+    if (cur.length && size + n > max) { out.push(cur); cur = []; size = 2; }
+    cur.push(it); size += n;
   }
+  if (cur.length) out.push(cur);
+  return out;
+}
+function safeSend(conn, msg) {
+  try { conn.send(msg); stats.sent++; }
+  catch (e) { stats.fail++; console.error('送信できませんでした', e && e.message); }
 }
 
 function applySnapshot(s, m) {
@@ -161,17 +179,40 @@ function onOps(s, ops, from) {
   }
   if (fwd.length) broadcast(s, fwd, from);     // 届いた変更は、ほかの人へ中継する
 }
+// 全体の一致の確認：件数と中身の印（ハッシュ）が違うときだけ、相手から全体を取り直す
+function digest(s) {
+  if (sumCache && sumCache.v === kvVer) return sumCache;
+  const keys = [...s.kv.keys()].sort();
+  let h = 0x811c9dc5 >>> 0;
+  for (const k of keys) {
+    const e = s.kv.get(k);
+    const str = k + '|' + e.ts + '|' + (e.del ? 1 : 0) + ';';
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  }
+  sumCache = { v: kvVer, n: keys.length, h: h.toString(16) };
+  return sumCache;
+}
+function checkSum(s, L, m) {
+  const d = digest(s);
+  if (m.n === d.n && m.h === d.h) { L.mis = 0; return; }
+  L.mis = (L.mis || 0) + 1;
+  if (L.mis >= 2) { L.mis = 0; stats.sumMis++; safeSend(L.conn, { t: 'need' }); }   // 2回続けてずれたら取り直す
+}
+function sendSums(s) {
+  const d = digest(s);
+  for (const L of s.links.values()) if (L.ok && L.conn.open) safeSend(L.conn, { t: 'sum', n: d.n, h: d.h });
+}
+
 function rememberSeen(s, id) {
   s.seen.add(id);
   if (s.seen.size > SEEN_MAX) s.seen = new Set([...s.seen].slice(SEEN_MAX / 2));
 }
 
 function broadcast(s, ops, exceptId) {
-  for (let i = 0; i < ops.length; i += OPS_BATCH) {
-    const part = ops.slice(i, i + OPS_BATCH);
+  for (const part of packBy(ops, MSG_MAX)) {
     for (const [id, L] of s.links) {
       if (!L.ok || id === exceptId || !L.conn.open) continue;
-      try { L.conn.send({ t: 'ops', ops: part }); } catch (_) {}
+      safeSend(L.conn, { t: 'ops', ops: part });
     }
   }
 }
@@ -224,10 +265,12 @@ async function start(opts) {
     flushT: null, retryT: null, saveT: null, haveSnap: !!opts.creator, hooks: opts.hooks || {}
   };
   S = s;
+  sumCache = null;
   peer.on('connection', c => { if (S === s) attach(s, c); });
   peer.on('disconnected', () => { setTimeout(() => { try { peer.reconnect(); } catch (_) {} }, 3000); });
   peer.on('error', () => {});                  // 相手が見つからないなどは、あとで自動で再試行
   s.retryT = setInterval(() => connectAll(s), RETRY_MS);
+  s.sumT = setInterval(() => sendSums(s), SUM_MS);
   connectAll(s);
   notifyLinks(s);
   if (!s.haveSnap) setTimeout(() => { if (S === s && !s.haveSnap) { s.haveSnap = true; s.hooks.onSnapDone && s.hooks.onSnapDone(); } }, 12000);
@@ -259,6 +302,7 @@ function stop() {
   if (!s) return;
   S = null;
   clearInterval(s.retryT);
+  clearInterval(s.sumT);
   clearTimeout(s.flushT);
   clearTimeout(s.saveT);
   for (const L of s.links.values()) { try { L.conn.close(); } catch (_) {} }
@@ -272,6 +316,7 @@ function linkCount() { if (!S) return 0; let n = 0; for (const L of S.links.valu
 window.VoxelNet = {
   start, send, stop, linkCount,
   active: () => !!S,
+  stats: () => ({ ...stats }),
   kv: () => (S ? S.kv : null),
   slotId,
   MAX_SLOTS

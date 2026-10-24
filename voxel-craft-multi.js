@@ -108,9 +108,10 @@ function sendBlock(x, y, z, t) {
   send('b:' + x + ',' + y + ',' + z, v, false, false);
 }
 // ブロックの置く・壊すを横取りして送る（ローカルの変更は普通どおり行う）
+// 送るのは、設置の処理（色・向きの設定まで）が終わったあと。そのため、マイクロタスクで送る
 window.setBlock = function (x, y, z, t) {
   origSetBlock(x, y, z, t);
-  if (conn && !applyingRemote) sendBlock(x, y, z, t);
+  if (conn && !applyingRemote) queueMicrotask(() => { if (conn) sendBlock(x, y, z, t); });
 };
 
 // ============================================================
@@ -271,9 +272,10 @@ function refreshShare() {
   if (out) out.value = conn ? shareUrl() : '';
   const n = window.VoxelNet && VoxelNet.active() ? VoxelNet.linkCount() : 0;
   setStatus(conn ? `接続中：「${conn.name || '共同都市'}」（${n}人）` : 'オフライン（一人で遊べます）');
+  const st = window.VoxelNet ? VoxelNet.stats() : { sent: 0, recv: 0, fail: 0 };
   const info = document.getElementById('mpInfo');
   if (info) info.innerHTML = conn
-    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）` +
+    ? `部屋名：${esc(conn.name || '共同都市')}<br>部屋ID：<code>${esc(conn.id)}</code><br>いま一緒にいる人：${n}人（最大8人）<br><small>通信：送信${st.sent} / 受信${st.recv} / 失敗${st.fail}</small>` +
       (gameUrl() ? '' : '<br><b>※このアドレスは友達に渡せません。ゲームをインターネット上のアドレスから開いてください</b>')
     : '部屋には参加していません（一人で遊べます）。';
 }

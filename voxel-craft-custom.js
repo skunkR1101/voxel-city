@@ -6,7 +6,7 @@
 (function () {
 'use strict';
 
-const CHUNK = 48000;               // 1回に送る定義の文字数（大きすぎると届きにくいため分ける）
+const CHUNK = 16000;               // 定義を分けて送る1かけらの文字数（1通の上限に収まる大きさ）
 const AIR_ = 0;
 
 // ============================================================
@@ -44,7 +44,8 @@ function payloadOf(def) {
     texData: def.texData || null,
     model: def.model || null,
     orient: def.orient ?? null,
-    scale: def.scale ?? null
+    scale: def.scale ?? null,
+    alpha: def.alpha || 'cut'
   });
 }
 const hashCache = new WeakMap();   // 定義の物（オブジェクト）ごとに一度だけ計算
@@ -94,6 +95,7 @@ VoxelMulti.setBlockEncoder((x, y, z, t) => {
 const incoming = new Map();        // しるし -> { n, parts[] }
 const waiting = new Map();         // しるし -> [{x,y,z,s}]  定義がまだ届いていない置き場所
 const adopting = new Set();
+const adoptListeners = [];         // 定義が届いたときに呼ぶ関数（置き場所の再確認など）
 
 function getIn(H) {
   let o = incoming.get(H);
@@ -131,6 +133,7 @@ async function tryAdopt(H) {
       VoxelMulti.applyBlock(c.x, c.y, c.z, id);
     }
     incoming.delete(H);
+    for (const f of adoptListeners) { try { f(H); } catch (e) { console.error(e); } }
   } catch (e) {
     console.error(e);
   } finally {
@@ -147,13 +150,14 @@ async function adoptDef(H, p) {
     id, name: String(p.name || 'カスタムブロック'), kind: p.kind === 'model' ? 'model' : 'cube',
     category: (ext.categories && ext.categories[0]) || '未分類', colorable: !!p.colorable,
     texData: p.texData || null, model: p.model || null,
-    orient: p.orient ?? undefined, scale: p.scale ?? undefined,
+    orient: p.orient ?? undefined, scale: p.scale ?? undefined, alpha: p.alpha || 'cut',
     sounds: { break: { type: 'none' }, place: { type: 'none' } }
   };
   ext.defs.push(def);
   hashCache.set(def, H);             // 送る側と同じしるしを、そのまま使う
   saveExt();
   await registerDef(def);
+  if (window.VoxelFx) VoxelFx.apply(def);
   if (typeof renderInventory === 'function') renderInventory();
   if (window.VoxelWorld) VoxelWorld.toast('「' + def.name + '」を受け取りました');
   return id;
@@ -175,5 +179,10 @@ VoxelMulti.setBlockResolver((x, y, z, rec) => {
   return null;
 });
 
-window.VoxelCustom = { defHash, publishDef };
+window.VoxelCustom = {
+  defHash, publishDef,
+  invalidate: def => hashCache.delete(def),                 // 中身を変えたあとに呼ぶ
+  localIdFor: H => { const d = defByHash(H); return d ? d.id : null; },
+  onAdopt: fn => adoptListeners.push(fn)
+};
 })();
