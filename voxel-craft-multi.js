@@ -214,8 +214,29 @@ function netHooks() {
 //  ・誰も部屋にいなくても、入った人は GitHub から最新の作業を受け取れる
 // ============================================================
 const GH_KEY = 'voxelcraft_gh_v1';
+function normRepo(s) {
+  return String(s || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
+}
 function ghCfg() {
-  try { const c = JSON.parse(localStorage.getItem(GH_KEY) || 'null'); return c && c.repo && c.token ? c : null; } catch (e) { return null; }
+  try {
+    const c = JSON.parse(localStorage.getItem(GH_KEY) || 'null');
+    if (!c || !c.repo || !c.token) return null;
+    return { repo: normRepo(c.repo), token: String(c.token).trim() };
+  } catch (e) { return null; }
+}
+function ghErrText(status) {
+  const m = {
+    401: 'トークンが正しくありません（貼り付けミス・期限切れ）',
+    403: '書き込み権限がありません（トークンの Contents を Read and write にしてください）',
+    404: 'リポジトリが見つからないか、トークンの対象外です（リポジトリ名と、トークンの Repository access を確認）',
+    422: '保存できませんでした（リポジトリが空の可能性。README を入れて作り直してください）'
+  };
+  return m[status] || ('GitHub保存失敗（' + status + '）');
+}
+// リポジトリに入れるかを確かめる（404 のとき、原因を「権限・名前」として知らせる）
+async function ghRepoCheck(c) {
+  const r = await fetch('https://api.github.com/repos/' + c.repo, { headers: ghHeaders(c), cache: 'no-store' });
+  if (!r.ok) throw new Error(ghErrText(r.status));
 }
 function ghSaveCfg(c) { try { localStorage.setItem(GH_KEY, JSON.stringify(c)); } catch (e) {} }
 function b64Enc(bytes) {
@@ -246,8 +267,8 @@ async function ghPull(id) {
   if (!c) return { sha: null, kv: [] };
   const url = 'https://api.github.com/repos/' + c.repo + '/contents/rooms/' + encodeURIComponent(id) + '.json';
   const res = await fetch(url, { headers: ghHeaders(c), cache: 'no-store' });
-  if (res.status === 404) return { sha: null, kv: [] };
-  if (!res.ok) throw new Error('GitHub読み込み失敗（' + res.status + '）');
+  if (res.status === 404) { await ghRepoCheck(c); return { sha: null, kv: [] }; }
+  if (!res.ok) throw new Error(ghErrText(res.status));
   const j = await res.json();
   let text;
   if (j.content) text = new TextDecoder().decode(b64Dec(j.content));
@@ -285,7 +306,11 @@ async function ghPushOnce(id, kv) {
         await idbSet('room:' + id, merged);
         return merged;
       }
-      if (res.status !== 409 && res.status !== 422) throw new Error('GitHub保存失敗（' + res.status + '）');
+      if (res.status !== 409) {
+        let msg = '';
+        try { msg = (await res.json()).message || ''; } catch (e) {}
+        throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
+      }
     }
     throw new Error('GitHubへの保存が何度も競合しました');
   } finally { }
@@ -300,7 +325,7 @@ setInterval(() => {
   const sig = JSON.stringify(arr);          // 変わったときだけ書く（履歴が増えすぎないように）
   if (sig === ghLastSig) return;
   ghLastSig = sig;
-  ghPush(conn.id, arr).catch(e => console.error(e));
+  ghPush(conn.id, arr).catch(e => { ghLastSig = null; toast('GitHub保存失敗：' + e.message); });
 }, 60000);
 
 async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
@@ -704,8 +729,9 @@ function buildUI() {
   $('mpGhRepo').value = gc.repo || '';
   $('mpGhToken').value = gc.token || '';
   $('mpGhSave').addEventListener('click', () => {
-    const repo = $('mpGhRepo').value.trim(), token = $('mpGhToken').value.trim();
+    const repo = normRepo($('mpGhRepo').value), token = $('mpGhToken').value.trim();
     if (!repo || !token) { toast('リポジトリ名とトークンを入れてください'); return; }
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) { toast('リポジトリ名は「ユーザー名/リポジトリ名」の形で入れてください'); return; }
     ghSaveCfg({ repo, token });
     toast('GitHub設定を保存しました');
   });
