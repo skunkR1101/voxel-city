@@ -208,6 +208,101 @@ function netHooks() {
   };
 }
 
+// ============================================================
+// GitHub への保存：部屋の作業データを、リポジトリの rooms/<部屋ID>.json に置く
+//  ・設定（リポジトリ名・トークン）はこの端末にだけ保存する（共有リンク・保存コードには入らない）
+//  ・誰も部屋にいなくても、入った人は GitHub から最新の作業を受け取れる
+// ============================================================
+const GH_KEY = 'voxelcraft_gh_v1';
+function ghCfg() {
+  try { const c = JSON.parse(localStorage.getItem(GH_KEY) || 'null'); return c && c.repo && c.token ? c : null; } catch (e) { return null; }
+}
+function ghSaveCfg(c) { try { localStorage.setItem(GH_KEY, JSON.stringify(c)); } catch (e) {} }
+function b64Enc(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64Dec(str) {
+  const bin = atob(String(str).replace(/\s/g, ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function ghHeaders(c) {
+  return { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github+json' };
+}
+// 同じ場所は新しい方を残して、2つの作業データを1つにする
+function mergeKv(a, b) {
+  const m = new Map(Array.isArray(a) ? a : []);
+  for (const [k, v] of (Array.isArray(b) ? b : [])) {
+    const old = m.get(k);
+    if (!old || (v.ts || 0) > (old.ts || 0)) m.set(k, v);
+  }
+  return [...m.entries()];
+}
+async function ghPull(id) {
+  const c = ghCfg();
+  if (!c) return { sha: null, kv: [] };
+  const url = 'https://api.github.com/repos/' + c.repo + '/contents/rooms/' + encodeURIComponent(id) + '.json';
+  const res = await fetch(url, { headers: ghHeaders(c), cache: 'no-store' });
+  if (res.status === 404) return { sha: null, kv: [] };
+  if (!res.ok) throw new Error('GitHub読み込み失敗（' + res.status + '）');
+  const j = await res.json();
+  let text;
+  if (j.content) text = new TextDecoder().decode(b64Dec(j.content));
+  else {   // 1MB を超えるファイルは本文が空で返るので、生データを取り直す
+    const raw = await fetch(url, { headers: { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github.raw' }, cache: 'no-store' });
+    text = await raw.text();
+  }
+  const o = text ? JSON.parse(text) : {};
+  return { sha: j.sha, kv: Array.isArray(o.kv) ? o.kv : [] };
+}
+let ghLastSig = null;
+let ghQueue = Promise.resolve();
+// 保存は1つずつ順番に行う（同時に書いて失われないように）
+function ghPush(id, kv) {
+  const job = ghQueue.then(() => ghPushOnce(id, kv));
+  ghQueue = job.catch(() => {});
+  return job;
+}
+async function ghPushOnce(id, kv) {
+  const c = ghCfg();
+  if (!c || !id) return null;
+  {
+  try {
+    const url = 'https://api.github.com/repos/' + c.repo + '/contents/rooms/' + encodeURIComponent(id) + '.json';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const cur = await ghPull(id);                       // 他の人の保存を取り込んでから書く
+      const merged = mergeKv(cur.kv, kv);
+      const body = {
+        message: 'room ' + id + ' ' + new Date().toISOString(),
+        content: b64Enc(new TextEncoder().encode(JSON.stringify({ v: 1, r: id, t: Date.now(), kv: merged }))),
+        ...(cur.sha ? { sha: cur.sha } : {})
+      };
+      const res = await fetch(url, { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (res.ok) {
+        await idbSet('room:' + id, merged);
+        return merged;
+      }
+      if (res.status !== 409 && res.status !== 422) throw new Error('GitHub保存失敗（' + res.status + '）');
+    }
+    throw new Error('GitHubへの保存が何度も競合しました');
+  } finally { }
+  }
+}
+// 接続中は一定間隔でGitHubへ保存（変わっていなくても、1分に1回まで）
+setInterval(() => {
+  if (!conn || !window.VoxelNet || !VoxelNet.active() || !ghCfg()) return;
+  const kv = VoxelNet.kv();
+  if (!kv) return;
+  const arr = [...kv.entries()];
+  const sig = JSON.stringify(arr);          // 変わったときだけ書く（履歴が増えすぎないように）
+  if (sig === ghLastSig) return;
+  ghLastSig = sig;
+  ghPush(conn.id, arr).catch(e => console.error(e));
+}, 60000);
+
 async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
   disconnect(false);
   if (!id || !password) throw new Error('部屋IDとパスワードを入力してください');
@@ -224,6 +319,13 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
   // 前に保存しておいた部屋の記録を、まず自分のワールドへ反映（一人でも続きから遊べる）
   const saved = await idbGet('room:' + id);
   const kv = new Map(Array.isArray(saved) ? saved : []);
+  if (ghCfg()) {
+    try {
+      const r = await ghPull(id);
+      for (const [k, v] of mergeKv([...kv.entries()], r.kv)) kv.set(k, v);
+      toast('GitHubから最新の作業を読み込みました');
+    } catch (e) { toast('GitHubから読めなかったため、この端末の保存で続けます'); }
+  }
   joining = true;
   applyingRemote = true;
   try {
@@ -256,6 +358,8 @@ async function createRoom(name, password, tag) {
 
 function disconnect(notify) {
   if (!conn) return;
+  const kvNow = window.VoxelNet && VoxelNet.kv() ? [...VoxelNet.kv().entries()] : null;
+  if (kvNow && ghCfg()) ghPush(conn.id, kvNow).catch(e => console.error(e));
   try { if (window.VoxelNet) VoxelNet.stop(); } catch (e) {}
   conn = null;
   joining = false;
@@ -523,6 +627,13 @@ function buildUI() {
     <button class="btn" id="mpJoin">参加する（今のワールドは部屋のものに置き換わります）</button>
     <h3>共有</h3>
     <input id="mpShareOut" readonly placeholder="部屋に参加すると、ここに共有リンクが出ます">
+    <details style="margin:6px 0;font-size:13px"><summary>GitHub に保存する設定（任意）</summary>
+      <input id="mpGhRepo" placeholder="例：yourname/voxel-rooms（保存用のリポジトリ）">
+      <input id="mpGhToken" type="password" autocomplete="off" placeholder="トークン（そのリポジトリの Contents の読み書きだけ）">
+      <p class="note">トークンはこの端末にだけ保存されます。共有リンク・保存コードには入りません。</p>
+      <button class="btn sub" id="mpGhSave">GitHub設定を保存</button>
+      <button class="btn sub" id="mpGhSync">今すぐGitHubに保存</button>
+    </details>
     <button class="btn sub" id="mpCopy">共有リンクをコピー</button>
     <button class="btn danger" id="mpLeave">退室する（一人で遊ぶ）</button>
     <button class="btn sub" id="mpClose">閉じる</button>
@@ -589,6 +700,21 @@ function buildUI() {
   });
   $('mpLeave').addEventListener('click', () => { disconnect(); refreshShare(); });
   $('mpClose').addEventListener('click', close);
+  const gc = ghCfg() || {};
+  $('mpGhRepo').value = gc.repo || '';
+  $('mpGhToken').value = gc.token || '';
+  $('mpGhSave').addEventListener('click', () => {
+    const repo = $('mpGhRepo').value.trim(), token = $('mpGhToken').value.trim();
+    if (!repo || !token) { toast('リポジトリ名とトークンを入れてください'); return; }
+    ghSaveCfg({ repo, token });
+    toast('GitHub設定を保存しました');
+  });
+  $('mpGhSync').addEventListener('click', async () => {
+    if (!conn) { toast('部屋に入ってから押してください'); return; }
+    const kv = window.VoxelNet && VoxelNet.kv() ? [...VoxelNet.kv().entries()] : [];
+    try { await ghPush(conn.id, kv); toast('GitHubに保存しました'); }
+    catch (e) { toast(e.message); }
+  });
   buildSaveUI();
   refreshShare();
 }
