@@ -240,13 +240,15 @@ function placeModel(raw, scale) {
   outer.add(raw);
   outer.updateMatrixWorld(true);
   const b = new THREE.Box3().setFromObject(outer);
-  const c = b.getCenter(new THREE.Vector3());
-  raw.position.set(-c.x, -b.min.y, -c.z);
+  // Blockbench の制作位置をそのまま使う：1ブロック分の枠（16px、または1単位）の中心をブロックの中心に合わせる。
+  // モデルの大きさに関係なく、端に寄せた位置・はみ出した部分も、制作したとおりの場所に出る。
+  // 縦方向は底面を床に合わせる（今までどおり）。
+  raw.position.set(-0.5, -b.min.y, -0.5);
   outer.updateMatrixWorld(true);
   return outer;
 }
 
-async function loadModelObject(format, data, texUrl, scaleOverride) {
+async function loadModelObject(format, data, texUrl, scaleOverride, rotDeg) {
   let raw;
   if (format === 'obj') raw = new THREE.OBJLoader().parse(data);
   else if (format === 'fbx') raw = new THREE.FBXLoader().parse(await dataUrlToBuffer(data), '');
@@ -258,6 +260,8 @@ async function loadModelObject(format, data, texUrl, scaleOverride) {
   }
   const scale = typeof scaleOverride === 'number' ? scaleOverride : autoScaleFor(raw);
   const root = placeModel(raw, scale);
+  // 向きの補正（Blockbenchで反転したときに、0・90・180・270度で直す）
+  if (rotDeg) { root.rotation.y = rotDeg * Math.PI / 180; root.updateMatrixWorld(true); }
   sanitizeMaterials(root);
   return { root, scale };
 }
@@ -300,7 +304,7 @@ async function registerDef(def) {
   } else if (def.model) {
     try {
       const r = await loadModelObject(def.model.format, def.model.data, def.texData,
-        typeof def.scale === 'number' ? def.scale : null);
+        typeof def.scale === 'number' ? def.scale : null, def.modelRot || 0);
       rt.template = r.root;
     } catch (err) {
       console.error(err);
@@ -732,6 +736,14 @@ function tiltPlacement(p) {
 }
 function snapC(v, g) { return Math.round((v - 0.5) / g) * g + 0.5; }
 function tiltMode() { return ext.grid !== 1 || ext.tilt !== 0; }
+// 傾き配置の向き：カスタムモデルの「4方向」「固定（傾けないとき）」は、配置方式の向きを守る
+function tiltOrientFor(def, p, tp) {
+  if (def && def.kind === 'model' && (def.orient === 'four' || (def.orient === 'fixed' && ext.tilt === 0))) {
+    const o = modelOrient(def, p);
+    return { q: modelQuat({ rot: o.rot, qb: null }), rot: o.rot };
+  }
+  return { q: tp.q, rot: ext.rot };
+}
 
 // ============================================================
 // 傾いたブロック（見た目のみ・当たり判定なし）
@@ -832,14 +844,15 @@ window.doPlace = function () {
   }
 
   // 傾き・フリー配置（見た目のみ）
-  const stState = rt ? { color: rt.def.colorable ? ext.curColor : null, rot: ext.rot } : null;
   const tp = tiltPlacement(p);
   const cc = tp.c;
+  const to = tiltOrientFor(rt && rt.def, p, tp);
+  const stState = rt ? { color: rt.def.colorable ? ext.curColor : null, rot: to.rot } : null;
   const cell = [Math.floor(cc[0]), Math.floor(cc[1]), Math.floor(cc[2])];
   if (isSolidAt(cell)) return;
   const pp = player.pos;
   if (Math.hypot(cc[0] - pp.x, cc[1] - (pp.y + 0.9), cc[2] - pp.z) < 0.9) return;
-  if (addTilt(id, cc, tp.q, stState)) {
+  if (addTilt(id, cc, to.q, stState)) {
     if (rt && rt.def.colorable) pushHistory(ext.curColor);
     playPlace(id);
   }
@@ -1169,9 +1182,11 @@ function updateGhost() {
   } else {
     const tp = tiltPlacement(p);
     valid = !isSolidAt([Math.floor(tp.c[0]), Math.floor(tp.c[1]), Math.floor(tp.c[2])]);
-    const off = isModelId(id) ? new THREE.Vector3(0, -0.5, 0).applyQuaternion(tp.q) : new THREE.Vector3();
+    const gdef = isModelId(id) ? (defById(id) || defRT.get(id).def) : null;
+    const to = tiltOrientFor(gdef, p, tp);
+    const off = isModelId(id) ? new THREE.Vector3(0, -0.5, 0).applyQuaternion(to.q) : new THREE.Vector3();
     ghost.position.set(tp.c[0] + off.x, tp.c[1] + off.y, tp.c[2] + off.z);
-    ghost.quaternion.copy(tp.q);
+    ghost.quaternion.copy(to.q);
   }
   ghost.visible = true;
   const rt = id >= CUSTOM_BASE ? defRT.get(id) : null;
@@ -1700,7 +1715,7 @@ function newDraft() {
     look: 'cut', glow: 1.5,
     texData: null, model: null, modelTex: null, template: null,
     orient: 'fixed',
-    scaleMode: 'auto', customScale: 1, resolvedScale: null,
+    scaleMode: 'auto', customScale: 1, resolvedScale: null, modelRot: 0,
     sounds: { break: { type: 'none' }, place: { type: 'none' } }
   };
 }
@@ -1732,6 +1747,7 @@ function fillImportForm() {
   document.getElementById('extBreakPreset').value = d.sounds.break.type === 'preset' ? d.sounds.break.key : 'none';
   document.getElementById('extPlacePreset').value = d.sounds.place.type === 'preset' ? d.sounds.place.key : 'none';
   document.getElementById('extOrient').value = d.orient;
+  document.getElementById('extModelRot').value = String(d.modelRot || 0);
   document.getElementById('extScaleMode').value = d.scaleMode;
   document.getElementById('extScaleVal').value = d.customScale;
   document.getElementById('extScaleVal').style.display = d.scaleMode === 'custom' ? 'inline-block' : 'none';
@@ -1745,7 +1761,7 @@ async function rebuildDraftTemplate() {
   if (!draft.model) return;
   document.getElementById('extModelStatus').textContent = '読み込み中…';
   try {
-    const r = await loadModelObject(draft.model.format, draft.model.data, draft.modelTex, scaleOverrideOf(draft));
+    const r = await loadModelObject(draft.model.format, draft.model.data, draft.modelTex, scaleOverrideOf(draft), draft.modelRot || 0);
     draft.template = r.root;
     draft.resolvedScale = r.scale;
     document.getElementById('extModelStatus').textContent =
@@ -1771,6 +1787,7 @@ async function saveDraft() {
     texData: draft.kind === 'cube' ? draft.texData : draft.modelTex,
     model: draft.kind === 'model' ? { format: draft.model.format, data: draft.model.data } : null,
     orient: draft.kind === 'model' ? draft.orient : undefined,
+    modelRot: draft.kind === 'model' ? (draft.modelRot || 0) : undefined,
     scale: draft.kind === 'model' ? (draft.resolvedScale ?? 1) : undefined,
     sounds: draft.sounds,
     alpha: draft.look || 'cut',
@@ -1975,6 +1992,16 @@ function buildDOM() {
         </label>
       </div>
       <div class="ext-row" style="margin-top:8px">
+        <label>モデルの回転（Blockbenchで反転したときの補正）
+          <select class="ext-input" id="extModelRot">
+            <option value="0">0°（補正なし）</option>
+            <option value="90">90°</option>
+            <option value="180">180°</option>
+            <option value="270">270°</option>
+          </select>
+        </label>
+      </div>
+      <div class="ext-row" style="margin-top:8px">
         <label>スケール
           <select class="ext-input" id="extScaleMode">
             <option value="auto">自動（大きすぎる場合は÷16）</option>
@@ -2145,6 +2172,10 @@ function wire() {
   document.getElementById('extLook').addEventListener('change', e => { draft.look = e.target.value; syncGlowUI(); });
   document.getElementById('extGlow').addEventListener('change', e => { draft.glow = glowOf(e.target.value); e.target.value = String(draft.glow); });
   document.getElementById('extOrient').addEventListener('change', e => { draft.orient = e.target.value; });
+  document.getElementById('extModelRot').addEventListener('change', async e => {
+    draft.modelRot = Number(e.target.value) || 0;
+    if (draft.model) await rebuildDraftTemplate();
+  });
   document.getElementById('extScaleMode').addEventListener('change', async e => {
     draft.scaleMode = e.target.value;
     document.getElementById('extScaleVal').style.display = draft.scaleMode === 'custom' ? 'inline-block' : 'none';
