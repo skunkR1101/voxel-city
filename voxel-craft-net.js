@@ -229,6 +229,17 @@ function persistSoon(s) {
     s.hooks.save && s.hooks.save(s.kv);
   }, SAVE_MS);
 }
+// 画面を閉じる・背景に回すときは、待たずに今の部屋の状態を保存する（直前の変更を失わないように）
+function flushSave() {
+  const s = S;
+  if (!s) return;
+  if (s.saveT) { clearTimeout(s.saveT); s.saveT = null; }
+  try { s.hooks.save && s.hooks.save(s.kv); } catch (_) {}
+}
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('pagehide', flushSave);
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave(); });
+}
 
 // 全体の一致の確認：件数と中身の印（ハッシュ）が違うときだけ、相手から全体を取り直す
 function digest(s) {

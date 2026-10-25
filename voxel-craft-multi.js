@@ -341,6 +341,140 @@ function refreshShare() {
 // ============================================================
 // 画面
 // ============================================================
+// ============================================================
+// 保存コード：部屋の作業をひとまとめにした文字列。別の端末に貼れば、作業を受け取れる
+// ============================================================
+const SAVE_PREFIX = 'vcs1:';       // 圧縮あり
+const SAVE_PREFIX_RAW = 'vcs0:';   // 圧縮なし（この端末が圧縮に対応していないとき）
+function b64uEnc(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64uDec(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function gzipBytes(bytes) {
+  const cs = new CompressionStream('gzip');
+  const w = cs.writable.getWriter(); w.write(bytes); w.close();
+  return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+}
+async function gunzipBytes(bytes) {
+  const ds = new DecompressionStream('gzip');
+  const w = ds.writable.getWriter(); w.write(bytes); w.close();
+  return new Uint8Array(await new Response(ds.readable).arrayBuffer());
+}
+async function encodeSave(obj) {
+  const raw = new TextEncoder().encode(JSON.stringify(obj));
+  if (window.CompressionStream) {
+    try { return SAVE_PREFIX + b64uEnc(await gzipBytes(raw)); } catch (e) {}
+  }
+  return SAVE_PREFIX_RAW + b64uEnc(raw);
+}
+async function decodeSave(code) {
+  code = String(code || '').trim();
+  let bytes;
+  if (code.startsWith(SAVE_PREFIX)) bytes = await gunzipBytes(b64uDec(code.slice(SAVE_PREFIX.length)));
+  else if (code.startsWith(SAVE_PREFIX_RAW)) bytes = b64uDec(code.slice(SAVE_PREFIX_RAW.length));
+  else throw new Error('保存コードの形式が違います');
+  const o = JSON.parse(new TextDecoder().decode(bytes));
+  if (!o || !Array.isArray(o.kv)) throw new Error('保存コードの中身が読めません');
+  return o;
+}
+// 今の部屋の中身：接続中ならその場の最新、そうでなければ保存してあるもの
+async function roomKvOf(id) {
+  if (conn && conn.id === id && window.VoxelNet && VoxelNet.active() && VoxelNet.kv()) return [...VoxelNet.kv().entries()];
+  const saved = await idbGet('room:' + id);
+  return Array.isArray(saved) ? saved : [];
+}
+async function makeSaveCode(id) {
+  const r = loadRooms().find(x => x.id === id) || {};
+  const isNow = conn && conn.id === id;
+  return encodeSave({
+    v: 1, r: id,
+    n: (isNow ? conn.name : r.name) || '',
+    sd: (isNow ? conn.seed : r.seed) ?? null,
+    kv: await roomKvOf(id)
+  });
+}
+// 保存コードを読み込み、その部屋の保存データへ足す（同じ場所は新しい方を残す）
+async function importSaveCode(code, idHint) {
+  const o = await decodeSave(code);
+  const id = o.r || idHint;
+  if (!id) throw new Error('部屋IDが分かりません。参加欄に部屋IDを入れてください');
+  if (idHint && o.r && idHint !== o.r) throw new Error('この保存コードは、入力された部屋IDとは別の部屋のものです');
+  const saved = await idbGet('room:' + id);
+  const m = new Map(Array.isArray(saved) ? saved : []);
+  let added = 0;
+  for (const [k, v] of o.kv) {
+    const old = m.get(k);
+    if (!old || (v.ts || 0) > (old.ts || 0)) { m.set(k, v); added++; }
+  }
+  await idbSet('room:' + id, [...m.entries()]);
+  toast('保存コードを読み込みました（' + added + '件の作業を受け取りました）');
+  return { id, seed: o.sd ?? null };
+}
+
+// 保存コードの画面（設定メニューの「保存コードを確認」から、いつでも開ける）
+function buildSaveUI() {
+  const box = document.createElement('div');
+  box.id = 'mpSaveModal';
+  box.style.cssText = 'position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+  box.innerHTML = '<div style="background:#1b2430;color:#fff;border-radius:12px;padding:16px;max-width:460px;width:100%;font-family:sans-serif;box-sizing:border-box">' +
+    '<h3 style="margin:0 0 8px">保存コード</h3>' +
+    '<p style="font-size:13px;margin:0 0 8px;line-height:1.5">部屋での作業をまとめたコードです。別の端末で部屋に入るとき、参加欄の「保存コード」に貼ると作業を受け取れます。（部屋のパスワードは別に必要です）</p>' +
+    '<select id="mpSaveRoom" style="width:100%;margin-bottom:8px"></select>' +
+    '<textarea id="mpSaveOut" readonly rows="5" style="width:100%;box-sizing:border-box;font-size:12px"></textarea>' +
+    '<p id="mpSaveSize" style="font-size:12px;color:#9fb3c8;margin:4px 0"></p>' +
+    '<button class="btn" id="mpSaveCopy" style="width:100%;margin-top:6px">コピー</button>' +
+    '<button class="btn sub" id="mpSaveClose" style="width:100%;margin-top:6px">閉じる</button></div>';
+  document.body.appendChild(box);
+  const $ = id => document.getElementById(id);
+  const show = async () => {
+    const id = $('mpSaveRoom').value;
+    if (!id) return;
+    const code = await makeSaveCode(id);
+    $('mpSaveOut').value = code;
+    $('mpSaveSize').textContent = '長さ：約' + Math.round(code.length / 1000) + '千文字';
+  };
+  const openSave = async () => {
+    const ids = [];
+    if (conn) ids.push(conn.id);
+    for (const r of loadRooms()) if (!ids.includes(r.id)) ids.push(r.id);
+    box.style.display = 'flex';
+    if (!ids.length) { $('mpSaveRoom').innerHTML = ''; $('mpSaveOut').value = 'まだ部屋に入ったことがありません。'; $('mpSaveSize').textContent = ''; return; }
+    $('mpSaveRoom').innerHTML = ids.map(id => {
+      const r = loadRooms().find(x => x.id === id) || {};
+      const nm = (conn && conn.id === id ? conn.name : r.name) || '共同都市';
+      return '<option value="' + esc(id) + '">' + esc(nm) + '（' + esc(id) + '）</option>';
+    }).join('');
+    await show();
+  };
+  $('mpSaveRoom').addEventListener('change', show);
+  $('mpSaveCopy').addEventListener('click', () => {
+    const v = $('mpSaveOut').value;
+    if (v && navigator.clipboard) navigator.clipboard.writeText(v).then(() => toast('コピーしました'), () => toast('コピーできませんでした。長押しして手動でコピーしてください'));
+    else toast('長押しして手動でコピーしてください');
+  });
+  $('mpSaveClose').addEventListener('click', () => { box.style.display = 'none'; });
+
+  // 設定メニューに「保存コードを確認」ボタンを置く
+  const sbox = document.querySelector('#settings .sbox');
+  if (sbox) {
+    const b = document.createElement('button');
+    b.id = 'mpSaveOpenBtn';
+    b.className = 'btn sub';
+    b.textContent = '保存コードを確認';
+    b.style.marginTop = '8px';
+    b.addEventListener('click', openSave);
+    sbox.appendChild(b);
+  }
+}
+
 function buildUI() {
   const style = document.createElement('style');
   style.textContent = `
@@ -385,6 +519,7 @@ function buildUI() {
     <input id="mpShare" placeholder="共有リンク（vc1:…）を貼り付け">
     <input id="mpJoinId" placeholder="部屋ID">
     <input id="mpJoinPw" placeholder="パスワード" type="password" autocomplete="off">
+    <textarea id="mpSaveIn" rows="2" placeholder="保存コード（あれば貼り付け。部屋の作業を受け取れます）" style="width:100%;box-sizing:border-box;font-size:12px"></textarea>
     <button class="btn" id="mpJoin">参加する（今のワールドは部屋のものに置き換わります）</button>
     <h3>共有</h3>
     <input id="mpShareOut" readonly placeholder="部屋に参加すると、ここに共有リンクが出ます">
@@ -433,8 +568,15 @@ function buildUI() {
     try {
       if (!tagVal()) { toast('ゲーマータグを入力してください'); return; }
       cfg.tag = tagVal(); saveCfg();
+      const saveCode = $('mpSaveIn').value.trim();
+      if (saveCode) {
+        const r = await importSaveCode(saveCode, $('mpJoinId').value.trim());
+        $('mpJoinId').value = r.id;
+        if (r.seed != null && pendingSeed == null) pendingSeed = r.seed;
+      }
       await joinRoom($('mpJoinId').value.trim(), $('mpJoinPw').value, false, '', tagVal(), pendingSeed);
       pendingSeed = null;
+      $('mpSaveIn').value = '';
       refreshShare(); renderRooms();
       toast('参加しました');
       close(); startIfNeeded();
@@ -447,6 +589,7 @@ function buildUI() {
   });
   $('mpLeave').addEventListener('click', () => { disconnect(); refreshShare(); });
   $('mpClose').addEventListener('click', close);
+  buildSaveUI();
   refreshShare();
 }
 function open() { refreshShare(); renderRooms(); panelEl.classList.add('show'); }

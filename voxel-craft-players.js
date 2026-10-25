@@ -434,6 +434,7 @@ function placeTags() {
 // ============================================================
 let lastFrame = performance.now();
 let lastRoom = null;
+let skinRoom = null;             // スキンを送った部屋（入り直すたびに送り直す）
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
@@ -445,7 +446,13 @@ function frame(now) {
     for (const p of [...remotes.keys()]) removeRemote(p, false);
     shown.clear();
     lastRoom = rid;
-    if (rid) { publishSkin(); sendPresence(); }
+    skinRoom = null;
+  }
+  // 接続が完了してから、自分のスキンを送る（部屋に入るたびに一度だけ）
+  if (rid && VoxelMulti.connected() && skinRoom !== rid) {
+    skinRoom = rid;
+    publishSkin();
+    sendPresence();
   }
 
   for (const r of remotes.values()) {
