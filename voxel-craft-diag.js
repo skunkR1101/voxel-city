@@ -354,5 +354,9 @@ function addSection() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addSection);
 else addSection();
 
-window.VoxelDiag = { angle: () => deg, setAngle: setDeg, count: () => recs.size };
+window.VoxelDiag = {
+  angle: () => deg, setAngle: setDeg, count: () => recs.size,
+  adoptTilt: ent => tlAdopt(ent),                                  // 貼り付けた傾きブロックを記録して部屋へ送る
+  dropTilt: ent => { if (ent.tl) tlRemove(ent.tl, true); else removeTilt(ent); }   // 元に戻す用
+};
 })();

@@ -949,6 +949,25 @@ function tiltPlacement(p) {
   if (ext.tilt !== 0) q.setFromAxisAngle(axis, ang);
   const off = 0.5 * (Math.cos(ang) + Math.sin(ang));
   const c = p.point.clone().addScaledVector(n, off);
+  if (ext.grid === 0) {
+    // フリー：当てた面の持ち主（普通のブロック・傾きブロック）の格子に合わせて、隙間なく繋げる
+    const hit = p.kind === 'tilt' && p.ent;
+    const ref = hit ? new THREE.Vector3(p.ent.c[0], p.ent.c[1], p.ent.c[2]) : new THREE.Vector3(p.h.x + 0.5, p.h.y + 0.5, p.h.z + 0.5);
+    const T = hit ? p.ent.q.clone() : new THREE.Quaternion();
+    const axes = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)].map(a => a.applyQuaternion(T));
+    const alignN = axes.map(a => Math.abs(a.dot(n)));
+    if (Math.max(...alignN) > 0.9) {       // 面がきれいな向きのときだけ合わせる（丸いモデルの面などはそのまま）
+      const d = c.clone().sub(ref);
+      const out = new THREE.Vector3();
+      axes.forEach((a, i) => {
+        const s = d.dot(a);
+        out.addScaledVector(a, alignN[i] > 0.5 ? s : Math.round(s));   // 面の向きは高さをそのまま、横は1マス単位で揃える
+      });
+      c.copy(out.add(ref));
+    }
+    const q0 = hit && ext.tilt === 0 ? T : new THREE.Quaternion();
+    if (ext.tilt === 0 && hit) return { c: [c.x, c.y, c.z], q: q0 };
+  }
   if (ext.grid > 0) {
     c.x = snapC(c.x, ext.grid);
     c.y = snapC(c.y, ext.grid);
@@ -1206,6 +1225,7 @@ function undoLast() {
   if (!ch) { toast('元に戻す操作がありません'); return; }
   for (let i = ch.length - 1; i >= 0; i--) {
     const c = ch[i];
+    if (c.tiltEnt) { if (window.VoxelDiag && VoxelDiag.dropTilt) VoxelDiag.dropTilt(c.tiltEnt); continue; }
     setBlock(c.x, c.y, c.z, c.oldId);
     if (c.oldSt) blockState.set(c.k, c.oldSt);
     else blockState.delete(c.k);
@@ -1246,9 +1266,20 @@ function copySel() {
     const st = blockState.get(keyOf(wx, wy, wz));
     sts[i] = st ? { color: st.color, rot: st.rot, qb: st.qb || null } : null;
   }
-  ext.clip = { sx: b.sx, sy: b.sy, sz: b.sz, ids, sts };
+  // 傾き・斜め・細かいグリッドのブロック（中心が範囲内にあるもの）も、位置と向きごと覚える
+  const objs = [];
+  for (const ent of tiltList) {
+    if (!ent.obj || !ent.c || !ent.q) continue;
+    const cx = ent.c[0] - b.min[0], cy = ent.c[1] - b.min[1], cz = ent.c[2] - b.min[2];
+    if (cx < 0 || cy < 0 || cz < 0 || cx >= b.sx || cy >= b.sy || cz >= b.sz) continue;
+    objs.push({
+      id: ent.id, st: ent.st ? { color: ent.st.color, rot: ent.st.rot, qb: ent.st.qb || null } : null,
+      c: [cx, cy, cz], q: [ent.q.x, ent.q.y, ent.q.z, ent.q.w]
+    });
+  }
+  ext.clip = { sx: b.sx, sy: b.sy, sz: b.sz, ids, sts, objs };
   pasteDirty = true;
-  toast(`コピーしました（${b.sx}×${b.sy}×${b.sz}）`);
+  toast(`コピーしました（${b.sx}×${b.sy}×${b.sz}${objs.length ? '・傾きブロック ' + objs.length + ' 個' : ''}）`);
   renderInventoryIfOpen();
 }
 
@@ -1299,6 +1330,47 @@ function transformedCells() {
   return { cells: out, sx: W, sy: H, sz: D };
 }
 
+// 傾きブロックの位置と向きを、ペーストの回転・反転と同じ手順で変える（セルの変換と一致させる）
+const PASTE_RY = () => new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2);
+const PASTE_RX = () => new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+function mirrorQuat(q, axis) {
+  const S = axis === 'x' ? new THREE.Vector3(-1, 1, 1) : new THREE.Vector3(1, 1, -1);
+  const M = new THREE.Matrix4().makeScale(S.x, S.y, S.z);
+  const R = new THREE.Matrix4().makeRotationFromQuaternion(q);
+  return new THREE.Quaternion().setFromRotationMatrix(M.multiply(R).multiply(M));
+}
+function transformedObjects() {
+  const c = ext.clip, o = ext.pasteOpt;
+  const sx = c.sx, sy = c.sy, sz = c.sz;
+  const list = (c.objs || []).map(x => ({
+    id: x.id, st: x.st ? { ...x.st } : null, c: x.c.slice(), q: new THREE.Quaternion(x.q[0], x.q[1], x.q[2], x.q[3])
+  }));
+  const mx = !!o.mx !== (o.fl === 'x'), mz = !!o.mz !== (o.fl === 'z');
+  for (const t of list) {
+    if (mx) { t.c[0] = sx - t.c[0]; t.q = mirrorQuat(t.q, 'x'); }
+    if (mz) { t.c[2] = sz - t.c[2]; t.q = mirrorQuat(t.q, 'z'); }
+  }
+  let W = sx, H = sy, D = sz;
+  for (let k = 0; k < o.rot; k++) {
+    for (const t of list) {
+      const nx = D - t.c[2], nz = t.c[0];
+      t.c[0] = nx; t.c[2] = nz;
+      t.q = PASTE_RY().multiply(t.q);
+    }
+    const tmp = W; W = D; D = tmp;
+  }
+  const pitchSteps = ((o.pitch || 0) % 4 + 4) % 4;
+  for (let k = 0; k < pitchSteps; k++) {
+    for (const t of list) {
+      const ny = t.c[2], nz = H - t.c[1];
+      t.c[1] = ny; t.c[2] = nz;
+      t.q = PASTE_RX().multiply(t.q);
+    }
+    const tmp = H; H = D; D = tmp;
+  }
+  return list;
+}
+
 function pasteHere() {
   if (!ext.clip) { toast('先にコピーしてください'); return; }
   const p = pickTarget();
@@ -1317,8 +1389,22 @@ function pasteHere() {
     if (cell.id >= CUSTOM_BASE && cell.st) blockState.set(k, { color: cell.st.color, rot: cell.st.rot, qb: cell.st.qb });
     else blockState.delete(k);
   }
-  pushUndo(changes);
-  toast(`${changes.length} 個のブロックを貼り付けました`);
+  // 傾きブロックも貼り付ける（同じ場所にすでにあるものは増やさない）
+  const adopt = window.VoxelDiag && VoxelDiag.adoptTilt;
+  let tiltCount = 0;
+  const undoTilts = [];
+  for (const t of transformedObjects()) {
+    const cc = [a[0] + t.c[0], a[1] + t.c[1], a[2] + t.c[2]];
+    const dup = tiltList.some(e => Math.abs(e.c[0] - cc[0]) < 0.01 && Math.abs(e.c[1] - cc[1]) < 0.01 && Math.abs(e.c[2] - cc[2]) < 0.01 && e.id === t.id);
+    if (dup) continue;
+    if (!addTilt(t.id, cc, t.q, t.st)) continue;
+    const ent = tiltList[tiltList.length - 1];
+    if (adopt) adopt(ent);
+    undoTilts.push({ tiltEnt: ent });
+    tiltCount++;
+  }
+  pushUndo([...changes, ...undoTilts]);
+  toast(`${changes.length} 個のブロックを貼り付けました${tiltCount ? '（傾き ' + tiltCount + ' 個）' : ''}`);
 }
 
 function colorOfId(id) {
@@ -1342,6 +1428,16 @@ function rebuildPaste() {
   const geo = new THREE.BoxGeometry(1.002, 1.002, 1.002);
   pasteGroup.userData.geo = geo;
   const m4 = new THREE.Matrix4();
+  for (const t of transformedObjects()) {
+    const made = makeTiltObject(t.id, t.st);
+    if (!made) continue;
+    const o = made.obj;
+    const off = made.isModel ? new THREE.Vector3(0, -0.5, 0).applyQuaternion(t.q) : new THREE.Vector3();
+    o.position.set(t.c[0] + off.x, t.c[1] + off.y, t.c[2] + off.z);
+    o.quaternion.copy(t.q);
+    o.traverse(m => { if (m.isMesh) { m.material = m.material.clone(); m.material.transparent = true; m.material.opacity = 0.4; m.material.depthWrite = false; m.castShadow = false; } });
+    pasteGroup.add(o);
+  }
   for (const [id, arr] of byId) {
     const mat = new THREE.MeshBasicMaterial({
       color: colorOfId(id), transparent: true, opacity: 0.38, depthWrite: false
@@ -2123,6 +2219,63 @@ function closeImport() {
 }
 
 // ============================================================
+// 画面の切り替えボタン（グリッド・傾き・斜め角度を、設定を開かずに変える）
+// ============================================================
+const QUICK_KEY = 'voxelcraft_quickbar_v1';
+function quickOn() { try { return localStorage.getItem(QUICK_KEY) === '1'; } catch (e) { return false; } }
+function setQuickOn(v) {
+  try { localStorage.setItem(QUICK_KEY, v ? '1' : '0'); } catch (e) {}
+  const el = document.getElementById('extQuick');
+  if (el) el.style.display = v ? 'flex' : 'none';
+}
+function diagAngleNow() { return window.VoxelDiag && VoxelDiag.angle ? VoxelDiag.angle() : 0; }
+function syncQuickBar() {
+  const g = document.getElementById('qkGrid'), t = document.getElementById('qkTilt'), d = document.getElementById('qkDeg');
+  if (!g) return;
+  if (document.activeElement !== g) g.value = String(ext.grid);
+  if (document.activeElement !== t) t.value = String(ext.tilt);
+  if (document.activeElement !== d) {
+    const a = String(diagAngleNow());
+    if (!Array.from(d.options || []).some(o => o.value === a)) { const o = document.createElement('option'); o.value = a; o.textContent = a + '°'; d.appendChild(o); }
+    d.value = a;
+  }
+}
+function buildQuickBar() {
+  const bar = document.createElement('div');
+  bar.id = 'extQuick';
+  bar.innerHTML = `
+    <select id="qkGrid" title="グリッド">
+      <option value="1">格子 1.0</option><option value="0.5">格子 0.5</option>
+      <option value="0.25">格子 0.25</option><option value="0">フリー</option>
+    </select>
+    <select id="qkTilt" title="傾き">
+      <option value="0">傾き 0°</option><option value="15">15°</option><option value="30">30°</option>
+      <option value="45">45°</option><option value="60">60°</option><option value="90">90°</option>
+    </select>
+    <select id="qkDeg" title="斜めの角度（格子を傾ける）">
+      <option value="0">斜め 0°</option><option value="15">15°</option><option value="30">30°</option><option value="45">45°</option>
+    </select>`;
+  const st = document.createElement('style');
+  st.textContent = `#extQuick{position:fixed;left:8px;top:96px;z-index:6;display:none;gap:4px;align-items:center;
+    background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.35);border-radius:8px;padding:4px;touch-action:manipulation}
+    #extQuick select{background:#14202e;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;font-size:12px;padding:3px 2px;max-width:92px}`;
+  document.head.appendChild(st);
+  document.body.appendChild(bar);
+  const g = bar.querySelector('#qkGrid'), t = bar.querySelector('#qkTilt'), d = bar.querySelector('#qkDeg');
+  for (const el of [g, t, d]) {
+    el.addEventListener('keydown', e => e.stopPropagation());
+    el.addEventListener('pointerdown', e => e.stopPropagation());
+    el.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+  }
+  g.addEventListener('change', () => { ext.grid = Number(g.value); saveExt(); syncQuickBar(); });
+  t.addEventListener('change', () => { ext.tilt = Number(t.value); saveExt(); syncQuickBar(); });
+  d.addEventListener('change', () => { if (window.VoxelDiag && VoxelDiag.setAngle) VoxelDiag.setAngle(d.value); syncQuickBar(); });
+  setInterval(syncQuickBar, 500);
+  setQuickOn(quickOn());
+  syncQuickBar();
+}
+
+// ============================================================
 // 設定パネル（ターボ・配置）
 // ============================================================
 function hookSettings() {
@@ -2151,15 +2304,20 @@ function hookSettings() {
         <option value="0.25">0.25</option><option value="0">フリー（グリッド無し）</option>
       </select>
     </label>
-    <p class="note">グリッド1.0かつ角度0°のときは通常のブロック（当たり判定あり）を置きます。それ以外は傾き・フリー配置で、見た目だけのブロックになります（当たり判定はありません）。</p>`;
+    <p class="note">グリッド1.0かつ角度0°のときは通常のブロック（当たり判定あり）を置きます。それ以外は傾き・フリー配置で、見た目だけのブロックになります（当たり判定はありません）。</p>
+    <label class="chk" style="margin-top:8px"><input type="checkbox" id="extQuickTog"> 切り替えボタンを画面に表示（設定を開かずに、グリッド・傾き・斜めを変えられます）</label>`;
   sbox.insertBefore(sec, closeBtn);
+  buildQuickBar();
   document.getElementById('extTurbo').addEventListener('change', e => setTurbo(e.target.checked));
   const tsel = document.getElementById('extTiltSel');
   const ssel = document.getElementById('extSnapSel');
   tsel.value = String(ext.tilt);
   ssel.value = String(ext.grid);
-  tsel.addEventListener('change', () => { ext.tilt = Number(tsel.value); saveExt(); });
-  ssel.addEventListener('change', () => { ext.grid = Number(ssel.value); saveExt(); });
+  tsel.addEventListener('change', () => { ext.tilt = Number(tsel.value); saveExt(); syncQuickBar(); });
+  ssel.addEventListener('change', () => { ext.grid = Number(ssel.value); saveExt(); syncQuickBar(); });
+  const qtog = document.getElementById('extQuickTog');
+  qtog.checked = quickOn();
+  qtog.addEventListener('change', () => setQuickOn(qtog.checked));
   document.getElementById('extOpenInv').addEventListener('click', e => {
     e.stopPropagation();
     settingsEl.classList.remove('show');

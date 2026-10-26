@@ -136,9 +136,10 @@ function onData(s, L, m) {
     if (first) {
       notifyLinks(s);
       const now = Date.now();
-      if (!s.haveSnap || now - (s.lastNeed || 0) > RESYNC_MS) {
+      if (!s.haveSnap && !s.askFrom) askSnapshot(s, L);     // 全体は1人からもらう（重複を避けて速くする）
+      else if (s.haveSnap && now - (s.lastNeed || 0) > RESYNC_MS) {
         s.lastNeed = now;
-        safeSend(L.conn, { t: 'need' });       // 全体をもらう（初めて入った人・再接続した人）
+        safeSend(L.conn, { t: 'need' });       // 再接続したときなど、食い違いを取り直す
       }
     }
     return;
@@ -147,8 +148,8 @@ function onData(s, L, m) {
   stats.recv++;
   switch (m.t) {
     case 'sum': checkSum(s, L, m); break;
-    case 'need': sendSnapshot(s, L); break;
-    case 'snap': applySnapshot(s, m); break;
+    case 'need': sendSnapshot(s, L).catch(e => console.error(e)); break;
+    case 'snap': onSnapPiece(s, L, m); break;
     case 'ops': onOps(s, m.ops, L.pid); break;
   }
 }
@@ -165,25 +166,101 @@ function packBy(items, max) {
   return out;
 }
 
-function sendSnapshot(s, L) {
-  const parts = packBy([...s.kv.entries()], MSG_MAX);
-  if (!parts.length) { safeSend(L.conn, { t: 'snap', i: 0, last: true, e: [] }); return; }
-  parts.forEach((p, i) => safeSend(L.conn, { t: 'snap', i, last: i === parts.length - 1, e: p }));
+// 文字列を一定の大きさに分ける
+function splitStr(str, size) {
+  const out = [];
+  for (let i = 0; i < str.length; i += size) out.push(str.slice(i, i + size));
+  return out;
+}
+const SNAP_PIECE = 60000;             // 1通の大きさ（文字数）
+const HAS_GZ = typeof CompressionStream === 'function' && typeof Response === 'function' && typeof Blob === 'function';
+async function gzipStr(str) {
+  const bytes = new TextEncoder().encode(str);
+  const buf = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+  return new Uint8Array(buf);
+}
+async function gunzipStr(bytes) {
+  return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+}
+function bytesToB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function b64ToBytes(b64) {
+  const bin = atob(b64), u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
 }
 
-function applySnapshot(s, m) {
-  if (Array.isArray(m.e)) {
-    for (const [key, val] of m.e) {
-      if (!val || typeof key !== 'string') continue;
-      seeTs(val.ts);
-      if (applyEntry(s, key, val)) s.hooks.onEntry && s.hooks.onEntry({ key, v: val.v, del: !!val.del, ts: val.ts, peer: val.peer });
-    }
-    persistSoon(s);
+// 全体を、圧縮してから分けて送る（容量が大きくても、通信量を小さくする）
+async function sendSnapshot(s, L) {
+  const json = JSON.stringify([...s.kv.entries()]);
+  let z = 0, body = json;
+  if (HAS_GZ && json.length > 1000) {
+    try { body = bytesToB64(await gzipStr(json)); z = 1; } catch (e) { body = json; z = 0; }
   }
-  if (m.last && !s.haveSnap) {
-    s.haveSnap = true;
-    s.hooks.onSnapDone && s.hooks.onSnapDone();
+  const pieces = splitStr(body, SNAP_PIECE);
+  if (!pieces.length) pieces.push('');
+  pieces.forEach((d, i) => safeSend(L.conn, { t: 'snap', i, n: pieces.length, z, d }));
+}
+
+// 1人からだけ全体を受け取る。届かなければ、別の人に頼み直す
+function askSnapshot(s, L) {
+  s.askFrom = L.id;
+  s.askAt = Date.now();
+  s.lastNeed = Date.now();
+  safeSend(L.conn, { t: 'need' });
+}
+function onSnapPiece(s, L, m) {
+  if (!m || typeof m.n !== 'number' || typeof m.i !== 'number') return;
+  if (!s.snapIn || s.snapIn.from !== L.id) {
+    if (s.snapIn && s.snapIn.from !== L.id) return;          // 別の人からの途中の分は無視
+    s.snapIn = { from: L.id, n: m.n, z: m.z, parts: [], got: 0 };
   }
+  const sn = s.snapIn;
+  if (sn.parts[m.i] === undefined) { sn.parts[m.i] = String(m.d || ''); sn.got++; }
+  s.askAt = Date.now();
+  s.hooks.onSnapProgress && s.hooks.onSnapProgress(sn.got, sn.n);
+  if (sn.got >= sn.n) finishSnap(s);
+}
+async function finishSnap(s) {
+  const sn = s.snapIn;
+  if (!sn) return;
+  s.snapIn = null;
+  let list = [];
+  try {
+    const body = sn.parts.join('');
+    const json = sn.z ? await gunzipStr(b64ToBytes(body)) : body;
+    list = JSON.parse(json);
+  } catch (e) {
+    console.error('全体の受け取りに失敗しました', e);
+    s.askFrom = null;                                        // 別の人に頼み直す
+    return;
+  }
+  // 受け取った分を、少しずつ反映する（画面が止まらないように）
+  let i = 0;
+  const CHUNK = 400;
+  await new Promise(resolve => {
+    (function step() {
+      if (S !== s) return resolve();
+      const end = Math.min(list.length, i + CHUNK);
+      for (; i < end; i++) {
+        const [key, val] = list[i];
+        if (!val || typeof key !== 'string') continue;
+        seeTs(val.ts);
+        if (applyEntry(s, key, val)) s.hooks.onEntry && s.hooks.onEntry({ key, v: val.v, del: !!val.del, ts: val.ts, peer: val.peer });
+      }
+      if (i < list.length) setTimeout(step, 0); else resolve();
+    })();
+  });
+  persistSoon(s);
+  markHaveSnap(s);
+}
+function markHaveSnap(s) {
+  s.haveSnap = true;
+  s.askFrom = null;
+  if (!s.doneSent) { s.doneSent = true; s.hooks.onSnapDone && s.hooks.onSnapDone(true); }
 }
 
 function onOps(s, ops, fromPid) {
@@ -296,16 +373,20 @@ function connectAll(s) {
 async function start(opts) {
   stop();
   await loadPeerJs();
+  // 席を同時に確かめて、空いている一番若い席を使う（順番に待つより速い）
+  const tries = [];
+  for (let k = 0; k < MAX_SLOTS; k++) tries.push(tryOpen(slotId(opts.roomId, k)).catch(() => null).then(p => ({ k, p })));
+  const got = await Promise.all(tries);
   let peer = null, slot = -1;
-  for (let k = 0; k < MAX_SLOTS; k++) {
-    const p = await tryOpen(slotId(opts.roomId, k));
-    if (p) { peer = p; slot = k; break; }
+  for (const r of got) {
+    if (r.p && peer === null) { peer = r.p; slot = r.k; }
+    else if (r.p) { try { r.p.destroy(); } catch (_) {} }
   }
   if (!peer) throw new Error('満員です（この部屋は同時に8人まで入れます）');
   const s = {
     roomId: opts.roomId, proof: opts.proof, tag: opts.tag || '', peer, slot,
     links: new Map(), kv: opts.kv || new Map(), seen: new Set(), queue: [],
-    flushT: null, retryT: null, saveT: null, sumT: null, haveSnap: !!opts.creator, lastNeed: 0,
+    flushT: null, retryT: null, saveT: null, sumT: null, haveSnap: !!opts.creator, doneSent: !!opts.creator, lastNeed: 0,
     hooks: opts.hooks || {}
   };
   S = s;
@@ -314,11 +395,24 @@ async function start(opts) {
   peer.on('disconnected', () => { setTimeout(() => { try { peer.reconnect(); } catch (_) {} }, 3000); });
   peer.on('error', () => {});                  // 相手が見つからないなどは、あとで自動で再試行
   s.retryT = setInterval(() => connectAll(s), RETRY_MS);
+  s.askT = setInterval(() => {
+    // 頼んだ人から一定時間届かなければ、別の人に頼み直す
+    if (S !== s || s.haveSnap) return;
+    if (s.snapIn && Date.now() - (s.askAt || 0) < 8000) return;
+    if (s.askFrom && Date.now() - (s.askAt || 0) < 8000) return;
+    const ok = [...s.links.values()].filter(L => L.ok && L.conn.open);
+    if (!ok.length) return;
+    const next = ok.find(L => L.id !== s.askFrom) || ok[0];
+    s.snapIn = null;
+    askSnapshot(s, next);
+  }, 2000);
+  // 誰もいない部屋（一人で入った）は、少し待ってから、手元のデータで始める
+  setTimeout(() => { if (S === s && !s.doneSent && peerCount(s) === 0) { s.doneSent = true; s.hooks.onSnapDone && s.hooks.onSnapDone(false); } }, 5000);
+  setTimeout(() => { if (S === s && !s.doneSent) { s.doneSent = true; s.hooks.onSnapDone && s.hooks.onSnapDone(false); } }, 40000);
   s.sumT = setInterval(() => sendSums(s), SUM_MS);
   connectAll(s);
   notifyLinks(s);
-  if (!s.haveSnap) setTimeout(() => { if (S === s && !s.haveSnap) { s.haveSnap = true; s.hooks.onSnapDone && s.hooks.onSnapDone(); } }, 12000);
-  return { slot };
+  return { slot, others: got.filter(r => !r.p).length };   // 他の人の席の数（0なら一人の部屋）
 }
 
 // 変更を送る。eph=true は記録に残さない一時的な情報（位置など）
@@ -346,6 +440,7 @@ function stop() {
   if (!s) return;
   S = null;
   clearInterval(s.retryT);
+  clearInterval(s.askT);
   clearInterval(s.sumT);
   clearTimeout(s.flushT);
   clearTimeout(s.saveT);
@@ -358,7 +453,7 @@ function stop() {
 function linkCount() { return S ? peerCount(S) + 1 : 0; }
 
 window.VoxelNet = {
-  start, send, stop, linkCount,
+  start, gzipStr, gunzipStr, bytesToB64, b64ToBytes, send, stop, linkCount,
   nowTs,                                  // 変更の時刻（時計ずれに強い）。各機能はこれを使う
   seeTs,
   active: () => !!S,

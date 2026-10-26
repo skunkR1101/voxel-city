@@ -198,11 +198,61 @@ function applyOp(rec) {
 // ============================================================
 // 部屋の作成・参加・退室
 // ============================================================
+// ============================================================
+// 読み込みの進み具合（参加ボタンを押してから、％で表示する）
+// ============================================================
+let loadBox = null, loadPct = 0, snapResolve = null;
+function loadEnsure() {
+  if (loadBox) return loadBox;
+  const st = document.createElement('style');
+  st.textContent = '#mpLoad{position:fixed;inset:0;z-index:96;display:none;align-items:center;justify-content:center;background:rgba(8,16,28,.72);touch-action:none}' +
+    '#mpLoad .box{width:min(88vw,380px);background:#14202e;color:#fff;border-radius:12px;padding:18px 18px 16px;font-family:sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5);box-sizing:border-box}' +
+    '#mpLoad .lbl{font-size:14px;margin-bottom:12px;line-height:1.5}' +
+    '#mpLoad .bar{height:12px;background:rgba(255,255,255,.15);border-radius:6px;overflow:hidden}' +
+    '#mpLoad .fill{height:100%;width:0;background:linear-gradient(90deg,#3d9be0,#7fd1ff);transition:width .2s}' +
+    '#mpLoad .pct{font-size:13px;margin-top:8px;text-align:right;opacity:.9}';
+  document.head.appendChild(st);
+  loadBox = document.createElement('div');
+  loadBox.id = 'mpLoad';
+  const box = document.createElement('div');
+  box.className = 'box';
+  const lbl = document.createElement('div'); lbl.className = 'lbl';
+  const bar = document.createElement('div'); bar.className = 'bar';
+  const fill = document.createElement('div'); fill.className = 'fill';
+  const pct = document.createElement('div'); pct.className = 'pct';
+  bar.appendChild(fill);
+  box.appendChild(lbl); box.appendChild(bar); box.appendChild(pct);
+  loadBox.appendChild(box);
+  document.body.appendChild(loadBox);
+  loadBox.refs = { lbl, fill, pct };
+  return loadBox;
+}
+function loadShow(label, pct) {
+  const b = loadEnsure();
+  b.style.display = 'flex';
+  loadPct = Math.max(loadPct, Math.min(100, Math.round(pct)));   // 進みが戻らないように
+  const r = b.refs;
+  r.lbl.textContent = label;
+  r.fill.style.width = loadPct + '%';
+  r.pct.textContent = loadPct + '%';
+}
+function loadHide() {
+  if (loadBox) loadBox.style.display = 'none';
+  loadPct = 0;
+}
+const tick = () => new Promise(r => setTimeout(r, 0));
+const GZ_OK = typeof CompressionStream === 'function' && typeof Response === 'function' && typeof Blob === 'function';
+
 function netHooks() {
   return {
     onEntry: rec => applyOp(rec),
     onEph: rec => applyOp(rec),
-    onSnapDone: () => { joining = false; refreshShare(); toast('部屋の状態を受け取りました'); },
+    onSnapProgress: (g, n) => { if (joining) loadShow('最新の状態を受け取っています（' + g + '/' + n + '）', 50 + 50 * g / n); },
+    onSnapDone: received => {
+      joining = false; refreshShare();
+      if (received) toast('部屋の状態を受け取りました');
+      if (snapResolve) { const r = snapResolve; snapResolve = null; r(); }
+    },
     onLinks: () => refreshShare(),
     save: kv => { if (conn) idbSet('room:' + conn.id, [...kv.entries()]); }
   };
@@ -263,7 +313,7 @@ function mergeKv(a, b) {
   return [...m.entries()];
 }
 // 1つのファイルが大きすぎると GitHub が受け付けないので、部屋のデータは数個のファイルに分けて置く
-const GH_PART_MAX = 300000;   // 1ファイルあたりの上限（JSON の文字数の目安）
+const GH_PART_MAX = 1000000;  // 1ファイルあたりの上限（圧縮前の文字数の目安。圧縮すると小さくなる）
 function ghPathOf(id, k) {
   return 'rooms/' + encodeURIComponent(id) + (k ? '.p' + k : '') + '.json';
 }
@@ -283,20 +333,55 @@ async function ghGetFile(c, path) {
   return { sha: j.sha, o: text ? JSON.parse(text) : {} };
 }
 // 既にあるファイル（本体・分割ファイル）をすべて読む。本体が無くても、分割ファイルがあれば読む
-async function ghPull(id) {
+// ファイルの中身（圧縮版 v3／従来の JSON 版 v1・v2）を、項目の一覧にもどす
+async function ghDecodeKv(o) {
+  if (!o) return [];
+  if (o.v === 3 && o.d) {
+    const text = await VoxelNet.gunzipStr(VoxelNet.b64ToBytes(o.d));
+    const j = JSON.parse(text);
+    return Array.isArray(j.kv) ? j.kv : [];
+  }
+  return Array.isArray(o.kv) ? o.kv : [];
+}
+// 既にあるファイルを読む（本体と分割ファイルは同時に取りに行く＝待ち時間を短くする）
+async function ghPull(id, onProg) {
   const c = ghCfg();
   if (!c) return { shas: {}, kv: [] };
   const shas = {};
-  let kv = [], n = 1, anyFound = false;
-  for (let k = 0; k < 1000; k++) {
-    const p = await ghGetFile(c, ghPathOf(id, k));
-    if (!p) { if (k === 0) continue; break; }
-    anyFound = true;
-    shas[ghPathOf(id, k)] = p.sha;
-    if (k === 0) n = Number(p.o.parts) || 1;
-    if (Array.isArray(p.o.kv)) kv = kv.concat(p.o.kv);
+  const mainRes = await ghGetFile(c, ghPathOf(id, 0));
+  let kv = [];
+  let n = 1;
+  if (mainRes) {
+    shas[ghPathOf(id, 0)] = mainRes.sha;
+    n = Number(mainRes.o.parts) || 1;
+    kv = kv.concat(await ghDecodeKv(mainRes.o));
+    const ks = [];
+    for (let k = 1; k < n; k++) ks.push(k);
+    let done = 1;
+    const got = await Promise.all(ks.map(async k => {
+      const p = await ghGetFile(c, ghPathOf(id, k));
+      if (onProg) onProg(++done, n);
+      return p;
+    }));
+    for (let i = 0; i < got.length; i++) {
+      const p = got[i];
+      if (!p) continue;
+      shas[ghPathOf(id, i + 1)] = p.sha;
+      kv = kv.concat(await ghDecodeKv(p.o));
+    }
+  } else {
+    // 本体が無いときは、分割ファイルが残っていないかを順に確かめる
+    let k = 1, found = false;
+    for (; k < 1000; k++) {
+      const p = await ghGetFile(c, ghPathOf(id, k));
+      if (!p) break;
+      found = true;
+      shas[ghPathOf(id, k)] = p.sha;
+      kv = kv.concat(await ghDecodeKv(p.o));
+    }
+    if (!found) { await ghRepoCheck(c); return { shas: {}, kv: [] }; }
   }
-  if (!anyFound) { await ghRepoCheck(c); return { shas: {}, kv: [] }; }
+  if (onProg) onProg(n, n);
   return { shas, kv: ghAssemble(kv), parts: n };
 }
 // 大きすぎる1件は、いくつかの断片に切って別々の項目として保存する
@@ -365,9 +450,13 @@ async function ghPushOnce(id, kv) {
     // 分けたファイルは後ろから書き、最後に先頭（目次の役目）を書く
     for (let k = chunks.length - 1; k >= 0 && !conflict; k--) {
       const path = ghPathOf(id, k);
-      const o = k === 0
-        ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] }
-        : { v: 2, r: id, t: now, kv: chunks[k] };
+      let o;
+      if (GZ_OK) {                                        // 圧縮できる端末は、圧縮して保存する
+        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr(JSON.stringify({ kv: chunks[k] })));
+        o = k === 0 ? { v: 3, r: id, t: now, parts: chunks.length, z: 1, d } : { v: 3, r: id, t: now, z: 1, d };
+      } else {
+        o = k === 0 ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] } : { v: 2, r: id, t: now, kv: chunks[k] };
+      }
       // 前の書き込みが途中で止まっていても、今のファイルの版番号を取り直して必ず上書きできるようにする
       let sha = cur.shas[path];
       if (!sha) { const ex = await ghGetFile(c, path); sha = ex ? ex.sha : null; }
@@ -407,41 +496,68 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
   disconnect(false);
   if (!id || !password) throw new Error('部屋IDとパスワードを入力してください');
   if (!window.VoxelNet) throw new Error('通信部品が読み込めていません');
-  const proof = await proofOf(id, password);
-  conn = { id, pw: password, name: name || '', tag: (tag || cfg.tag || '').trim(), seed: seed ?? null };
-  if (conn.tag) { cfg.tag = conn.tag; saveCfg(); }
-  known.clear();
-  // 参加するときは、この端末の編集データも空にする（シードが無いときは今のシードを使う）
-  if (window.VoxelWorld) VoxelWorld.applySeed(conn.seed != null ? conn.seed : VoxelWorld.getSeed(), !keepLocal);
+  loadPct = 0;
+  loadShow('参加の準備をしています…', 2);
+  try {
+    const proof = await proofOf(id, password);
+    conn = { id, pw: password, name: name || '', tag: (tag || cfg.tag || '').trim(), seed: seed ?? null };
+    if (conn.tag) { cfg.tag = conn.tag; saveCfg(); }
+    known.clear();
+    // 参加するときは、この端末の編集データも空にする（シードが無いときは今のシードを使う）
+    if (window.VoxelWorld) VoxelWorld.applySeed(conn.seed != null ? conn.seed : VoxelWorld.getSeed(), !keepLocal);
+    // 部屋に入るときは、この端末の道路・駅・ダイヤを、部屋の状態に合わせて入れ替える（作るときは除く）
+    if (!keepLocal && window.VoxelSync && VoxelSync.resetLocal) VoxelSync.resetLocal();
 
-  // 部屋に入るときは、この端末の道路・駅・ダイヤを、部屋の状態に合わせて入れ替える（作るときは除く）
-  if (!keepLocal && window.VoxelSync && VoxelSync.resetLocal) VoxelSync.resetLocal();
-  // 前に保存しておいた部屋の記録を、まず自分のワールドへ反映（一人でも続きから遊べる）
-  const saved = await idbGet('room:' + id);
-  const kv = new Map(Array.isArray(saved) ? saved : []);
-  if (ghCfg()) {
+    // 手元の記録（端末）と GitHub の記録を同時に読む（待ち時間を短くする）
+    loadShow('保存データを読み込んでいます…', 6);
+    const [saved, gh] = await Promise.all([
+      idbGet('room:' + id),
+      ghCfg()
+        ? ghPull(id, (g, n) => loadShow('GitHubから読み込んでいます（' + g + '/' + n + '）', 6 + 24 * g / n))
+          .then(r => ({ ok: true, r }), e => ({ ok: false, e }))
+        : Promise.resolve(null)
+    ]);
+    const kv = new Map(Array.isArray(saved) ? saved : []);
+    if (gh) {
+      if (gh.ok) { for (const [k, v] of mergeKv([...kv.entries()], gh.r.kv)) kv.set(k, v); toast('GitHubから最新の作業を読み込みました'); }
+      else toast('GitHubから読めなかったため、この端末の保存で続けます');
+    }
+
+    // 手元の作業を、少しずつ反映する（大きくても画面が止まらないように）
+    joining = true;
+    const list = [...kv.entries()];
+    for (let i = 0; i < list.length; i += 300) {
+      applyingRemote = true;
+      try {
+        for (const [key, val] of list.slice(i, i + 300)) applyOp({ key, v: val.v, del: val.del, ts: val.ts, peer: val.peer });
+      } finally { applyingRemote = false; }
+      loadShow('手元の作業を反映しています…', 30 + 12 * (i / Math.max(1, list.length)));
+      await tick();
+    }
+
+    loadShow('部屋に接続しています…', 44);
+    const snapDone = new Promise(r => { snapResolve = r; });
+    let info = { others: 0 };
     try {
-      const r = await ghPull(id);
-      for (const [k, v] of mergeKv([...kv.entries()], r.kv)) kv.set(k, v);
-      toast('GitHubから最新の作業を読み込みました');
-    } catch (e) { toast('GitHubから読めなかったため、この端末の保存で続けます'); }
+      info = await VoxelNet.start({ roomId: id, proof, tag: conn.tag, kv, creator: !!creator, hooks: netHooks() }) || info;
+    } catch (e) {
+      snapResolve = null; conn = null; joining = false;
+      throw e;
+    }
+    saveRoomEntry({ id, name: conn.name, pw: password, tag: conn.tag, seed: conn.seed });
+    refreshShare();
+    setStatus(`接続中：「${conn.name || '共同都市'}」`);
+    // 他の人がいる部屋では、最新の状態を受け取ってから入る（受け取りが遅いときは12秒で入る。続きは後から反映される）
+    if (!creator && info.others > 0) {
+      loadShow('最新の状態を受け取っています…', 50);
+      await Promise.race([snapDone, new Promise(r => setTimeout(r, 12000))]);
+    }
+    snapResolve = null;
+    joining = false;
+    return id;
+  } finally {
+    loadHide();
   }
-  joining = true;
-  applyingRemote = true;
-  try {
-    for (const [key, val] of kv) applyOp({ key, v: val.v, del: val.del, ts: val.ts, peer: val.peer });
-  } finally { applyingRemote = false; }
-
-  try {
-    await VoxelNet.start({ roomId: id, proof, tag: conn.tag, kv, creator: !!creator, hooks: netHooks() });
-  } catch (e) {
-    conn = null; joining = false;
-    throw e;
-  }
-  saveRoomEntry({ id, name: conn.name, pw: password, tag: conn.tag, seed: conn.seed });
-  refreshShare();
-  setStatus(`接続中：「${conn.name || '共同都市'}」`);
-  return id;
 }
 
 async function createRoom(name, password, tag) {
