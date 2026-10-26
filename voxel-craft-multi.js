@@ -229,7 +229,7 @@ function ghErrText(status) {
     401: 'トークンが正しくありません（貼り付けミス・期限切れ）',
     403: '書き込み権限がありません（トークンの Contents を Read and write にしてください）',
     404: 'リポジトリが見つからないか、トークンの対象外です（リポジトリ名と、トークンの Repository access を確認）',
-    422: '保存できませんでした（リポジトリが空の可能性。README を入れて作り直してください）'
+    422: '保存できませんでした（GitHub が内容を受け付けませんでした。リポジトリが空、またはデータが大きすぎる可能性）'
   };
   return m[status] || ('GitHub保存失敗（' + status + '）');
 }
@@ -262,22 +262,53 @@ function mergeKv(a, b) {
   }
   return [...m.entries()];
 }
-async function ghPull(id) {
-  const c = ghCfg();
-  if (!c) return { sha: null, kv: [] };
-  const url = 'https://api.github.com/repos/' + c.repo + '/contents/rooms/' + encodeURIComponent(id) + '.json';
+// 1つのファイルが大きすぎると GitHub が受け付けないので、部屋のデータは数個のファイルに分けて置く
+const GH_PART_MAX = 300000;   // 1ファイルあたりの上限（JSON の文字数の目安）
+function ghPathOf(id, k) {
+  return 'rooms/' + encodeURIComponent(id) + (k ? '.p' + k : '') + '.json';
+}
+async function ghGetFile(c, path) {
+  const url = 'https://api.github.com/repos/' + c.repo + '/contents/' + path;
   const res = await fetch(url, { headers: ghHeaders(c), cache: 'no-store' });
-  if (res.status === 404) { await ghRepoCheck(c); return { sha: null, kv: [] }; }
+  if (res.status === 404) return null;
   if (!res.ok) throw new Error(ghErrText(res.status));
   const j = await res.json();
   let text;
   if (j.content) text = new TextDecoder().decode(b64Dec(j.content));
   else {   // 1MB を超えるファイルは本文が空で返るので、生データを取り直す
     const raw = await fetch(url, { headers: { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github.raw' }, cache: 'no-store' });
+    if (!raw.ok) throw new Error(ghErrText(raw.status));
     text = await raw.text();
   }
-  const o = text ? JSON.parse(text) : {};
-  return { sha: j.sha, kv: Array.isArray(o.kv) ? o.kv : [] };
+  return { sha: j.sha, o: text ? JSON.parse(text) : {} };
+}
+async function ghPull(id) {
+  const c = ghCfg();
+  if (!c) return { shas: {}, kv: [] };
+  const main = await ghGetFile(c, ghPathOf(id, 0));
+  if (!main) { await ghRepoCheck(c); return { shas: {}, kv: [] }; }
+  const shas = { [ghPathOf(id, 0)]: main.sha };
+  let kv = Array.isArray(main.o.kv) ? main.o.kv : [];
+  const n = Number(main.o.parts) || 1;
+  for (let k = 1; k < n; k++) {
+    const p = await ghGetFile(c, ghPathOf(id, k));
+    if (!p) continue;
+    shas[ghPathOf(id, k)] = p.sha;
+    if (Array.isArray(p.o.kv)) kv = kv.concat(p.o.kv);
+  }
+  return { shas, kv };
+}
+// 項目を、1ファイルの上限を超えないように区切る
+function ghPack(kv) {
+  const parts = [];
+  let cur = [], size = 0;
+  for (const e of kv) {
+    const n = JSON.stringify(e).length + 1;
+    if (cur.length && size + n > GH_PART_MAX) { parts.push(cur); cur = []; size = 0; }
+    cur.push(e); size += n;
+  }
+  parts.push(cur);
+  return parts;
 }
 let ghLastSig = null;
 let ghQueue = Promise.resolve();
@@ -290,31 +321,37 @@ function ghPush(id, kv) {
 async function ghPushOnce(id, kv) {
   const c = ghCfg();
   if (!c || !id) return null;
-  {
-  try {
-    const url = 'https://api.github.com/repos/' + c.repo + '/contents/rooms/' + encodeURIComponent(id) + '.json';
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const cur = await ghPull(id);                       // 他の人の保存を取り込んでから書く
-      const merged = mergeKv(cur.kv, kv);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const cur = await ghPull(id);                       // 他の人の保存を取り込んでから書く
+    const merged = mergeKv(cur.kv, kv);
+    const chunks = ghPack(merged);
+    const now = Date.now();
+    let conflict = false;
+    // 分けたファイルは後ろから書き、最後に先頭（目次の役目）を書く
+    for (let k = chunks.length - 1; k >= 0 && !conflict; k--) {
+      const path = ghPathOf(id, k);
+      const o = k === 0
+        ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] }
+        : { v: 2, r: id, t: now, kv: chunks[k] };
       const body = {
         message: 'room ' + id + ' ' + new Date().toISOString(),
-        content: b64Enc(new TextEncoder().encode(JSON.stringify({ v: 1, r: id, t: Date.now(), kv: merged }))),
-        ...(cur.sha ? { sha: cur.sha } : {})
+        content: b64Enc(new TextEncoder().encode(JSON.stringify(o))),
+        ...(cur.shas[path] ? { sha: cur.shas[path] } : {})
       };
-      const res = await fetch(url, { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (res.ok) {
-        await idbSet('room:' + id, merged);
-        return merged;
-      }
-      if (res.status !== 409) {
-        let msg = '';
-        try { msg = (await res.json()).message || ''; } catch (e) {}
-        throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
-      }
+      const res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
+        { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (res.ok) continue;
+      if (res.status === 409) { conflict = true; break; }
+      let msg = '';
+      try { msg = (await res.json()).message || ''; } catch (e) {}
+      throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
     }
-    throw new Error('GitHubへの保存が何度も競合しました');
-  } finally { }
+    if (!conflict) {
+      await idbSet('room:' + id, merged);
+      return merged;
+    }
   }
+  throw new Error('GitHubへの保存が何度も競合しました');
 }
 // 接続中は一定間隔でGitHubへ保存（変わっていなくても、1分に1回まで）
 setInterval(() => {
