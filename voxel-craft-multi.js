@@ -282,21 +282,56 @@ async function ghGetFile(c, path) {
   }
   return { sha: j.sha, o: text ? JSON.parse(text) : {} };
 }
+// 既にあるファイル（本体・分割ファイル）をすべて読む。本体が無くても、分割ファイルがあれば読む
 async function ghPull(id) {
   const c = ghCfg();
   if (!c) return { shas: {}, kv: [] };
-  const main = await ghGetFile(c, ghPathOf(id, 0));
-  if (!main) { await ghRepoCheck(c); return { shas: {}, kv: [] }; }
-  const shas = { [ghPathOf(id, 0)]: main.sha };
-  let kv = Array.isArray(main.o.kv) ? main.o.kv : [];
-  const n = Number(main.o.parts) || 1;
-  for (let k = 1; k < n; k++) {
+  const shas = {};
+  let kv = [], n = 1, anyFound = false;
+  for (let k = 0; k < 1000; k++) {
     const p = await ghGetFile(c, ghPathOf(id, k));
-    if (!p) continue;
+    if (!p) { if (k === 0) continue; break; }
+    anyFound = true;
     shas[ghPathOf(id, k)] = p.sha;
+    if (k === 0) n = Number(p.o.parts) || 1;
     if (Array.isArray(p.o.kv)) kv = kv.concat(p.o.kv);
   }
-  return { shas, kv };
+  if (!anyFound) { await ghRepoCheck(c); return { shas: {}, kv: [] }; }
+  return { shas, kv: ghAssemble(kv), parts: n };
+}
+// 大きすぎる1件は、いくつかの断片に切って別々の項目として保存する
+const GH_SPLIT_AT = 150000;   // これを超える1件は断片に切る
+const GH_PIECE = 100000;      // 断片1つの大きさ（JSON文字数）
+const GH_SEP = '\u0001';
+function ghSplitEntry(e) {
+  const [key, val] = e;
+  if (!val || val.v === undefined || JSON.stringify(e).length + 1 <= GH_SPLIT_AT) return [e];
+  const s = JSON.stringify(val.v);
+  const n = Math.ceil(s.length / GH_PIECE);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push([key + GH_SEP + i, { ts: val.ts, peer: val.peer, del: val.del, pc: [i, n], pv: s.slice(i * GH_PIECE, (i + 1) * GH_PIECE) }]);
+  }
+  return out;
+}
+// 断片を元の1件に戻す（同じ版の断片が全部そろっているものだけ）
+function ghAssemble(list) {
+  const out = [];
+  const groups = new Map();
+  for (const [k, v] of list) {
+    if (!k.includes(GH_SEP) || !v || !v.pc) { out.push([k, v]); continue; }
+    const base = k.split(GH_SEP)[0];
+    let g = groups.get(base);
+    if (!g || (v.ts || 0) > g.ts) { g = { ts: v.ts || 0, n: v.pc[1], peer: v.peer, del: v.del, pieces: new Map() }; groups.set(base, g); }
+    if ((v.ts || 0) === g.ts) g.pieces.set(v.pc[0], v.pv);
+  }
+  for (const [base, g] of groups) {
+    if (g.pieces.size !== g.n) continue;
+    let val;
+    try { val = JSON.parse([...Array(g.n).keys()].map(i => g.pieces.get(i)).join('')); } catch (e) { continue; }
+    out.push([base, { v: val, ts: g.ts, peer: g.peer, del: g.del }]);
+  }
+  return out;
 }
 // 項目を、1ファイルの上限を超えないように区切る
 function ghPack(kv) {
@@ -323,8 +358,8 @@ async function ghPushOnce(id, kv) {
   if (!c || !id) return null;
   for (let attempt = 0; attempt < 3; attempt++) {
     const cur = await ghPull(id);                       // 他の人の保存を取り込んでから書く
-    const merged = mergeKv(cur.kv, kv);
-    const chunks = ghPack(merged);
+    const merged = mergeKv(cur.kv, kv);                 // ここまでは1件ずつの完全な形
+    const chunks = ghPack(merged.flatMap(ghSplitEntry)); // 保存用にだけ断片へ切る
     const now = Date.now();
     let conflict = false;
     // 分けたファイルは後ろから書き、最後に先頭（目次の役目）を書く
@@ -333,10 +368,13 @@ async function ghPushOnce(id, kv) {
       const o = k === 0
         ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] }
         : { v: 2, r: id, t: now, kv: chunks[k] };
+      // 前の書き込みが途中で止まっていても、今のファイルの版番号を取り直して必ず上書きできるようにする
+      let sha = cur.shas[path];
+      if (!sha) { const ex = await ghGetFile(c, path); sha = ex ? ex.sha : null; }
       const body = {
         message: 'room ' + id + ' ' + new Date().toISOString(),
         content: b64Enc(new TextEncoder().encode(JSON.stringify(o))),
-        ...(cur.shas[path] ? { sha: cur.shas[path] } : {})
+        ...(sha ? { sha } : {})
       };
       const res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
         { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
