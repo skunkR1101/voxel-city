@@ -77,11 +77,21 @@ function tryVisual(r) {
 // ============================================================
 // 3. 保存と通信
 // ============================================================
+function writeStore(key, json) {
+  try { localStorage.setItem(key, json); } catch (e) {}
+  VoxelExt.blobPut('idb:' + key, json).catch(e => console.error('保存できませんでした', e));
+}
+async function readStore(key) {
+  let json = null;
+  try { json = await VoxelExt.blobGet('idb:' + key); } catch (e) {}
+  if (!json) json = localStorage.getItem(key);
+  return json;
+}
+let diagLoaded = false;
 function save() {
-  try {
-    const list = [...recs.values()].map(r => ({ key: r.key, id: r.id, h: r.h, a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts }));
-    localStorage.setItem(KEY, JSON.stringify(list));
-  } catch (e) {}
+  if (!diagLoaded) return;
+  const list = [...recs.values()].map(r => ({ key: r.key, id: r.id, h: r.h, a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts }));
+  writeStore(KEY, JSON.stringify(list));
 }
 function sendRec(r) {
   const v = { a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts };
@@ -188,13 +198,16 @@ setInterval(retryWaiting, 1000);
 // ============================================================
 // 6. 起動（保存していた斜めブロックを、画面に戻す）
 // ============================================================
-try {
-  for (const r of JSON.parse(localStorage.getItem(KEY) || '[]')) {
-    if (!r || typeof r.key !== 'string') continue;
-    recs.set(r.key, r);
-    if (!tryVisual(r)) waiting.push(r);
+(async function loadDiagStore() {
+  let list;
+  try { list = JSON.parse((await readStore(KEY)) || '[]'); }
+  catch (e) { console.error('斜めブロックの保存データを読めませんでした', e); return; }   // 読めないときは上書きしない
+  for (const r of list) {
+    if (!r || typeof r.key !== 'string' || recs.has(r.key)) continue;
+    try { recs.set(r.key, r); if (!tryVisual(r)) waiting.push(r); } catch (e) { console.error(e); }
   }
-} catch (e) {}
+  diagLoaded = true;
+})();
 
 // ============================================================
 // 6b. グリッド（0.5マスなど）で傾けて置いたブロックの保存と通信
@@ -207,8 +220,10 @@ let tlScope = null;
 function tlNewKey() { return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function tlScopeNow() { return VoxelMulti.roomId() || 'local'; }
 function tlStrip(r) { return { key: r.key, id: r.id, h: r.h, c: r.c, q: r.q, st: r.st, ts: r.ts }; }
+let tlLocalReady = false;
 function tlSaveLocal() {
-  try { localStorage.setItem(TL_KEY, JSON.stringify([...tlRecs.values()].filter(r => r.src === 'local').map(tlStrip))); } catch (e) {}
+  if (!tlLocalReady) return;
+  writeStore(TL_KEY, JSON.stringify([...tlRecs.values()].filter(r => r.src === 'local').map(tlStrip)));
 }
 function tlAddVisual(r) {
   const id = r.h ? VoxelCustom.localIdFor(r.h) : r.id;
@@ -254,15 +269,18 @@ function tlAdopt(ent) {
   if (scope === 'local') tlSaveLocal();
   else if (VoxelMulti.connected()) VoxelMulti.send('tl:' + r.key, tlStrip(r));
 }
-function tlLoadLocal() {
-  try {
-    for (const v of JSON.parse(localStorage.getItem(TL_KEY) || '[]')) {
-      if (!v || typeof v.key !== 'string' || tlRecs.has(v.key)) continue;
-      const r = { ...v, src: 'local', ent: null };
-      tlRecs.set(r.key, r);
-      if (!tlAddVisual(r)) tlWaiting.push(r);
-    }
-  } catch (e) {}
+async function tlLoadLocal() {
+  tlLocalReady = false;
+  let list;
+  try { list = JSON.parse((await readStore(TL_KEY)) || '[]'); }
+  catch (e) { console.error('傾きブロックの保存データを読めませんでした', e); return; }
+  for (const v of list) {
+    if (!v || typeof v.key !== 'string' || tlRecs.has(v.key)) continue;
+    const r = { ...v, src: 'local', ent: null };
+    tlRecs.set(r.key, r);
+    if (!tlAddVisual(r)) tlWaiting.push(r);
+  }
+  tlLocalReady = true;
 }
 function tlSwitchScope(s) {
   for (const r of [...tlRecs.values()]) if (r.src !== s) tlDropRec(r);
@@ -297,7 +315,8 @@ setInterval(() => {
 window.addEventListener('voxelworld:fresh', () => {
   if (tlScopeNow() !== 'local') return;
   for (const r of [...tlRecs.values()]) if (r.src === 'local') tlDropRec(r);
-  try { localStorage.removeItem(TL_KEY); } catch (e) {}
+  tlLocalReady = true;
+  writeStore(TL_KEY, '[]');
 });
 
 // ============================================================

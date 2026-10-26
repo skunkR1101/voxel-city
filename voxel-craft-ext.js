@@ -2520,7 +2520,23 @@ function wire() {
       else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(x)) imgs[f.name.toLowerCase()] = await readAs(f, 'dataurl');
       else if (['obj', 'fbx', 'json', 'bbmodel'].includes(x) && !mainF) mainF = f;
     }
-    if (!mainF) { document.getElementById('extModelStatus').textContent = '対応形式は .obj .fbx .json .bbmodel です（.mtl と画像も一緒に選べます）。'; return; }
+    if (!mainF) {
+      // モデルは前に選んだものを使い、あとから選んだ .mtl・画像をそのモデルに付ける
+      if (!draft.model) { document.getElementById('extModelStatus').textContent = '先にモデル（.obj など）を選んでください。'; return; }
+      if (mtlF) draft.model.mtl = await readAs(mtlF, 'text');
+      draft.model.images = { ...(draft.model.images || {}), ...imgs };
+      draft.resolvedScale = null;
+      await rebuildDraftTemplate();
+      if (draft.model.mtl !== undefined) {
+        const mats = parseMtl(draft.model.mtl);
+        const used = [...mats.values()].filter(m => m.map).map(m => m.map.split(/[\\/]/).pop().toLowerCase());
+        const have = Object.keys(draft.model.images);
+        const missing = used.filter(name => !have.includes(name));
+        document.getElementById('extModelStatus').textContent += '（マテリアル ' + mats.size + ' 個・画像 ' + have.length + ' 枚' +
+          (missing.length ? '／見つからない画像：' + missing.join(', ') : '') + '）';
+      }
+      return;
+    }
     const x = extOf(mainF);
     const format = x === 'obj' ? 'obj' : x === 'fbx' ? 'fbx' : 'json';
     try {
@@ -2749,7 +2765,7 @@ init();
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
 window.VoxelExt = {
   CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
-  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson
+  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp
 };
 
 })();
