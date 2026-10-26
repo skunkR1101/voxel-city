@@ -48,7 +48,8 @@ function payloadOf(def) {
     orient: def.orient ?? null,
     scale: def.scale ?? null,
     alpha: def.alpha || 'cut',
-    glow: def.alpha === 'glow' ? (def.glowPower ?? 1.5) : null
+    glow: def.alpha === 'glow' ? (def.glowPower ?? 1.5) : null,
+    ...(def.modelRot ? { mrot: def.modelRot } : {})
   });
 }
 const hashCache = new WeakMap();   // 定義の物（オブジェクト）ごとに一度だけ計算
@@ -65,7 +66,7 @@ function contentKey(o) {
   return JSON.stringify({
     name: String(o.name || ''), kind: o.kind === 'model' ? 'model' : 'cube', colorable: !!o.colorable,
     texData: o.texData || null, model: o.model || null, orient: o.orient ?? null, scale: o.scale ?? null,
-    alpha, glow: alpha === 'glow' ? (o.glowPower ?? o.glow ?? 1.5) : null
+    alpha, glow: alpha === 'glow' ? (o.glowPower ?? o.glow ?? 1.5) : null, mrot: (o.modelRot ?? o.mrot) || 0
   });
 }
 function defByContent(o) {
@@ -107,6 +108,7 @@ const published = new Set();
 let publishedRoom = null;
 function publishDef(def) {
   const H = defHash(def);
+  if (!VoxelMulti.connected()) return H;          // 部屋に入るまで送らない（送ったことにしない）
   const room = VoxelMulti.roomId();
   if (room !== publishedRoom) { published.clear(); publishedRoom = room; }
   if (published.has(H)) return H;
@@ -141,6 +143,14 @@ const incoming = new Map();        // しるし -> { n, parts[] }
 const waiting = new Map();         // しるし -> [{x,y,z,s}]  定義がまだ届いていない置き場所
 const adopting = new Set();
 const adoptListeners = [];         // 定義が届いたときに呼ぶ関数（置き場所の再確認など）
+
+// 持っているカスタムブロック（インベントリの分）を、部屋の保存データに全部入れる。
+// 設置していなくても、後から入った人の端末のインベントリに届く
+function publishAllDefs() {
+  if (!VoxelMulti.connected()) return;
+  for (const d of ext.defs) if (d.id >= CUSTOM_BASE) publishDef(d);
+}
+setInterval(() => { try { publishAllDefs(); } catch (e) { console.error(e); } }, 3000);
 
 function getIn(H) {
   let o = incoming.get(H);
@@ -195,7 +205,7 @@ async function adoptDef(H, p) {
     id, name: String(p.name || 'カスタムブロック'), kind: p.kind === 'model' ? 'model' : 'cube',
     category: (ext.categories && ext.categories[0]) || '未分類', colorable: !!p.colorable,
     texData: p.texData || null, model: p.model || null,
-    orient: p.orient ?? undefined, scale: p.scale ?? undefined, alpha: p.alpha || 'cut', glowPower: p.glow ?? undefined,
+    orient: p.orient ?? undefined, scale: p.scale ?? undefined, alpha: p.alpha || 'cut', glowPower: p.glow ?? undefined, modelRot: p.mrot || 0,
     sounds: { break: { type: 'none' }, place: { type: 'none' } }
   };
   ext.defs.push(def);

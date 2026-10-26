@@ -18,15 +18,16 @@
 // ============================================================
 const EXT_KEY = 'voxelcraft_ext_v1';
 const CUSTOM_BASE = 100, CUSTOM_MAX = 255;
-const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54;
+const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55;
 const TOOLS = {
   50: { name: 'ステッキ', icon: '🪄', desc: 'タップで範囲の始点・終点を指定（3回目からは繰り返し）' },
   51: { name: 'スポイト', icon: '🧪', desc: 'ブロックをタップして登録（空気も登録できます）' },
   52: { name: 'フィル', icon: '🪣', desc: '長押しで選択範囲をスポイトのブロックで埋める' },
   53: { name: 'コピー', icon: '⧉', desc: '長押しで選択範囲をコピー' },
-  54: { name: 'ペースト', icon: '📌', desc: '長押しでコピーを貼り付け（半透明プレビュー付き）' }
+  54: { name: 'ペースト', icon: '📌', desc: '長押しでコピーを貼り付け（半透明プレビュー付き）' },
+  55: { name: 'ペースト前の回転・反転', icon: '🔄', desc: '持っている間、上の入力欄で回転・反転を設定（ペーストに反映）' }
 };
-const isTool = id => id >= T_WAND && id <= T_PASTE;
+const isTool = id => id >= T_WAND && id <= T_PASTE_ROT;
 const AIR_ID = 0;
 const ORIENT_NAMES = { fixed: '向き固定（ノーマル）', four: '4方向（かまど風）', free: '自由（原木・ボタン風）' };
 
@@ -49,7 +50,7 @@ const ext = {
   grid: 1,
   dropper: 3,
   clip: null,
-  pasteOpt: { rot: 0, mx: false, mz: false, air: false }
+  pasteOpt: { rot: 0, pitch: 0, mx: false, mz: false, fl: null, air: false }
 };
 
 const defRT = new Map();
@@ -738,7 +739,12 @@ function snapC(v, g) { return Math.round((v - 0.5) / g) * g + 0.5; }
 function tiltMode() { return ext.grid !== 1 || ext.tilt !== 0; }
 // 傾き配置の向き：カスタムモデルの「4方向」「固定（傾けないとき）」は、配置方式の向きを守る
 function tiltOrientFor(def, p, tp) {
-  if (def && def.kind === 'model' && (def.orient === 'four' || (def.orient === 'fixed' && ext.tilt === 0))) {
+  if (def && def.kind === 'model' && def.orient === 'four') {
+    const o = modelOrient(def, p);
+    const qy = modelQuat({ rot: o.rot, qb: null });
+    return { q: tp.q.clone().multiply(qy), rot: o.rot };   // 傾き × 正面の向き
+  }
+  if (def && def.kind === 'model' && def.orient === 'fixed' && ext.tilt === 0) {
     const o = modelOrient(def, p);
     return { q: modelQuat({ rot: o.rot, qb: null }), rot: o.rot };
   }
@@ -1025,9 +1031,16 @@ function copySel() {
   renderInventoryIfOpen();
 }
 
+function pitchQb(st) {
+  // 縦回転（X軸まわり 90°）を、今のブロックの向きに重ねた向き
+  const O = modelQuat(st);
+  const R = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+  const N = R.multiply(O);
+  return [N.x, N.y, N.z, N.w];
+}
 function transformedCells() {
   const c = ext.clip, o = ext.pasteOpt;
-  let sx = c.sx, sy = c.sy, sz = c.sz;
+  const sx = c.sx, sy = c.sy, sz = c.sz;
   const out = [];
   for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
     const i = x + z * sx + y * sx * sz;
@@ -1036,11 +1049,14 @@ function transformedCells() {
     const st = c.sts[i];
     out.push({ x, y, z, id, st: st ? { color: st.color, rot: st.rot, qb: st.qb || null } : null });
   }
+  // 反転：ペーストの反転と、向きに合わせた反転を合わせる（二重にかけると元に戻る）
+  const mx = !!o.mx !== (o.fl === 'x'), mz = !!o.mz !== (o.fl === 'z');
   for (const cell of out) {
-    if (o.mx) cell.x = sx - 1 - cell.x;
-    if (o.mz) cell.z = sz - 1 - cell.z;
+    if (mx) cell.x = sx - 1 - cell.x;
+    if (mz) cell.z = sz - 1 - cell.z;
   }
-  let W = sx, D = sz;
+  // 横回転
+  let W = sx, H = sy, D = sz;
   for (let k = 0; k < o.rot; k++) {
     for (const cell of out) {
       const nx = D - 1 - cell.z, nz = cell.x;
@@ -1049,7 +1065,17 @@ function transformedCells() {
     }
     const t = W; W = D; D = t;
   }
-  return { cells: out, sx: W, sy, sz: D };
+  // 縦回転
+  const pitchSteps = ((o.pitch || 0) % 4 + 4) % 4;
+  for (let k = 0; k < pitchSteps; k++) {
+    for (const cell of out) {
+      const ny = cell.z, nz = H - 1 - cell.y;
+      cell.y = ny; cell.z = nz;
+      if (cell.st) cell.st = { color: cell.st.color, rot: 0, qb: pitchQb(cell.st) };
+    }
+    const t = H; H = D; D = t;
+  }
+  return { cells: out, sx: W, sy: H, sz: D };
 }
 
 function pasteHere() {
@@ -1108,7 +1134,73 @@ function rebuildPaste() {
     pasteGroup.add(im);
   }
 }
+let rotBarEl = null, rotBarShown = false;
+function ensureRotBar() {
+  if (rotBarEl) return rotBarEl;
+  const d = document.createElement('div');
+  d.className = 'tb';
+  d.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:9;display:none;background:rgba(0,0,0,.75);' +
+    'color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;white-space:nowrap;font-family:sans-serif;touch-action:manipulation;text-align:center';
+  d.innerHTML = '横回転 <input id="prYaw" type="number" step="90" style="width:64px"> °　' +
+    '縦回転 <input id="prPitch" type="number" step="90" style="width:64px"> °　' +
+    '<label><input type="checkbox" id="prFlip"> 反転</label>' +
+    '<div id="prNote" style="font-size:11px;opacity:.85"></div>';
+  document.body.appendChild(d);
+  for (const sel of ['#prYaw', '#prPitch', '#prFlip']) {
+    const el = d.querySelector(sel);
+    el.addEventListener('keydown', e => e.stopPropagation());
+    el.addEventListener('pointerdown', e => e.stopPropagation());
+    el.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+    el.addEventListener('change', applyRotBar);
+  }
+  rotBarEl = d;
+  return d;
+}
+function snapQuarter(v) {
+  const n = Math.round((Number(v) || 0) / 90);
+  return ((n % 4) + 4) % 4;
+}
+function rotBarNote(o) {
+  return '横 ' + (o.rot * 90) + '° ／ 縦 ' + (o.pitch * 90) + '°（ブロックは90°単位）／ 反転：' +
+    (o.fl ? (o.fl === 'x' ? '左右（X）' : '左右（Z）') : 'なし');
+}
+function applyRotBar() {
+  const d = ensureRotBar();
+  const o = ext.pasteOpt;
+  o.rot = snapQuarter(d.querySelector('#prYaw').value);
+  o.pitch = snapQuarter(d.querySelector('#prPitch').value);
+  if (!d.querySelector('#prFlip').checked) o.fl = null;
+  else if (!o.fl) {
+    // 反転の向きは、チェックを入れた瞬間に向いている方向で決める（正面から見て左右を反転）
+    o.fl = Math.abs(Math.cos(player.yaw)) >= Math.abs(Math.sin(player.yaw)) ? 'x' : 'z';
+  }
+  pasteDirty = true;
+  d.querySelector('#prNote').textContent = rotBarNote(o);
+}
+function syncRotBar() {
+  const show = HOTBAR[selIdx] === T_PASTE_ROT && started && !menuOpen && !paused && !panelOpen;
+  if (!show) {
+    rotBarShown = false;
+    if (rotBarEl) rotBarEl.style.display = 'none';
+    return;
+  }
+  const d = ensureRotBar();
+  const hb = document.getElementById('hotbar');
+  const top = hb ? hb.getBoundingClientRect().top : window.innerHeight - 80;
+  d.style.top = Math.max(4, top - 66) + 'px';
+  if (!rotBarShown) {
+    // 持った瞬間に、今の設定を入力欄へ入れる
+    const o = ext.pasteOpt;
+    d.querySelector('#prYaw').value = String(o.rot * 90);
+    d.querySelector('#prPitch').value = String(o.pitch * 90);
+    d.querySelector('#prFlip').checked = !!o.fl;
+    d.querySelector('#prNote').textContent = rotBarNote(o);
+  }
+  rotBarShown = true;
+  d.style.display = 'block';
+}
 function updatePaste() {
+  syncRotBar();
   const id = HOTBAR[selIdx];
   if (id !== T_PASTE || !ext.clip || menuOpen || paused || !started || panelOpen) {
     pasteGroup.visible = false;
@@ -1289,7 +1381,7 @@ function renderToolsSection() {
   const show = ext.curCat === '全て' || ext.curCat === '道具';
   sec.style.display = show ? 'block' : 'none';
   if (!show) return;
-  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE].map(id => `
+  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT].map(id => `
     <div class="ext-item">
       <div style="font-size:30px;line-height:72px">${TOOLS[id].icon}</div>
       <div>${TOOLS[id].name}</div>
@@ -2394,6 +2486,7 @@ function init() {
   BLOCK_INFO[T_FILL] = { name: 'フィル', color: '#445566' };
   BLOCK_INFO[T_COPY] = { name: 'コピー', color: '#445566' };
   BLOCK_INFO[T_PASTE] = { name: 'ペースト', color: '#445566' };
+  BLOCK_INFO[T_PASTE_ROT] = { name: '回転・反転', color: '#445566' };
   hookSettings();
   wire();
   syncTurboUI();
