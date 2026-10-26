@@ -60,7 +60,7 @@ function localWrite(k, text) {
     timers.delete(k);
     const name = MIRROR[k];
     const prev = lastMeta.get(name) ? lastMeta.get(name).ts : 0;
-    const ts = Math.max(Date.now(), prev + 1);
+    const ts = Math.max((window.VoxelNet ? VoxelNet.nowTs() : Date.now()), prev + 1);
     lastMeta.set(name, { ts, n: 0 });
     sendValue(name, text, ts);
   }, DEBOUNCE));
@@ -77,7 +77,7 @@ Storage.prototype.setItem = function (k, v) {
 VoxelSync.announceAll = function () {
   for (const k of Object.keys(MIRROR)) {
     const v = origGet.call(localStorage, k);
-    if (v != null) sendValue(MIRROR[k], String(v), Math.max(Date.now(), (lastMeta.get(MIRROR[k]) || { ts: 0 }).ts + 1));
+    if (v != null) sendValue(MIRROR[k], String(v), Math.max((window.VoxelNet ? VoxelNet.nowTs() : Date.now()), (lastMeta.get(MIRROR[k]) || { ts: 0 }).ts + 1));
   }
 };
 

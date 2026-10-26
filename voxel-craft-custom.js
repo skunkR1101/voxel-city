@@ -40,16 +40,29 @@ function fnv(s, seed) {
 }
 function hashStr(s) { return fnv(s, 0x811c9dc5) + fnv(s, 0x12345679); }
 
+// 中身を、いつも同じ形の文字列にする（項目の順番・空の欄・再起動後の形の違いに左右されない）
+function canonModel(m) {
+  if (!m) return null;
+  let images = m.images;
+  if (typeof images === 'string') { try { images = JSON.parse(images); } catch (e) { images = null; } }
+  let im = null;
+  if (images && typeof images === 'object' && Object.keys(images).length) {
+    im = {};
+    for (const k of Object.keys(images).sort()) im[k] = images[k];
+  }
+  return { format: m.format ?? null, data: m.data ?? null, mtl: m.mtl ?? null, images: im };
+}
 function payloadOf(def) {
+  const alpha = def.alpha || 'cut';
   return JSON.stringify({
-    name: def.name, kind: def.kind, colorable: !!def.colorable,
-    texData: def.texData || null,
-    model: def.model || null,
+    name: String(def.name || ''), kind: def.kind === 'model' ? 'model' : 'cube', colorable: !!def.colorable,
+    texData: typeof def.texData === 'string' ? def.texData : null,
+    model: canonModel(def.model),
     orient: def.orient ?? null,
     scale: def.scale ?? null,
-    alpha: def.alpha || 'cut',
-    glow: def.alpha === 'glow' ? (def.glowPower ?? 1.5) : null,
-    ...(def.modelRot ? { mrot: def.modelRot } : {})
+    alpha,
+    glow: alpha === 'glow' ? (def.glowPower ?? def.glow ?? 1.5) : null,
+    mrot: (def.modelRot ?? def.mrot) || 0
   });
 }
 const hashCache = new WeakMap();   // 定義の物（オブジェクト）ごとに一度だけ計算
@@ -60,15 +73,8 @@ function defHash(def) {
 }
 function defByHash(H) { return ext.defs.find(d => defHash(d) === H) || null; }
 
-// 中身だけで同じかを判定する鍵（古い版で作られた定義とも一致するように、欠けている項目は既定値にそろえる）
-function contentKey(o) {
-  const alpha = o.alpha || 'cut';
-  return JSON.stringify({
-    name: String(o.name || ''), kind: o.kind === 'model' ? 'model' : 'cube', colorable: !!o.colorable,
-    texData: o.texData || null, model: o.model || null, orient: o.orient ?? null, scale: o.scale ?? null,
-    alpha, glow: alpha === 'glow' ? (o.glowPower ?? o.glow ?? 1.5) : null, mrot: (o.modelRot ?? o.mrot) || 0
-  });
-}
+// 中身だけで同じかを判定する鍵（しるしと同じ元の形を使う）
+function contentKey(o) { return payloadOf(o); }
 function defByContent(o) {
   const k = contentKey(o);
   return ext.defs.find(d => contentKey(d) === k) || null;
@@ -107,12 +113,13 @@ setInterval(() => { try { dedupeDefs(); } catch (e) { console.error(e); } }, 200
 const published = new Set();
 let publishedRoom = null;
 function publishDef(def) {
-  const H = defHash(def);
-  if (!VoxelMulti.connected()) return H;          // 部屋に入るまで送らない（送ったことにしない）
+  if (!VoxelMulti.connected()) return defHash(def);   // 部屋に入るまで送らない（送ったことにしない）
+  const s = payloadOf(def);
+  const H = hashStr(s);                               // 送る中身とかならず同じしるし
+  hashCache.set(def, H);
   const room = VoxelMulti.roomId();
   if (room !== publishedRoom) { published.clear(); publishedRoom = room; }
   if (published.has(H)) return H;
-  const s = payloadOf(def);
   const n = Math.max(1, Math.ceil(s.length / CHUNK));
   VoxelMulti.send('cdm:' + H, { n: n });
   for (let i = 0; i < n; i++) VoxelMulti.send('cdef:' + H + ':' + i, { d: s.slice(i * CHUNK, (i + 1) * CHUNK) });
@@ -142,6 +149,7 @@ VoxelMulti.setBlockEncoder((x, y, z, t) => {
 const incoming = new Map();        // しるし -> { n, parts[] }
 const waiting = new Map();         // しるし -> [{x,y,z,s}]  定義がまだ届いていない置き場所
 const adopting = new Set();
+const giveUp = new Set();          // 上限などで受け取れなかったしるし（何度も試さない）
 const adoptListeners = [];         // 定義が届いたときに呼ぶ関数（置き場所の再確認など）
 
 // 持っているカスタムブロック（インベントリの分）を、部屋の保存データに全部入れる。
@@ -151,6 +159,36 @@ function publishAllDefs() {
   for (const d of ext.defs) if (d.id >= CUSTOM_BASE) publishDef(d);
 }
 setInterval(() => { try { publishAllDefs(); } catch (e) { console.error(e); } }, 3000);
+
+// 部屋の記録（kv）を見直して、定義が届いているのに使えていないもの・置き場所が反映されていないものを直す
+function reconcileDefs() {
+  const kv = window.VoxelNet && VoxelNet.kv && VoxelNet.kv();
+  if (!kv || !VoxelMulti.connected()) return;
+  for (const [key, val] of kv) {                        // 1) 定義が届いているのに、まだ登録できていないもの
+    if (!key.startsWith('cdm:') || !val || val.del) continue;
+    const H = key.slice(4);
+    if (defByHash(H) || giveUp.has(H) || adopting.has(H)) continue;
+    const o = getIn(H);
+    o.n = Math.max(0, Number(val.v && val.v.n) || 0);
+    for (let i = 0; i < o.n; i++) {
+      const c = kv.get('cdef:' + H + ':' + i);
+      if (c && !c.del && c.v && typeof c.v.d === 'string') o.parts[i] = c.v.d;
+    }
+    tryAdopt(H);
+  }
+  if (typeof getBlock !== 'function') return;
+  for (const [key, val] of kv) {                        // 2) 置き場所の記録があるのに、まだ見えていないもの
+    if (!key.startsWith('b:') || !val || val.del || !val.v || typeof val.v.h !== 'string') continue;
+    const def = defByHash(val.v.h);
+    if (!def) continue;
+    const p = key.slice(2).split(',').map(Number);
+    if (p.length !== 3 || p.some(n => !Number.isInteger(n)) || p[1] <= -64) continue;
+    if (getBlock(p[0], p[1], p[2]) === def.id) continue;
+    setState(p[0], p[1], p[2], val.v.s || null);
+    VoxelMulti.applyBlock(p[0], p[1], p[2], def.id);
+  }
+}
+setInterval(() => { try { reconcileDefs(); } catch (e) { console.error(e); } }, 4000);
 
 function getIn(H) {
   let o = incoming.get(H);
@@ -198,9 +236,9 @@ async function tryAdopt(H) {
 
 async function adoptDef(H, p) {
   const have = defByHash(H) || defByContent(p);   // 同じ中身が既にあれば、新しく増やさない
-  if (have) return have.id;
+  if (have) { hashCache.set(have, H); return have.id; }
   const id = nextId();
-  if (id < 0) { if (window.VoxelWorld) VoxelWorld.toast('カスタムブロックの上限に達したため、受け取れませんでした'); return -1; }
+  if (id < 0) { if (window.VoxelWorld) VoxelWorld.toast('カスタムブロックの上限に達したため、受け取れませんでした'); giveUp.add(H); return -1; }
   const def = {
     id, name: String(p.name || 'カスタムブロック'), kind: p.kind === 'model' ? 'model' : 'cube',
     category: (ext.categories && ext.categories[0]) || '未分類', colorable: !!p.colorable,

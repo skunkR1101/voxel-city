@@ -38,6 +38,10 @@ function newer(a, b) {
   if (a.ts !== b.ts) return a.ts > b.ts;
   return String(a.peer) > String(b.peer);
 }
+// 時計ずれ対策：端末の時計が遅れていても、見たことのある一番新しい時刻より後になるように印を付ける
+let clk = 0;
+function nowTs() { clk = Math.max(Date.now(), clk + 1); return clk; }
+function seeTs(ts) { if (typeof ts === 'number' && isFinite(ts) && ts > clk) clk = ts; }
 function slotId(roomId, k) { return 'vcx1-' + roomId + '-' + k; }
 
 function loadPeerJs() {
@@ -171,6 +175,7 @@ function applySnapshot(s, m) {
   if (Array.isArray(m.e)) {
     for (const [key, val] of m.e) {
       if (!val || typeof key !== 'string') continue;
+      seeTs(val.ts);
       if (applyEntry(s, key, val)) s.hooks.onEntry && s.hooks.onEntry({ key, v: val.v, del: !!val.del, ts: val.ts, peer: val.peer });
     }
     persistSoon(s);
@@ -189,6 +194,7 @@ function onOps(s, ops, fromPid) {
     const id = op.peer + '|' + op.ts + '|' + op.key + '|' + (op.del ? 1 : 0);
     if (s.seen.has(id)) continue;                // 同じ変更は一度だけ
     rememberSeen(s, id);
+    seeTs(op.ts);
     fwd.push(op);
     if (op.eph) { s.hooks.onEph && s.hooks.onEph(op); continue; }
     const val = op.del ? { del: true, ts: op.ts, peer: String(op.peer || '') } : { v: op.v, ts: op.ts, peer: String(op.peer || '') };
@@ -319,7 +325,7 @@ async function start(opts) {
 function send(key, value, del, eph) {
   const s = S;
   if (!s) return;
-  const ts = Date.now();
+  const ts = nowTs();
   const op = { key, ts, peer: s.peer.id, del: !!del, eph: !!eph };
   if (!del) op.v = value;
   if (eph) {
@@ -353,6 +359,8 @@ function linkCount() { return S ? peerCount(S) + 1 : 0; }
 
 window.VoxelNet = {
   start, send, stop, linkCount,
+  nowTs,                                  // 変更の時刻（時計ずれに強い）。各機能はこれを使う
+  seeTs,
   active: () => !!S,
   stats: () => ({ ...stats }),
   kv: () => (S ? S.kv : null),

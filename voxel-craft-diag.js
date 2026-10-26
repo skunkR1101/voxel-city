@@ -121,7 +121,7 @@ function placeDiag(id) {
   const rt = id >= CUSTOM_BASE ? defRT.get(id) : null;
   if (id >= CUSTOM_BASE && (!rt || !rt.ready)) return;
   const r = {
-    key, id, a: deg, i: c.i, j: c.j, k: c.k, ts: Date.now(),
+    key, id, a: deg, i: c.i, j: c.j, k: c.k, ts: (window.VoxelNet ? VoxelNet.nowTs() : Date.now()),
     st: rt ? { color: rt.def.colorable ? ext.curColor : null, rot: ext.rot } : null,
     h: rt ? VoxelCustom.publishDef(rt.def) : null
   };
@@ -261,7 +261,7 @@ function tlAdopt(ent) {
   const r = {
     key: tlNewKey(), id: ent.id, h: rt && rt.def ? VoxelCustom.publishDef(rt.def) : null,
     c: [ent.c[0], ent.c[1], ent.c[2]], q: [ent.q.x, ent.q.y, ent.q.z, ent.q.w],
-    st: ent.st || null, ts: Date.now(), src: scope
+    st: ent.st || null, ts: (window.VoxelNet ? VoxelNet.nowTs() : Date.now()), src: scope
   };
   ent.tl = r.key;
   r.ent = ent;

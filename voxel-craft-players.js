@@ -248,7 +248,8 @@ function onPresence(rec) {
   if (rec.del) { removeRemote(peer, true); return; }
   const v = rec.v || {};
   // 古い情報（参加時の履歴など）は無視する
-  if (!v.ts || Date.now() - v.ts > STALE_MS) { if (remotes.has(peer)) removeRemote(peer, true); return; }
+  // 退出の判断は『最後に知らせが届いた時刻』で行う（端末の時計がずれていても、他の人が消えないように）
+  if (!v.ts) return;
   let r = remotes.get(peer);
   const now = Date.now();
   if (!r) {
@@ -307,7 +308,7 @@ function sendChat() {
   if (!text) return;
   if (!VoxelMulti.connected()) { addSys('部屋に参加するとチャットできます'); return; }
   const key = `chat:${Date.now()}-${PEER}`;
-  const v = { name: myName(), text, ts: Date.now() };
+  const v = { name: myName(), text, ts: (window.VoxelNet ? VoxelNet.nowTs() : Date.now()) };
   shown.add(key);
   addChatLine(v.name, text);
   VoxelMulti.send(key, v);
