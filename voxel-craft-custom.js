@@ -74,7 +74,12 @@ function defHash(def) {
 function defByHash(H) { return ext.defs.find(d => defHash(d) === H) || null; }
 
 // 中身だけで同じかを判定する鍵（しるしと同じ元の形を使う）
-function contentKey(o) { return payloadOf(o); }
+const keyCache = new WeakMap();    // 中身の鍵も、物ごとに一度だけ作る（大きな中身を何度も作り直さない）
+function contentKey(o) {
+  let k = keyCache.get(o);
+  if (k === undefined) { k = payloadOf(o); keyCache.set(o, k); }
+  return k;
+}
 function defByContent(o) {
   const k = contentKey(o);
   return ext.defs.find(d => contentKey(d) === k) || null;
@@ -114,12 +119,11 @@ const published = new Set();
 let publishedRoom = null;
 function publishDef(def) {
   if (!VoxelMulti.connected()) return defHash(def);   // 部屋に入るまで送らない（送ったことにしない）
-  const s = payloadOf(def);
-  const H = hashStr(s);                               // 送る中身とかならず同じしるし
-  hashCache.set(def, H);
+  const H = defHash(def);                             // しるしは一度だけ計算（毎回作り直すと重くなる）
   const room = VoxelMulti.roomId();
   if (room !== publishedRoom) { published.clear(); publishedRoom = room; }
   if (published.has(H)) return H;
+  const s = payloadOf(def);                           // 送る中身は、しるしと同じ元の形
   const n = Math.max(1, Math.ceil(s.length / CHUNK));
   VoxelMulti.send('cdm:' + H, { n: n });
   for (let i = 0; i < n; i++) VoxelMulti.send('cdef:' + H + ':' + i, { d: s.slice(i * CHUNK, (i + 1) * CHUNK) });
@@ -177,9 +181,10 @@ function reconcileDefs() {
     tryAdopt(H);
   }
   if (typeof getBlock !== 'function') return;
+  const byH = new Map(ext.defs.map(d => [defHash(d), d]));
   for (const [key, val] of kv) {                        // 2) 置き場所の記録があるのに、まだ見えていないもの
     if (!key.startsWith('b:') || !val || val.del || !val.v || typeof val.v.h !== 'string') continue;
-    const def = defByHash(val.v.h);
+    const def = byH.get(val.v.h);
     if (!def) continue;
     const p = key.slice(2).split(',').map(Number);
     if (p.length !== 3 || p.some(n => !Number.isInteger(n)) || p[1] <= -64) continue;
