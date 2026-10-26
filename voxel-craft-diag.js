@@ -132,7 +132,12 @@ function removeDiag(r) {
 
 const prevPlace = window.doPlace;
 window.doPlace = function () {
-  if (!deg) return prevPlace();
+  if (!deg) {
+    const before = tiltList.length;
+    const res = prevPlace();
+    for (let i = before; i < tiltList.length; i++) tlAdopt(tiltList[i]);
+    return res;
+  }
   const id = HOTBAR[selIdx];
   if (isTool(id)) return prevPlace();
   placeDiag(id);
@@ -144,6 +149,12 @@ window.doBreak = function () {
   if (p && p.kind === 'tilt' && p.ent && p.ent.diag) {
     const r = recs.get(p.ent.diag);
     if (r) { removeDiag(r); return; }
+  }
+  if (p && p.kind === 'tilt' && p.ent && p.ent.tl) {
+    const id = p.ent.id;
+    tlRemove(p.ent.tl, true);
+    if (typeof playBreak === 'function') playBreak(id);
+    return;
   }
   return prevBreak();
 };
@@ -184,6 +195,110 @@ try {
     if (!tryVisual(r)) waiting.push(r);
   }
 } catch (e) {}
+
+// ============================================================
+// 6b. グリッド（0.5マスなど）で傾けて置いたブロックの保存と通信
+//  ・この端末（ローカル）と、部屋（マルチ）で別々に覚える。部屋に入ると部屋のものを、出るとローカルのものを出す
+// ============================================================
+const TL_KEY = 'voxelcraft_tilt_v1';
+const tlRecs = new Map();     // キー -> 記録 { key, id, h, c, q, st, ts, src, ent }
+const tlWaiting = [];         // 定義がまだ届いていない記録
+let tlScope = null;
+function tlNewKey() { return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function tlScopeNow() { return VoxelMulti.roomId() || 'local'; }
+function tlStrip(r) { return { key: r.key, id: r.id, h: r.h, c: r.c, q: r.q, st: r.st, ts: r.ts }; }
+function tlSaveLocal() {
+  try { localStorage.setItem(TL_KEY, JSON.stringify([...tlRecs.values()].filter(r => r.src === 'local').map(tlStrip))); } catch (e) {}
+}
+function tlAddVisual(r) {
+  const id = r.h ? VoxelCustom.localIdFor(r.h) : r.id;
+  if (id == null) return false;
+  if (id >= CUSTOM_BASE) {
+    const rt = defRT.get(id);
+    if (!rt || !rt.ready) return false;
+  }
+  const q = new THREE.Quaternion(r.q[0], r.q[1], r.q[2], r.q[3]);
+  if (!addTilt(id, r.c, q, r.st)) return false;
+  const ent = tiltList[tiltList.length - 1];
+  ent.tl = r.key;
+  r.ent = ent;
+  r.id = id;
+  return true;
+}
+function tlDropRec(r) {
+  if (r.ent) removeTilt(r.ent);
+  r.ent = null;
+  tlRecs.delete(r.key);
+}
+function tlRemove(key, notify) {
+  const r = tlRecs.get(key);
+  if (!r) return;
+  const wasLocal = r.src === 'local';
+  tlDropRec(r);
+  if (wasLocal) tlSaveLocal();
+  if (notify && VoxelMulti.connected()) VoxelMulti.send('tl:' + key, undefined, true);
+}
+// 傾けて置いたブロック（ext の傾き配置）を記録し、部屋にも送る
+function tlAdopt(ent) {
+  if (ent.diag || ent.tl) return;
+  const rt = ent.id >= CUSTOM_BASE ? defRT.get(ent.id) : null;
+  const scope = tlScopeNow();
+  const r = {
+    key: tlNewKey(), id: ent.id, h: rt && rt.def ? VoxelCustom.publishDef(rt.def) : null,
+    c: [ent.c[0], ent.c[1], ent.c[2]], q: [ent.q.x, ent.q.y, ent.q.z, ent.q.w],
+    st: ent.st || null, ts: Date.now(), src: scope
+  };
+  ent.tl = r.key;
+  r.ent = ent;
+  tlRecs.set(r.key, r);
+  if (scope === 'local') tlSaveLocal();
+  else if (VoxelMulti.connected()) VoxelMulti.send('tl:' + r.key, tlStrip(r));
+}
+function tlLoadLocal() {
+  try {
+    for (const v of JSON.parse(localStorage.getItem(TL_KEY) || '[]')) {
+      if (!v || typeof v.key !== 'string' || tlRecs.has(v.key)) continue;
+      const r = { ...v, src: 'local', ent: null };
+      tlRecs.set(r.key, r);
+      if (!tlAddVisual(r)) tlWaiting.push(r);
+    }
+  } catch (e) {}
+}
+function tlSwitchScope(s) {
+  for (const r of [...tlRecs.values()]) if (r.src !== s) tlDropRec(r);
+  tlScope = s;
+  if (s === 'local') tlLoadLocal();
+}
+function tlRetry() {
+  for (let n = tlWaiting.length - 1; n >= 0; n--) {
+    const r = tlWaiting[n];
+    if (tlRecs.get(r.key) !== r) { tlWaiting.splice(n, 1); continue; }
+    if (tlAddVisual(r)) tlWaiting.splice(n, 1);
+  }
+}
+// 相手の置いたもの（部屋の保存データを読み込んだときも、ここに届く）
+VoxelMulti.onOp('tl', rec => {
+  const key = String(rec.key).slice(3);
+  if (rec.del) { tlRemove(key, false); return; }
+  if (tlRecs.has(key)) return;
+  const v = rec.v || {};
+  if (!Array.isArray(v.c) || !Array.isArray(v.q)) return;
+  const r = { key, id: v.id, h: v.h || null, c: v.c, q: v.q, st: v.st || null, ts: v.ts || rec.ts || 0, src: tlScopeNow(), ent: null };
+  tlRecs.set(key, r);
+  if (!tlAddVisual(r)) tlWaiting.push(r);
+});
+VoxelCustom.onAdopt(tlRetry);
+setInterval(() => {
+  const s = tlScopeNow();
+  if (s !== tlScope) tlSwitchScope(s);
+  tlRetry();
+}, 500);
+// 新しい世界を作ったときは、この端末のローカルの傾きブロックも消す
+window.addEventListener('voxelworld:fresh', () => {
+  if (tlScopeNow() !== 'local') return;
+  for (const r of [...tlRecs.values()]) if (r.src === 'local') tlDropRec(r);
+  try { localStorage.removeItem(TL_KEY); } catch (e) {}
+});
 
 // ============================================================
 // 7. 設定画面の項目（角度）

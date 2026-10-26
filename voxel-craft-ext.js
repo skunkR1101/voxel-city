@@ -135,17 +135,147 @@ function loadExt() {
     if (typeof s.grid === 'number') ext.grid = [1, 0.5, 0.25, 0].includes(s.grid) ? s.grid : 1;
   } catch (e) {}
 }
+const BLOB_DB = 'voxelcraft_blobs';
+const BIG_TEXT = 2048;               // これより長い文字列は IndexedDB に置く
+const blobLast = new Map();          // キー -> 最後に書いた値（同じなら書かない）
+let blobDbP = null;
+function blobDb() {
+  if (!blobDbP) blobDbP = new Promise((res, rej) => {
+    const r = indexedDB.open(BLOB_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('b');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  return blobDbP;
+}
+function blobWriteOp(key, val) {
+  return blobDb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction('b', 'readwrite');
+    tx.objectStore('b').put(val, key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
+  }));
+}
+function blobDelOp(key) {
+  return blobDb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction('b', 'readwrite');
+    tx.objectStore('b').delete(key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function blobGet(key) {
+  return blobDb().then(db => new Promise((res, rej) => {
+    const rq = db.transaction('b', 'readonly').objectStore('b').get(key);
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  }));
+}
+const isRef = v => !!v && typeof v === 'object' && typeof v.__blob === 'string';
+// 大きい文字列を書き込む（同じ値なら書かない）。書き込みの完了を待てる Promise を返す
+function writeBlob(key, val) {
+  if (blobLast.get(key) === val) return null;
+  blobLast.set(key, val);
+  return blobWriteOp(key, val).catch(() => {
+    blobLast.delete(key);
+    toast('容量の大きいデータを書き込めませんでした（保存領域がいっぱいの可能性があります）');
+  });
+}
+// 定義の中身を「軽い形」にする：大きい文字列は IndexedDB のキーに置き換える
+function lightenDefs(defs) {
+  const live = new Set(), pending = [];
+  const put = (key, v) => { const pr = writeBlob(key, v); if (pr) pending.push(pr); };
+  const ref = (key, v) => {
+    if (isRef(v)) { live.add(v.__blob); return v; }
+    if (typeof v !== 'string' || v.length < BIG_TEXT) return v;
+    live.add(key); put(key, v);
+    return { __blob: key };
+  };
+  const out = defs.map(d => {
+    const o = { ...d };
+    if (d.texData !== undefined) o.texData = ref(d.id + ':tex', d.texData);
+    if (d.model) {
+      const m = { ...d.model };
+      m.data = ref(d.id + ':mdl', m.data);
+      if (m.mtl !== undefined) m.mtl = ref(d.id + ':mtl', m.mtl);
+      if (isRef(m.images)) { live.add(m.images.__blob); }
+      else if (m.images && typeof m.images === 'object' && Object.keys(m.images).length) {
+        live.add(d.id + ':img');
+        put(d.id + ':img', JSON.stringify(m.images));
+        m.images = { __blob: d.id + ':img', json: true };
+      } else m.images = undefined;
+      o.model = m;
+    }
+    return o;
+  });
+  return { defs: out, live, pending };
+}
+function cleanBlobs(live) {
+  for (const k of [...blobLast.keys()]) {
+    if (!live.has(k)) { blobLast.delete(k); blobDelOp(k).catch(() => {}); }
+  }
+}
 function saveExt() {
   try {
+    const L = lightenDefs(ext.defs);
     localStorage.setItem(EXT_KEY, JSON.stringify({
       turbo: ext.turbo, shaderBefore: ext.shaderBefore,
-      categories: ext.categories, colorHistory: ext.colorHistory, defs: ext.defs,
+      categories: ext.categories, colorHistory: ext.colorHistory, defs: L.defs,
       tilt: ext.tilt, grid: ext.grid
     }));
+    cleanBlobs(L.live);
     return true;
   } catch (e) {
-    toast('保存できませんでした（モデルや音声が大きすぎる可能性があります）');
+    toast('保存できませんでした（設定の保存領域がいっぱいです）');
     return false;
+  }
+}
+async function resolveRef(v) {
+  if (!isRef(v)) return v;
+  const raw = await blobGet(v.__blob);
+  if (v.json) { try { return JSON.parse(raw || '{}'); } catch (e) { return {}; } }
+  return raw;
+}
+// 書き出し用：大きい中身も含めた、完全な設定の文字列
+async function fullExtJson() {
+  const defs = [];
+  for (const d of ext.defs) {
+    const o = { ...d };
+    if (d.texData !== undefined) o.texData = await resolveRef(d.texData);
+    if (d.model) {
+      const m = { ...d.model };
+      m.data = await resolveRef(m.data);
+      if (m.mtl !== undefined) m.mtl = await resolveRef(m.mtl);
+      if (m.images !== undefined) m.images = await resolveRef(m.images);
+      o.model = m;
+    }
+    defs.push(o);
+  }
+  return JSON.stringify({ turbo: ext.turbo, shaderBefore: ext.shaderBefore, categories: ext.categories,
+    colorHistory: ext.colorHistory, defs, tilt: ext.tilt, grid: ext.grid });
+}
+// 読み込み用：書き出したファイルの設定を、この端末の形で保存する
+async function importExtJson(json) {
+  const s = JSON.parse(json);
+  const L = lightenDefs(Array.isArray(s.defs) ? s.defs : []);
+  await Promise.all(L.pending);
+  localStorage.setItem(EXT_KEY, JSON.stringify({
+    turbo: !!s.turbo, shaderBefore: typeof s.shaderBefore === 'boolean' ? s.shaderBefore : null,
+    categories: s.categories, colorHistory: s.colorHistory, defs: L.defs, tilt: s.tilt, grid: s.grid
+  }));
+  cleanBlobs(L.live);
+}
+// 起動時：参照になっている中身を IndexedDB から戻す
+async function hydrateDefs() {
+  for (const d of ext.defs) {
+    if (isRef(d.texData)) d.texData = await resolveRef(d.texData);
+    if (d.model) {
+      const m = d.model;
+      if (isRef(m.data)) m.data = await resolveRef(m.data);
+      if (isRef(m.mtl)) m.mtl = await resolveRef(m.mtl);
+      if (isRef(m.images)) m.images = await resolveRef(m.images);
+    }
   }
 }
 
@@ -249,13 +379,104 @@ function placeModel(raw, scale) {
   return outer;
 }
 
-async function loadModelObject(format, data, texUrl, scaleOverride, rotDeg) {
-  let raw;
-  if (format === 'obj') raw = new THREE.OBJLoader().parse(data);
+// MTL（マテリアル）を読む：色（Kd）と、テクスチャの画像名（map_Kd）
+function parseMtl(text) {
+  const out = new Map();
+  let cur = null;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === '#') continue;
+    const p = line.split(/\s+/);
+    const k = p[0];
+    if (k === 'newmtl') { cur = { kd: [0.8, 0.8, 0.8], map: null }; out.set(line.slice(6).trim(), cur); }
+    else if (!cur) continue;
+    else if (k === 'Kd') cur.kd = [Number(p[1]) || 0, Number(p[2]) || 0, Number(p[3]) || 0];
+    else if (k === 'map_Kd') cur.map = p[p.length - 1];
+  }
+  return out;
+}
+// OBJ を、マテリアル（usemtl）ごとの頂点に分ける。四角以上の面は三角形に分ける
+function parseObjGroups(text) {
+  const vs = [], vts = [], vns = [];
+  const groups = new Map();
+  let mat = '';
+  const group = name => {
+    if (!groups.has(name)) groups.set(name, { pos: [], uv: [], nrm: [], hasUv: false, hasN: false });
+    return groups.get(name);
+  };
+  const idx = (s, n) => { const i = Number(s); return i < 0 ? n + i : i - 1; };
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === '#') continue;
+    const p = line.split(/\s+/);
+    const k = p[0];
+    if (k === 'v') vs.push(Number(p[1]) || 0, Number(p[2]) || 0, Number(p[3]) || 0);
+    else if (k === 'vt') vts.push(Number(p[1]) || 0, Number(p[2]) || 0);
+    else if (k === 'vn') vns.push(Number(p[1]) || 0, Number(p[2]) || 0, Number(p[3]) || 0);
+    else if (k === 'usemtl') mat = line.slice(6).trim();
+    else if (k === 'f' && p.length >= 4) {
+      const g = group(mat);
+      const corners = [];
+      for (let t = 1; t < p.length; t++) {
+        const parts = p[t].split('/');
+        corners.push([
+          idx(parts[0], vs.length / 3),
+          parts[1] ? idx(parts[1], vts.length / 2) : -1,
+          parts[2] ? idx(parts[2], vns.length / 3) : -1
+        ]);
+      }
+      for (let c = 1; c < corners.length - 1; c++) {
+        for (const [vi, ti, ni] of [corners[0], corners[c], corners[c + 1]]) {
+          g.pos.push(vs[vi * 3], vs[vi * 3 + 1], vs[vi * 3 + 2]);
+          if (ti >= 0) { g.uv.push(vts[ti * 2], vts[ti * 2 + 1]); g.hasUv = true; } else g.uv.push(0, 0);
+          if (ni >= 0) { g.nrm.push(vns[ni * 3], vns[ni * 3 + 1], vns[ni * 3 + 2]); g.hasN = true; } else g.nrm.push(0, 0, 0);
+        }
+      }
+    }
+  }
+  return groups;
+}
+// OBJ＋MTL＋画像から、マテリアルつきのモデルを作る
+async function buildObjWithMtl(text, mtlText, images) {
+  const groups = parseObjGroups(text);
+  const mats = parseMtl(mtlText);
+  const byName = new Map(Object.entries(images || {}).map(([k, v]) => [k.toLowerCase(), v]));
+  const imgFor = file => {
+    if (!file) return null;
+    const base = String(file).split(/[\\/]/).pop().toLowerCase();
+    return byName.get(base) || null;
+  };
+  const root = new THREE.Group();
+  const texCache = new Map();
+  for (const [name, g] of groups) {
+    const m = mats.get(name);
+    const mat = new THREE.MeshLambertMaterial();
+    if (m) mat.color.setRGB(m.kd[0], m.kd[1], m.kd[2]);
+    const url = m ? imgFor(m.map) : null;
+    if (url) {
+      let t = texCache.get(url);
+      if (!t) { t = await texFromUrl(url); texCache.set(url, t); }
+      if (t) { mat.map = t; mat.color.setRGB(1, 1, 1); }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(g.pos, 3));
+    if (g.hasUv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(g.uv, 2));
+    if (g.hasN) geo.setAttribute('normal', new THREE.Float32BufferAttribute(g.nrm, 3));
+    else geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = name;
+    root.add(mesh);
+  }
+  return root;
+}
+async function loadModelObject(format, data, texUrl, scaleOverride, rotDeg, mdl) {
+  let raw, fromMtl = false;
+  if (format === 'obj' && mdl && mdl.mtl) { raw = await buildObjWithMtl(data, mdl.mtl, mdl.images || {}); fromMtl = true; }
+  else if (format === 'obj') raw = new THREE.OBJLoader().parse(data);
   else if (format === 'fbx') raw = new THREE.FBXLoader().parse(await dataUrlToBuffer(data), '');
   else if (format === 'json') raw = parseBlockJson(JSON.parse(data));
   else throw new Error('unknown format');
-  if (texUrl) {
+  if (texUrl && !fromMtl) {
     const tex = await texFromUrl(texUrl);
     if (tex) applyTexToObj(raw, tex);
   }
@@ -305,7 +526,7 @@ async function registerDef(def) {
   } else if (def.model) {
     try {
       const r = await loadModelObject(def.model.format, def.model.data, def.texData,
-        typeof def.scale === 'number' ? def.scale : null, def.modelRot || 0);
+        typeof def.scale === 'number' ? def.scale : null, def.modelRot || 0, def.model);
       rt.template = r.root;
     } catch (err) {
       console.error(err);
@@ -1853,7 +2074,7 @@ async function rebuildDraftTemplate() {
   if (!draft.model) return;
   document.getElementById('extModelStatus').textContent = '読み込み中…';
   try {
-    const r = await loadModelObject(draft.model.format, draft.model.data, draft.modelTex, scaleOverrideOf(draft), draft.modelRot || 0);
+    const r = await loadModelObject(draft.model.format, draft.model.data, draft.modelTex, scaleOverrideOf(draft), draft.modelRot || 0, draft.model);
     draft.template = r.root;
     draft.resolvedScale = r.scale;
     document.getElementById('extModelStatus').textContent =
@@ -1877,7 +2098,10 @@ async function saveDraft() {
   const def = {
     id, name: draft.name, kind: draft.kind, category: draft.category, colorable: draft.colorable,
     texData: draft.kind === 'cube' ? draft.texData : draft.modelTex,
-    model: draft.kind === 'model' ? { format: draft.model.format, data: draft.model.data } : null,
+    model: draft.kind === 'model' ? {
+      format: draft.model.format, data: draft.model.data,
+      ...(draft.model.mtl !== undefined ? { mtl: draft.model.mtl, images: draft.model.images || {} } : {})
+    } : null,
     orient: draft.kind === 'model' ? draft.orient : undefined,
     modelRot: draft.kind === 'model' ? (draft.modelRot || 0) : undefined,
     scale: draft.kind === 'model' ? (draft.resolvedScale ?? 1) : undefined,
@@ -2071,7 +2295,7 @@ function buildDOM() {
     </div>
     <div id="extModelSec" style="display:none;margin-top:10px">
       <div class="ext-row">
-        <label>モデル <input type="file" id="extModelFile" accept=".obj,.fbx,.json,.bbmodel"></label>
+        <label>モデル <input type="file" id="extModelFile" multiple accept=".obj,.fbx,.json,.bbmodel,.mtl,image/png,image/jpeg,image/gif,image/webp,image/bmp"></label>
         <label>テクスチャ <input type="file" id="extModelTex" accept="image/png,image/jpeg"></label>
       </div>
       <div class="ext-row" style="margin-top:8px">
@@ -2285,15 +2509,34 @@ function wire() {
     document.getElementById('extCubePrev').src = draft.texData;
   });
   document.getElementById('extModelFile').addEventListener('change', async e => {
-    const f = e.target.files[0]; if (!f) return;
-    const x = f.name.split('.').pop().toLowerCase();
-    const format = x === 'obj' ? 'obj' : x === 'fbx' ? 'fbx' : (x === 'json' || x === 'bbmodel') ? 'json' : null;
-    if (!format) { document.getElementById('extModelStatus').textContent = '対応形式は .obj .fbx .json .bbmodel です。'; return; }
+    const files = [...e.target.files];
+    if (!files.length) return;
+    const extOf = f => f.name.split('.').pop().toLowerCase();
+    let mainF = null, mtlF = null;
+    const imgs = {};
+    for (const f of files) {
+      const x = extOf(f);
+      if (x === 'mtl') mtlF = f;
+      else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(x)) imgs[f.name.toLowerCase()] = await readAs(f, 'dataurl');
+      else if (['obj', 'fbx', 'json', 'bbmodel'].includes(x) && !mainF) mainF = f;
+    }
+    if (!mainF) { document.getElementById('extModelStatus').textContent = '対応形式は .obj .fbx .json .bbmodel です（.mtl と画像も一緒に選べます）。'; return; }
+    const x = extOf(mainF);
+    const format = x === 'obj' ? 'obj' : x === 'fbx' ? 'fbx' : 'json';
     try {
-      const data = format === 'fbx' ? await readAs(f, 'dataurl') : await readAs(f, 'text');
-      draft.model = { format, data };
+      const data = format === 'fbx' ? await readAs(mainF, 'dataurl') : await readAs(mainF, 'text');
+      const mdl = { format, data };
+      if (mtlF) { mdl.mtl = await readAs(mtlF, 'text'); mdl.images = imgs; }
+      draft.model = mdl;
       draft.resolvedScale = null;
       await rebuildDraftTemplate();
+      if (mtlF) {
+        const n = parseMtl(mdl.mtl).size;
+        const used = [...parseMtl(mdl.mtl).values()].filter(m => m.map).map(m => m.map.split(/[\\/]/).pop().toLowerCase());
+        const missing = used.filter(name => !Object.keys(imgs).includes(name));
+        document.getElementById('extModelStatus').textContent += '（マテリアル ' + n + ' 個・画像 ' + Object.keys(imgs).length + ' 枚' +
+          (missing.length ? '／見つからない画像：' + missing.join(', ') : '') + '）';
+      }
     } catch (err) {
       document.getElementById('extModelStatus').textContent = '読み込みに失敗しました。';
     }
@@ -2493,8 +2736,11 @@ function init() {
   if (ext.turbo) setTurbo(true);
   window.addEventListener('resize', applyRenderScale);
   setInterval(enforceTurbo, 300);
-  for (const def of ext.defs) registerDef(def);
-  refreshHotbarVisuals();
+  hydrateDefs().then(() => {
+    for (const def of ext.defs) registerDef(def);
+    refreshHotbarVisuals();
+    renderInventory();
+  }).catch(e => console.error(e));
   requestAnimationFrame(extLoop);
 }
 init();
@@ -2503,7 +2749,7 @@ init();
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
 window.VoxelExt = {
   CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
-  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals
+  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson
 };
 
 })();

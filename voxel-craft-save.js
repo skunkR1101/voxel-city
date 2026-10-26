@@ -138,8 +138,12 @@ function buildSave() {
     sounds: window.VoxelDia && VoxelDia.soundsWithData ? VoxelDia.soundsWithData() : []
   };
 }
-function downloadSave() {
+async function downloadSave() {
   const data = buildSave();
+  // ワールドの書き出しには、大きいモデルの中身も含める（別の端末で読み込めるように）
+  if (window.VoxelExt && VoxelExt.fullExtJson && data.storage['voxelcraft_ext_v1'] !== undefined) {
+    data.storage['voxelcraft_ext_v1'] = await VoxelExt.fullExtJson();
+  }
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
   const d = new Date();
@@ -166,7 +170,9 @@ async function loadFile(file) {
       if (k && k.startsWith('voxelcraft_')) localStorage.removeItem(k);
     }
     for (const [k, v] of Object.entries(data.storage || {})) {
-      if (typeof v === 'string') localStorage.setItem(k, v);
+      if (typeof v !== 'string') continue;
+      if (k === 'voxelcraft_ext_v1' && window.VoxelExt && VoxelExt.importExtJson) await VoxelExt.importExtJson(v);
+      else localStorage.setItem(k, v);
     }
     if (window.VoxelDia && VoxelDia.importSounds) await VoxelDia.importSounds(data.sounds || []);
     await idbPut(PENDING, { seed: data.seed ?? null, edits: (data.base && data.base.edits) || [] });
