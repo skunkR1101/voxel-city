@@ -742,25 +742,29 @@ function showPreview(pieces, vid) {
   for (const rec of prevPool.values()) rec.im.visible = false;
   const r = vrt.get(vid);
   if (!r || !r.parts || !pieces.length) return;
-  const buckets = bucketize(pieces);
-  for (const b of buckets.values()) {
-    let rec = prevPool.get(b.key);
+  // 予定の経路が動くたびに新しい描画物を増やさない。順番（部品の順）で同じ描画物を使い回す
+  const buckets = [...bucketize(pieces).values()];
+  buckets.forEach((b, idx) => {
+    const slot = 'p' + idx;
     const n = b.list.length;
-    if (!rec || rec.cap < n || rec.geo !== b.geo) {
+    let rec = prevPool.get(slot);
+    if (!rec || rec.cap < n) {
       if (rec) scene.remove(rec.im);
       const cap = Math.max(32, n * 2);
       const im = new THREE.InstancedMesh(b.geo, ghostMat(r, b.k), cap);
       im.frustumCulled = false;
       im.renderOrder = 6;
       scene.add(im);
-      rec = { im, cap, geo: b.geo };
-      prevPool.set(b.key, rec);
+      rec = { im, cap };
+      prevPool.set(slot, rec);
     }
+    if (rec.im.geometry !== b.geo) rec.im.geometry = b.geo;
+    rec.im.material = ghostMat(r, b.k);
     rec.im.visible = true;
     rec.im.count = n;
     b.list.forEach((pc, i) => rec.im.setMatrixAt(i, pieceMatrix(pc, _M, r)));
     rec.im.instanceMatrix.needsUpdate = true;
-  }
+  });
 }
 function hidePreview() {
   for (const rec of prevPool.values()) rec.im.visible = false;
@@ -1203,4 +1207,12 @@ VoxelSync.road = { reload: () => { loadAll(); rebuildMain(); if (typeof ensureAl
 
 init();
 
+// 自動車交通（voxel-craft-traffic.js）から、道路と同じ「地面の点」「経路の計算」「操作間隔」を使うための窓口
+window.VoxelRoad = {
+  surfacePoint, computePath, Y_LIFT,
+  getGrid: () => rs.grid,
+  getOffset: () => rs.offset
+};
+
 })();
+

@@ -18,16 +18,17 @@
 // ============================================================
 const EXT_KEY = 'voxelcraft_ext_v1';
 const CUSTOM_BASE = 100, CUSTOM_MAX = 255;
-const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55;
+const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55, T_TRAFFIC = 56;
 const TOOLS = {
   50: { name: 'ステッキ', icon: '🪄', desc: 'タップで範囲の始点・終点を指定（3回目からは繰り返し）' },
   51: { name: 'スポイト', icon: '🧪', desc: 'ブロックをタップして登録（空気も登録できます）' },
   52: { name: 'フィル', icon: '🪣', desc: '長押しで選択範囲をスポイトのブロックで埋める' },
   53: { name: 'コピー', icon: '⧉', desc: '長押しで選択範囲をコピー' },
   54: { name: 'ペースト', icon: '📌', desc: '長押しでコピーを貼り付け（半透明プレビュー付き）' },
-  55: { name: 'ペースト前の回転・反転', icon: '🔄', desc: '持っている間、上の入力欄で回転・反転を設定（ペーストに反映）' }
+  55: { name: 'ペースト前の回転・反転', icon: '🔄', desc: '持っている間、上の入力欄で回転・反転を設定（ペーストに反映）' },
+  56: { name: '自動車交通制御', icon: '🚗', desc: 'ルートを引く・分岐・速度・車の設定（ルートマーカーは持っている間だけ見えます）' }
 };
-const isTool = id => id >= T_WAND && id <= T_PASTE_ROT;
+const isTool = id => id >= T_WAND && id <= T_TRAFFIC;
 const AIR_ID = 0;
 const ORIENT_NAMES = { fixed: '向き固定（ノーマル）', four: '4方向（かまど風）', free: '自由（原木・ボタン風）' };
 
@@ -583,6 +584,77 @@ function modelCenterFor(cell, q) {
     .add(new THREE.Vector3(0, -0.5, 0).applyQuaternion(q));
 }
 
+// ============================================================
+// リアルなモデルのブロックは、1つずつ描かず「チャンクごとに1回でまとめて描く」（インスタンス描画）
+// 見た目（形・色・向き・影）は今までと同じ。描く回数が減るので、数が多くても軽くなる
+// ============================================================
+// 向きが変わらない部品の位置（モデルの中での位置・傾き）を、根元からの行列で持つ
+function relMatrixTo(obj, root) {
+  const chain = [];
+  for (let o = obj; o && o !== root; o = o.parent) chain.push(o);
+  const m = new THREE.Matrix4();
+  for (let i = chain.length - 1; i >= 0; i--) { chain[i].updateMatrix(); m.multiply(chain[i].matrix); }
+  return m;
+}
+// 部品ごとの情報（最初の1回だけ作る）。複数素材の部品があるモデルは、従来どおり1つずつ描く
+function modelBatchParts(rt) {
+  if (rt.batchParts !== undefined) return rt.batchParts;
+  const tpl = rt.template;
+  tpl.updateMatrixWorld(true);
+  const meshes = [];
+  tpl.traverse(o => { if (o.isMesh) meshes.push(o); });
+  const ok = meshes.length > 0 && meshes.every(m => !Array.isArray(m.material) && !Array.isArray(m.geometry));
+  if (!ok) { rt.batchParts = null; return null; }
+  rt.batchParts = meshes.map(m => {
+    const mat = m.material.clone();
+    const base = m.material.color ? m.material.color.clone() : new THREE.Color(0xffffff);
+    mat.color.set(0xffffff);                                  // 色は「インスタンスの色」で決める
+    mat.userData.isClone = true;
+    return { geo: m.geometry, rel: relMatrixTo(m, tpl), mat, base };
+  });
+  return rt.batchParts;
+}
+// 同じ種類のモデルブロックを、チャンク内で部品ごとに1つのまとめ描画にする
+function makeModelBatch(id, list) {
+  const rt = defRT.get(id);
+  if (!rt || !rt.template) return [];
+  const parts = modelBatchParts(rt);
+  if (!parts) {                                              // 特殊なモデルは従来どおり
+    const out = [];
+    for (const it of list) { const inst = makeModelInstance(id, it.x, it.y, it.z); if (inst) out.push(inst); }
+    return out;
+  }
+  const n = list.length;
+  const ims = parts.map(p => {
+    const im = new THREE.InstancedMesh(p.geo, p.mat, n);
+    im.frustumCulled = false;                               // 範囲の管理は、チャンクの読み込みで行う
+    im.castShadow = shaderOn;
+    im.receiveShadow = shaderOn;
+    im.userData.sharedGeo = true;                           // 形は元のモデルと共有（破棄しない）
+    return im;
+  });
+  const S = rt.template.scale;
+  const blockM = new THREE.Matrix4(), tmp = new THREE.Matrix4(), col = new THREE.Color();
+  list.forEach((it, i) => {
+    const st = blockState.get(keyOf(it.x, it.y, it.z)) || {};
+    const q = modelQuat(st);
+    const c = modelCenterFor([it.x, it.y, it.z], q);
+    blockM.compose(c, q, S);
+    const colored = !!(rt.def.colorable && st.color);
+    if (colored) col.set(st.color);
+    parts.forEach((p, j) => {
+      tmp.multiplyMatrices(blockM, p.rel);
+      ims[j].setMatrixAt(i, tmp);
+      ims[j].setColorAt(i, colored ? col : p.base);
+    });
+  });
+  for (const im of ims) {
+    im.instanceMatrix.needsUpdate = true;
+    if (im.instanceColor) im.instanceColor.needsUpdate = true;
+  }
+  return ims;
+}
+
 function makeModelInstance(id, wx, wy, wz) {
   const rt = defRT.get(id);
   if (!rt || !rt.template) return null;
@@ -612,7 +684,7 @@ window.disposeEntry = function (e) {
   if (e.extMeshes) {
     for (const o of e.extMeshes) {
       scene.remove(o);
-      if (o.isMesh && o.geometry) o.geometry.dispose();
+      if (o.isMesh && o.geometry && !o.userData.sharedGeo) o.geometry.dispose();
       o.traverse(c => {
         if (c.isMesh && c.material && c.material.userData && c.material.userData.isClone) c.material.dispose();
       });
@@ -743,6 +815,7 @@ window.buildMesh = function (e) {
   const WB = { p: [], n: [], uv: [], c: [], i: [] };
   const PB = { p: [], n: [], uv: [], c: [], i: [] };
   const CB = new Map();
+  const MB = new Map();                  // モデルのブロック（ID ごとに、まとめて描く）
   const extra = [];
 
   for (let z = 0; z < 16; z++) for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
@@ -775,8 +848,9 @@ window.buildMesh = function (e) {
       const rt = defRT.get(t);
       if (!rt || !rt.ready) continue;
       if (rt.def.kind === 'model') {
-        const inst = makeModelInstance(t, wx, wy, wz);
-        if (inst) { scene.add(inst); extra.push(inst); }
+        let lst = MB.get(t);
+        if (!lst) { lst = []; MB.set(t, lst); }
+        lst.push({ x: wx, y: wy, z: wz });
         continue;
       }
       if (!rt.material) continue;
@@ -804,6 +878,9 @@ window.buildMesh = function (e) {
     }
   }
 
+  for (const [id, list] of MB) {
+    for (const o of makeModelBatch(id, list)) { scene.add(o); extra.push(o); }
+  }
   applyGlowLight([SB, WB, PB, ...CB.values()], glowSourcesOf(d, e));
   if (SB.p.length) {
     const m = new THREE.Mesh(makeGeom(SB), solidMat);
@@ -1737,7 +1814,7 @@ function renderToolsSection() {
   const show = ext.curCat === '全て' || ext.curCat === '道具';
   sec.style.display = show ? 'block' : 'none';
   if (!show) return;
-  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT].map(id => `
+  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC].map(id => `
     <div class="ext-item">
       <div style="font-size:30px;line-height:72px">${TOOLS[id].icon}</div>
       <div>${TOOLS[id].name}</div>
@@ -2910,8 +2987,20 @@ window.addEventListener('keydown', e => {
 // ============================================================
 // 毎フレームの処理
 // ============================================================
+// 手で置いた（細かいグリッド・斜め・傾き）ブロックは、読み込んだチャンクの外では描かない
+let tiltCullAt = 0;
+function cullTilts() {
+  for (const ent of tiltList) {
+    const c = ent.c, o = ent.obj;
+    if (!c || !o) continue;
+    const cx = Math.floor(c[0] / CS), cy = Math.floor(c[1] / CS), cz = Math.floor(c[2] / CS);
+    const vis = inRange(cx, cz, curPcx, curPcz, RD) && Math.abs(cy - curPcy) <= RD;
+    if (o.visible !== vis) o.visible = vis;
+  }
+}
 function extLoop() {
   requestAnimationFrame(extLoop);
+  if (performance.now() - tiltCullAt > 250) { tiltCullAt = performance.now(); cullTilts(); }
   if (panelOpen === 'extBag') drawBagSkin(performance.now() / 1000);
   updateGhost();
   updateSelVisual(performance.now() / 1000);
@@ -3067,7 +3156,7 @@ function bagNameOf(id) {
 function bagCatalog(cat) {
   const out = [];
   if (cat === '全て' || cat === '標準') for (const id of DEFAULT_IDS) out.push({ id, name: BLOCK_INFO[id].name, cat: '標準' });
-  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
+  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
   for (const d of ext.defs) if (cat === '全て' || d.category === cat) out.push({ id: d.id, name: d.name, cat: d.category });
   return out;
 }
@@ -3185,6 +3274,7 @@ function init() {
   BLOCK_INFO[T_COPY] = { name: 'コピー', color: '#445566' };
   BLOCK_INFO[T_PASTE] = { name: 'ペースト', color: '#445566' };
   BLOCK_INFO[T_PASTE_ROT] = { name: '回転・反転', color: '#445566' };
+  BLOCK_INFO[T_TRAFFIC] = { name: '自動車交通制御', color: '#445566' };
   hookSettings();
   wire();
   syncTurboUI();
@@ -3203,7 +3293,7 @@ init();
 // ── 他の機能ファイル（通信・カスタム・斜め配置・見え方）が使う内部の名前を公開する ──
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
 window.VoxelExt = {
-  CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
+  T_TRAFFIC, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
   keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp
 };
 
