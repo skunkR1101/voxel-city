@@ -117,9 +117,31 @@ setInterval(() => { try { dedupeDefs(); } catch (e) { console.error(e); } }, 200
 // ============================================================
 const published = new Set();
 let publishedRoom = null;
+// 自分で削除したカスタムブロック：部屋の記録や他の人の持ち物から戻ってこないように覚えておく
+const FORGET_KEY = 'voxelcraft_defdel_v1';
+const forgotten = new Set((() => { try { return JSON.parse(localStorage.getItem(FORGET_KEY) || '[]'); } catch (e) { return []; } })());
+function saveForgotten() { try { localStorage.setItem(FORGET_KEY, JSON.stringify([...forgotten])); } catch (e) {} }
+function forgetDef(H) {
+  forgotten.add(H);
+  saveForgotten();
+  published.delete(H);
+  waiting.delete(H);
+  // 部屋の記録からも消す（つながっているときだけ。つながっていなくても、この端末では戻さない）
+  if (VoxelMulti.connected() && window.VoxelNet && VoxelNet.kv) {
+    const kv = VoxelNet.kv();
+    for (const key of [...kv.keys()]) {
+      if (key === 'cdm:' + H || key.startsWith('cdef:' + H + ':')) VoxelMulti.send(key, undefined, true);
+    }
+  }
+}
+function unforgetDef(H) {
+  if (!forgotten.delete(H)) return;
+  saveForgotten();
+}
 function publishDef(def) {
   if (!VoxelMulti.connected()) return defHash(def);   // 部屋に入るまで送らない（送ったことにしない）
   const H = defHash(def);                             // しるしは一度だけ計算（毎回作り直すと重くなる）
+  if (forgotten.has(H)) return H;                     // 削除したものは送らない
   const room = VoxelMulti.roomId();
   if (room !== publishedRoom) { published.clear(); publishedRoom = room; }
   if (published.has(H)) return H;
@@ -171,7 +193,7 @@ function reconcileDefs() {
   for (const [key, val] of kv) {                        // 1) 定義が届いているのに、まだ登録できていないもの
     if (!key.startsWith('cdm:') || !val || val.del) continue;
     const H = key.slice(4);
-    if (defByHash(H) || giveUp.has(H) || adopting.has(H)) continue;
+    if (defByHash(H) || giveUp.has(H) || adopting.has(H) || forgotten.has(H)) continue;
     const o = getIn(H);
     o.n = Math.max(0, Number(val.v && val.v.n) || 0);
     for (let i = 0; i < o.n; i++) {
@@ -216,7 +238,7 @@ VoxelMulti.onOp('cdef', rec => {
 
 async function tryAdopt(H) {
   const o = incoming.get(H);
-  if (!o || !o.n || adopting.has(H)) return;
+  if (!o || !o.n || adopting.has(H) || forgotten.has(H)) return;
   for (let i = 0; i < o.n; i++) if (typeof o.parts[i] !== 'string') return;   // まだ全部届いていない
   adopting.add(H);
   try {
@@ -281,6 +303,8 @@ window.VoxelCustom = {
   defHash, publishDef,
   invalidate: def => hashCache.delete(def),                 // 中身を変えたあとに呼ぶ
   localIdFor: H => { const d = defByHash(H); return d ? d.id : null; },
-  onAdopt: fn => adoptListeners.push(fn)
+  onAdopt: fn => adoptListeners.push(fn),
+  forget: forgetDef,                                        // 削除したとき（この端末・部屋の記録から外す）
+  unforget: unforgetDef                                     // 同じ中身を新しく作ったとき
 };
 })();

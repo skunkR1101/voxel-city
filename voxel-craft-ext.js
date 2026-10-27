@@ -374,7 +374,9 @@ function placeModel(raw, scale) {
   // Blockbench の制作位置をそのまま使う：1ブロック分の枠（16px、または1単位）の中心をブロックの中心に合わせる。
   // モデルの大きさに関係なく、端に寄せた位置・はみ出した部分も、制作したとおりの場所に出る。
   // 縦方向は底面を床に合わせる（今までどおり）。
-  raw.position.set(-0.5, -b.min.y, -0.5);
+  // 水平方向は、モデルの幅の中心をブロックの中心に合わせる（原点がどこにあっても、ずれない）
+  const cx = (b.min.x + b.max.x) / 2, cz = (b.min.z + b.max.z) / 2;
+  raw.position.set(-cx, -b.min.y, -cz);
   outer.updateMatrixWorld(true);
   return outer;
 }
@@ -1803,6 +1805,7 @@ function deleteDef(id) {
   const def = defById(id);
   if (!def) return;
   if (!confirm(`「${def.name}」を削除しますか？\n配置済みのこのブロックも消えます。`)) return;
+  if (window.VoxelCustom && VoxelCustom.forget) VoxelCustom.forget(VoxelCustom.defHash(def));
   for (const e of chunks.values()) {
     if (!e.data) continue;
     let changed = false;
@@ -2207,6 +2210,7 @@ async function saveDraft() {
   };
   ext.defs.push(def);
   if (!saveExt()) { ext.defs.pop(); return; }
+  if (window.VoxelCustom && VoxelCustom.unforget) VoxelCustom.unforget(VoxelCustom.defHash(def));
   await registerDef(def);
   if (window.VoxelFx && VoxelFx.apply) VoxelFx.apply(def);
   closeImport();
