@@ -642,47 +642,84 @@ function glowColorOf(rt) {
   rt.glowCol = col;
   return col;
 }
-// このチャンクの中にある発光ブロック（チャンクの外へは光を広げない）
-function glowSourcesOf(dd) {
+// このチャンクと周りの隣（±1チャンク）にある発光ブロック。光は隣のチャンクまで届くので、隣も見る
+function isGlowId(id) {
+  if (id < CUSTOM_BASE) return false;
+  const rt = defRT.get(id);
+  return !!(rt && rt.def && rt.def.alpha === 'glow');
+}
+// 光の届く距離（明るさの数値で変わる。弱いと近くだけ、強いと遠くまで）
+function glowRadiusOf(power) { return 3 + 2.2 * power; }
+function glowSourcesOf(dd, e) {
   const out = [];
   if (!ext.defs.some(df => df.alpha === 'glow')) return out;
-  for (let li = 0; li < 4096; li++) {
-    const t = dd[li];
-    if (t < CUSTOM_BASE) continue;
-    const rt = defRT.get(t);
-    if (!rt || !rt.ready || !rt.def || rt.def.alpha !== 'glow') continue;
-    const col = glowColorOf(rt);
-    out.push({ x: (li & 15) + 0.5, y: ((li >> 4) & 15) + 0.5, z: ((li >> 8) & 15) + 0.5,
-      r: col[0], g: col[1], b: col[2], power: rt.def.glowPower || 1.5 });
+  for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    let data = dd;
+    if (dx || dy || dz) {
+      const nb = chunks.get(ckey(e.cx + dx, e.cy + dy, e.cz + dz));
+      data = nb && nb.data;
+    }
+    if (!data) continue;
+    for (let li = 0; li < 4096; li++) {
+      const t = data[li];
+      if (t < CUSTOM_BASE) continue;
+      const rt = defRT.get(t);
+      if (!rt || !rt.ready || !rt.def || rt.def.alpha !== 'glow') continue;
+      const col = glowColorOf(rt);
+      const power = rt.def.glowPower || 1.5;
+      out.push({
+        x: dx * CS + (li & 15) + 0.5, y: dy * CS + ((li >> 4) & 15) + 0.5, z: dz * CS + ((li >> 8) & 15) + 0.5,
+        r: col[0], g: col[1], b: col[2], I: power * 0.6, R: glowRadiusOf(power)
+      });
+    }
   }
   return out;
 }
-// 頂点の色へ光を足す。格子点ごとに一度だけ計算して、頂点はそこから引く（発光の数が多くても軽い）
+// 発光の光を、面ごとの頂点の色へ足す。
+// ・光の強さは距離とともに滑らかに減り、届く距離の外は0（チャンク全体は染まらない）
+// ・面が光の方を向いているほど明るい（向いていない面は、わずかな回り込みだけ）
 function applyGlowLight(bufs, srcs) {
   if (!srcs.length) return;
-  const N = 17;
-  const L = new Float32Array(N * N * N * 3);
-  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
-    let r = 0, g = 0, b = 0;
-    for (const sc of srcs) {
-      const dx = x - sc.x, dy = y - sc.y, dz = z - sc.z;
-      const k = sc.power / (1 + 0.05 * Math.sqrt(dx * dx + dy * dy + dz * dz));   // 遠くても消えにくい
-      r += sc.r * k; g += sc.g * k; b += sc.b * k;
-    }
-    const i = (x + y * N + z * N * N) * 3;
-    L[i] = r; L[i + 1] = g; L[i + 2] = b;
-  }
-  const cell = v => Math.min(16, Math.max(0, Math.round(v)));
   for (const buf of bufs) {
-    const p = buf.p, c = buf.c;
+    const p = buf.p, c = buf.c, n = buf.n;
+    if (!p.length) continue;
+    const hasN = !!n && n.length === p.length;
     for (let v = 0; v < p.length; v += 3) {
-      const i = (cell(p[v]) + cell(p[v + 1]) * N + cell(p[v + 2]) * N * N) * 3;
-      c[v] = Math.min(2.5, c[v] + L[i]);
-      c[v + 1] = Math.min(2.5, c[v + 1] + L[i + 1]);
-      c[v + 2] = Math.min(2.5, c[v + 2] + L[i + 2]);
+      const vx = p[v], vy = p[v + 1], vz = p[v + 2];
+      const nx = hasN ? n[v] : 0, ny = hasN ? n[v + 1] : 0, nz = hasN ? n[v + 2] : 0;
+      let ar = 0, ag = 0, ab = 0;
+      for (let s = 0; s < srcs.length; s++) {
+        const sc = srcs[s];
+        const dx = sc.x - vx, dy = sc.y - vy, dz = sc.z - vz;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 >= sc.R * sc.R) continue;
+        const d = Math.sqrt(d2) || 1e-4;
+        const t = 1 - d / sc.R;
+        const att = t * t * (3 - 2 * t);                 // なめらかに減る（端で0）
+        const lam = hasN ? 0.25 + 0.75 * Math.max(0, (nx * dx + ny * dy + nz * dz) / d) : 1;
+        const k = sc.I * att * lam;
+        ar += sc.r * k; ag += sc.g * k; ab += sc.b * k;
+      }
+      if (ar === 0 && ag === 0 && ab === 0) continue;
+      c[v] = Math.min(1.6, c[v] + ar);
+      c[v + 1] = Math.min(1.6, c[v + 1] + ag);
+      c[v + 2] = Math.min(1.6, c[v + 2] + ab);
     }
   }
 }
+// 発光ブロックを置いた・消したときは、光が届く範囲のチャンクを作り直す
+const origSetBlockForGlow = window.setBlock;
+window.setBlock = function (x, y, z, t) {
+  const old = getBlock(x, y, z);
+  const r = origSetBlockForGlow.apply(this, arguments);
+  if (isGlowId(t) || isGlowId(old)) {
+    const cx = Math.floor(x / CS), cy = Math.floor(y / CS), cz = Math.floor(z / CS);
+    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      markDirtyKey(cx + dx, cy + dy, cz + dz);
+    }
+  }
+  return r;
+};
 
 window.buildMesh = function (e) {
   if (!e.gen) generateEntry(e);
@@ -767,7 +804,7 @@ window.buildMesh = function (e) {
     }
   }
 
-  applyGlowLight([SB, WB, PB, ...CB.values()], glowSourcesOf(d));
+  applyGlowLight([SB, WB, PB, ...CB.values()], glowSourcesOf(d, e));
   if (SB.p.length) {
     const m = new THREE.Mesh(makeGeom(SB), solidMat);
     m.position.set(ox, oy, oz);
@@ -1916,6 +1953,7 @@ function openPanel(name) {
   dashKey = null;
   if (document.pointerLockElement) document.exitPointerLock();
   if (name === 'extInv') renderInventory();
+  if (name === 'extBag') renderBag();
   if (name === 'extColor') renderColor();
   ext.invOpen = name === 'extInv';
 }
@@ -2852,7 +2890,7 @@ window.addEventListener('keydown', e => {
   if (e.code === 'KeyE') {
     if (settingsEl.classList.contains('show')) return;
     if (panelOpen === 'extImport') return;
-    toggleInventory();
+    toggleBag();
     return;
   }
   if (e.code === 'KeyG') {
@@ -2874,6 +2912,7 @@ window.addEventListener('keydown', e => {
 // ============================================================
 function extLoop() {
   requestAnimationFrame(extLoop);
+  if (panelOpen === 'extBag') drawBagSkin(performance.now() / 1000);
   updateGhost();
   updateSelVisual(performance.now() / 1000);
   updatePaste();
@@ -2898,9 +2937,247 @@ function enforceTurbo() {
 // ============================================================
 const origRaycast = window.raycastBlock;
 
+// ============================================================
+// バックパック（インベントリを大きく開く。「＋」ボタン／Eキー）
+//  左：アイテム一覧（カテゴリごと）　右：自分のスキン・バックパック・アイテムスロット
+//  使い方：一覧のアイテムをタップ →（バックパック or スロットをタップ）で入る
+//         空欄にするのは、ダブルタップ（ダブルクリック）
+// ============================================================
+const BAG_N = 27;                       // 9列×3段
+const BAG_KEY = 'voxelcraft_bag_v1';
+let bag = loadBag();
+let bagCat = '全て';
+let bagPick = null;                     // 一覧で選んで、これから入れるアイテムの ID
+let bagLastKey = '', bagLastT = 0;      // ダブルタップ判定
+function loadBag() {
+  const out = new Array(BAG_N).fill(0);
+  try {
+    const a = JSON.parse(localStorage.getItem(BAG_KEY) || 'null');
+    if (Array.isArray(a)) for (let i = 0; i < BAG_N; i++) out[i] = Number(a[i]) || 0;
+  } catch (e) {}
+  return out;
+}
+function saveBag() { try { localStorage.setItem(BAG_KEY, JSON.stringify(bag)); } catch (e) {} }
+
+function buildBagPanel() {
+  const css = document.createElement('style');
+  css.textContent = `
+    #extBag .bag-box{background:#1b2530;color:#fff;border-radius:10px;padding:12px;width:min(96vw,860px);
+      max-height:94vh;overflow:auto;box-sizing:border-box}
+    #extBag .bag-wrap{display:flex;gap:12px;align-items:stretch}
+    #extBag .bag-left,#extBag .bag-right{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:6px}
+    #extBag .bag-cats{display:flex;flex-wrap:wrap;gap:4px}
+    #extBag .bag-cat{padding:4px 7px;border-radius:5px;background:rgba(255,255,255,.08);font-size:12px;cursor:pointer;white-space:nowrap}
+    #extBag .bag-cat.sel{background:#2e4a66}
+    #extBag .bag-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:5px;
+      max-height:52vh;min-height:200px;overflow:auto;padding:4px;background:rgba(0,0,0,.2);border-radius:8px;align-content:start}
+    #extBag .bag-item{background:rgba(255,255,255,.06);border:2px solid transparent;border-radius:6px;padding:3px;
+      text-align:center;font-size:10px;cursor:pointer;overflow:hidden}
+    #extBag .bag-item.pick{border-color:#ffd54a;background:#3a4e2a}
+    #extBag .bag-skin{height:190px;border-radius:8px;background:rgba(0,0,0,.25);overflow:hidden}
+    #extBag .bag-skin canvas{width:100%;height:100%;display:block}
+    #extBag .bag-label{font-size:12px;color:#9fb3c8}
+    #extBag .bag-grid{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:3px}
+    #extBag .bcell{aspect-ratio:1;min-width:0;border:2px solid rgba(255,255,255,.22);border-radius:4px;
+      background:rgba(0,0,0,.3);cursor:pointer;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+    #extBag .bcell.sel{border-color:#fff}
+    #extBag .bcell .num{position:absolute;left:2px;top:0;font-size:9px;color:#cfd9e4;text-shadow:0 1px 2px #000}
+    #extBag .bic{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:18px;
+      background-size:cover;background-position:center}
+    #extBag .bag-note{font-size:12px;color:#ffd54a;min-height:18px;margin:6px 0 0}
+    #extBag.bag-picking .bcell,#extBag.bag-picking .slot-cell{outline:1px dashed rgba(255,213,74,.5)}
+    @media (max-width:560px){ #extBag .bag-box{padding:8px} #extBag .bag-wrap{gap:8px} #extBag .bag-list{min-height:150px} }
+    #bagPlus{width:46px;height:46px;box-sizing:border-box;border:2px dashed rgba(255,255,255,.45);border-radius:5px;
+      background:rgba(0,0,0,.25);color:#fff;font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+      user-select:none;-webkit-user-select:none}
+    body.touch #bagPlus{width:34px;height:34px;font-size:18px}
+  `;
+  document.head.appendChild(css);
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+  <div class="ext-panel" id="extBag"><div class="bag-box">
+    <h2 style="margin:0 0 6px">インベントリ</h2>
+    <div class="bag-wrap">
+      <div class="bag-left">
+        <div class="bag-cats" id="bagCats"></div>
+        <div class="bag-list" id="bagList"></div>
+      </div>
+      <div class="bag-right">
+        <div class="bag-skin"><canvas id="bagSkin"></canvas></div>
+        <div class="bag-label">バックパック</div>
+        <div class="bag-grid" id="bagGrid"></div>
+        <div class="bag-label">アイテムスロット</div>
+        <div class="bag-grid" id="bagHot"></div>
+      </div>
+    </div>
+    <p class="bag-note" id="bagNote"></p>
+    <div class="ext-row" style="margin-top:6px"><button class="ext-btn sub" id="bagClose">閉じる</button></div>
+  </div></div>`;
+  document.body.appendChild(wrap.firstElementChild);
+
+  const box = document.querySelector('#extBag .bag-box');
+  box.addEventListener('click', e => {
+    const cat = e.target.closest('.bag-cat');
+    if (cat) { bagCat = cat.dataset.c; renderBag(); return; }
+    const item = e.target.closest('.bag-item');
+    if (item) {
+      const id = Number(item.dataset.id);
+      bagPick = bagPick === id ? null : id;
+      renderBag();
+      return;
+    }
+    const cell = e.target.closest('.bcell');
+    if (cell) onBagCell(cell);
+  });
+  document.getElementById('bagClose').addEventListener('click', () => closePanel());
+
+  // 「＋」ボタン（ホットバーの右）
+  const hb = document.getElementById('hotbar');
+  if (hb) {
+    const plus = document.createElement('div');
+    plus.id = 'bagPlus';
+    plus.textContent = '＋';
+    plus.title = 'インベントリを開く（Eキー）';
+    plus.addEventListener('click', e => { e.stopPropagation(); toggleBag(); });
+    hb.appendChild(plus);
+  }
+}
+function toggleBag() {
+  if (panelOpen === 'extBag') closePanel();
+  else if (!panelOpen) openPanel('extBag');
+}
+
+// アイテムの見た目
+function bagIconHtml(id) {
+  if (!id) return '';
+  if (isTool(id)) return `<div class="bic" style="background:#2b3a4a">${TOOLS[id].icon}</div>`;
+  const def = defById(id);
+  if (def) return `<div class="bic" style="background-image:url(${thumbOf(def)})"></div>`;
+  const info = BLOCK_INFO[id];
+  return `<div class="bic" style="background:${info ? info.color : '#888'}"></div>`;
+}
+function bagNameOf(id) {
+  if (!id) return '空欄';
+  if (isTool(id)) return TOOLS[id].name;
+  const def = defById(id);
+  if (def) return def.name;
+  return (BLOCK_INFO[id] && BLOCK_INFO[id].name) || '';
+}
+function bagCatalog(cat) {
+  const out = [];
+  if (cat === '全て' || cat === '標準') for (const id of DEFAULT_IDS) out.push({ id, name: BLOCK_INFO[id].name, cat: '標準' });
+  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
+  for (const d of ext.defs) if (cat === '全て' || d.category === cat) out.push({ id: d.id, name: d.name, cat: d.category });
+  return out;
+}
+
+function renderBag() {
+  const catsEl = document.getElementById('bagCats');
+  const listEl = document.getElementById('bagList');
+  const gridEl = document.getElementById('bagGrid');
+  const hotEl = document.getElementById('bagHot');
+  if (!catsEl || !listEl) return;
+  const cats = ['全て', '標準', '道具', ...ext.categories];
+  catsEl.innerHTML = cats.map(c => `<span class="bag-cat ${c === bagCat ? 'sel' : ''}" data-c="${esc(c)}">${esc(c)}</span>`).join('');
+  listEl.innerHTML = bagCatalog(bagCat).map(it => `
+    <div class="bag-item ${it.id === bagPick ? 'pick' : ''}" data-id="${it.id}">
+      ${bagIconHtml(it.id)}<div>${esc(it.name)}</div>
+    </div>`).join('') || '<p class="note" style="grid-column:1/-1">このカテゴリにはアイテムがありません</p>';
+  gridEl.innerHTML = bag.map((id, i) =>
+    `<div class="bcell" data-b="${i}">${bagIconHtml(id)}</div>`).join('');
+  hotEl.innerHTML = HOTBAR.map((id, i) =>
+    `<div class="bcell ${i === selIdx ? 'sel' : ''}" data-h="${i}"><span class="num">${i + 1}</span>${bagIconHtml(id)}</div>`).join('');
+  const picking = bagPick !== null;
+  document.getElementById('extBag').classList.toggle('bag-picking', picking);
+  document.getElementById('bagNote').textContent = picking
+    ? `「${bagNameOf(bagPick)}」を持っています。バックパックかアイテムスロットをタップすると入ります。`
+    : 'アイテムをタップしてから、バックパックかアイテムスロットをタップすると入ります。ダブルタップで空欄にできます。';
+  setupSkinPreview();
+}
+
+function onBagCell(cell) {
+  const isHot = cell.dataset.h !== undefined;
+  const i = Number(isHot ? cell.dataset.h : cell.dataset.b);
+  const key = (isHot ? 'h' : 'b') + i;
+  if (bagPick !== null) {
+    if (isHot) { HOTBAR[i] = bagPick; selectSlot(i); refreshHotbarVisuals(); }
+    else { bag[i] = bagPick; saveBag(); }
+    toast(`「${bagNameOf(bagPick)}」を入れました`);
+    bagPick = null;
+    bagLastKey = '';
+    renderBag();
+    return;
+  }
+  const now = Date.now();
+  if (key === bagLastKey && now - bagLastT < 400) {          // ダブルタップ・ダブルクリック → 空欄
+    if (isHot) { HOTBAR[i] = 0; refreshHotbarVisuals(); }
+    else { bag[i] = 0; saveBag(); }
+    bagLastKey = '';
+    renderBag();
+    return;
+  }
+  bagLastKey = key; bagLastT = now;
+  if (isHot) { selectSlot(i); renderBag(); }
+}
+
+// ---- 自分のスキン（今の人型をそのまま映す。ゆっくり回る） ----
+let skinR = null, skinScene = null, skinCam = null, skinGroup = null, skinAng = 0, skinModelKey = null;
+function setupSkinPreview() {
+  const cv = document.getElementById('bagSkin');
+  if (!cv || typeof THREE === 'undefined') return;
+  if (!skinR) {
+    try {
+      skinR = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true });
+      skinR.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+      skinScene = new THREE.Scene();
+      skinCam = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+      skinScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+      const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+      dl.position.set(2, 4, 3);
+      skinScene.add(dl);
+      skinGroup = new THREE.Group();
+      skinScene.add(skinGroup);
+    } catch (e) { console.error(e); skinR = null; return; }
+  }
+  const w = cv.clientWidth || 200, h = cv.clientHeight || 190;
+  if (cv.width !== Math.round(w * skinR.getPixelRatio()) || cv.height !== Math.round(h * skinR.getPixelRatio())) {
+    skinR.setSize(w, h, false);
+    skinCam.aspect = w / h;
+    skinCam.updateProjectionMatrix();
+  }
+  // 人型が変わったときだけ、コピーを作り直す
+  let src = null;
+  try { src = modelHolder; } catch (e) {}
+  if (!src) return;
+  const key = src.uuid + ':' + src.children.length + ':' + (src.children[0] ? src.children[0].uuid : '');
+  if (key === skinModelKey) return;
+  skinModelKey = key;
+  skinGroup.children.slice().forEach(o => skinGroup.remove(o));
+  const cl = src.clone(true);
+  cl.position.set(0, 0, 0);
+  cl.rotation.set(0, 0, 0);
+  cl.visible = true;
+  skinGroup.add(cl);
+  skinGroup.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(skinGroup);
+  const c = box.getCenter(new THREE.Vector3());
+  const sz = box.getSize(new THREE.Vector3());
+  const top = Math.max(0.5, sz.y);
+  skinCam.position.set(0, c.y, top * 2.3);
+  skinCam.lookAt(0, c.y, 0);
+}
+function drawBagSkin(t) {
+  if (!skinR || !skinGroup) return;
+  skinAng = t * 0.6;
+  skinGroup.rotation.y = skinAng;
+  try { skinR.render(skinScene, skinCam); } catch (e) {}
+}
+
 function init() {
   injectCSS();
   buildDOM();
+  buildBagPanel();
   loadExt();
   BLOCK_INFO[T_WAND] = { name: 'ステッキ', color: '#445566' };
   BLOCK_INFO[T_DROPPER] = { name: 'スポイト', color: '#445566' };

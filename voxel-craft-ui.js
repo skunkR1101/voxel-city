@@ -408,4 +408,123 @@ window.VoxelSpeed = { get: () => speedK, set: setSpeed };
   else addTurnSection();
 })();
 
+
+// ============================================================
+// 9. 移動の操作（スマホ）：スティック ／ 前後左右の移動ボタン（斜めも可）
+//    移動ボタンは、本体の「スティックの向き」に値を入れる形なので、移動の計算はそのまま使える
+// ============================================================
+const MOVE_MODE_KEY = 'voxelcraft_move_mode_v1';
+let moveMode = (() => { try { return localStorage.getItem(MOVE_MODE_KEY) === 'pad' ? 'pad' : 'stick'; } catch (e) { return 'stick'; } })();
+const padVec = { x: 0, y: 0 };             // x: 右が+ / y: 後ろが+（本体の joy と同じ向き）
+const padHeld = new Map();                  // 押している指（touch の id）→ 方向
+const PAD_DIRS = {
+  f: [0, 1], b: [0, -1], l: [-1, 0], r: [1, 0],
+  fl: [-1, 1], fr: [1, 1], bl: [-1, -1], br: [1, -1]
+};
+// 押している方向をまとめて、移動の向きにする（斜めは長さ1に揃える）
+function padRecalc() {
+  let x = 0, y = 0;
+  for (const d of padHeld.values()) { x += PAD_DIRS[d][0]; y += PAD_DIRS[d][1]; }
+  const len = Math.hypot(x, y);
+  if (len > 1) { x /= len; y /= len; }
+  padVec.x = x;
+  padVec.y = -y;                            // 前が+ → 本体の joy.y は前で負
+  document.querySelectorAll('#padUI .pad-btn').forEach(el => {
+    el.classList.toggle('on', [...padHeld.values()].includes(el.dataset.d));
+  });
+}
+function addMoveSection() {
+  const sbox = document.querySelector('#settings .sbox');
+  const closeBtn = document.getElementById('settingsClose');
+  if (!sbox || !closeBtn) return;
+  const sec = document.createElement('div');
+  sec.innerHTML = `
+    <h3>移動の操作（スマホ）</h3>
+    <label class="chk" style="margin-top:6px"><input type="radio" name="moveMode" value="stick"> スティック（ドラッグで好きな向きへ）</label>
+    <label class="chk"><input type="radio" name="moveMode" value="pad"> 移動ボタン（前後左右・斜め。マイクラ風）</label>
+    <p class="note">移動ボタンにすると、左下に8方向のボタンが出ます。2つ同時に押すと斜めに進みます。</p>`;
+  sbox.insertBefore(sec, closeBtn);
+  sec.querySelectorAll('input[name="moveMode"]').forEach(r => {
+    r.checked = r.value === moveMode;
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      moveMode = r.value;
+      try { localStorage.setItem(MOVE_MODE_KEY, moveMode); } catch (e) {}
+      applyMoveMode();
+    });
+  });
+}
+function applyMoveMode() {
+  document.body.classList.toggle('padmode', moveMode === 'pad');
+  if (moveMode !== 'pad') { padHeld.clear(); padRecalc(); }
+}
+function buildPad() {
+  const st = document.createElement('style');
+  st.textContent = `
+    #padUI{position:fixed;left:12px;bottom:18px;width:156px;height:156px;z-index:5;display:none;
+      grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);gap:4px;box-sizing:border-box}
+    #padUI.show{display:grid}
+    #padUI .pad-btn{background:rgba(0,0,0,.4);border:2px solid rgba(255,255,255,.4);color:#fff;border-radius:12px;
+      font-size:20px;display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none;touch-action:none}
+    #padUI .pad-btn.on{background:rgba(255,255,255,.4)}
+    #padUI .pad-blank{background:transparent}
+    body.padmode #joy{display:none !important}
+    body.touch.padmode #padUI.show{display:grid}`;
+  document.head.appendChild(st);
+  const pad = document.createElement('div');
+  pad.id = 'padUI';
+  // 上段：左上・前・右上 ／ 中段：左・空・右 ／ 下段：左下・後・右下
+  const cells = [['fl', '↖'], ['f', '▲'], ['fr', '↗'], ['l', '◀'], null, ['r', '▶'], ['bl', '↙'], ['b', '▼'], ['br', '↘']];
+  pad.innerHTML = cells.map(c => c
+    ? `<div class="pad-btn" data-d="${c[0]}">${c[1]}</div>`
+    : `<div class="pad-blank"></div>`).join('');
+  document.body.appendChild(pad);
+
+  const dirOf = el => (el && el.dataset && el.dataset.d) || null;
+  pad.addEventListener('touchstart', e => {
+    e.preventDefault();
+    e.stopPropagation();                     // 本体の「左half＝スティック」に取られないように
+    for (const t of e.changedTouches) {
+      const d = dirOf(e.target.closest ? e.target.closest('.pad-btn') : null);
+      if (d) padHeld.set('t' + t.identifier, d);
+    }
+    padRecalc();
+  }, { passive: false });
+  const touchEnd = e => {
+    e.stopPropagation();
+    for (const t of e.changedTouches) padHeld.delete('t' + t.identifier);
+    padRecalc();
+  };
+  pad.addEventListener('touchend', touchEnd, { passive: true });
+  pad.addEventListener('touchcancel', touchEnd, { passive: true });
+  // パソコン（マウス）でも押せるように
+  pad.addEventListener('mousedown', e => {
+    const d = dirOf(e.target.closest ? e.target.closest('.pad-btn') : null);
+    if (d) { padHeld.set('mouse', d); padRecalc(); }
+  });
+  window.addEventListener('mouseup', () => { if (padHeld.delete('mouse')) padRecalc(); });
+
+  // 移動の入力：移動ボタンのとき、本体の移動の入力を差し替える
+  const origGather = window.gatherInput;
+  if (typeof origGather === 'function') {
+    window.gatherInput = function () {
+      if (moveMode === 'pad') { joy.x = padVec.x; joy.y = padVec.y; }
+      return origGather.apply(this, arguments);
+    };
+  }
+  // 表示：ゲーム中で、画面やメニューが開いていないときだけ出す
+  setInterval(() => {
+    const show = moveMode === 'pad' && started && !menuOpen && !paused;
+    pad.classList.toggle('show', show);
+    if (!show && padHeld.size) { padHeld.clear(); padRecalc(); }
+  }, 150);
+}
+function initMoveMode() {
+  addMoveSection();
+  buildPad();
+  applyMoveMode();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMoveMode);
+else initMoveMode();
+
 })();

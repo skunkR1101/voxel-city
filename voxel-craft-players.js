@@ -104,14 +104,48 @@ if (modelEl) modelEl.addEventListener('change', async () => {
     } catch (e) { curModel = null; }
   }
   rebuildPayload();
+  applySelfSkin();
 });
 if (texEl) texEl.addEventListener('change', async () => {
   const f = texEl.files[0];
   curTex = null;
   if (f) { try { curTex = await readAs(f, 'url'); } catch (e) { curTex = null; } }
   rebuildPayload();
+  applySelfSkin();
 });
-if (resetEl) resetEl.addEventListener('click', () => { curModel = null; curTex = null; rebuildPayload(); });
+if (resetEl) resetEl.addEventListener('click', () => { curModel = null; curTex = null; rebuildPayload(); applySelfSkin(); });
+
+// 自分の見た目を「送っているスキン（curModel / curTex）」と同じにする。
+// 再読み込みや再入室で本体側の customRoot / customTex が空になっても、保存済みのスキンで人型を作り直す
+let selfSkinSeq = 0;
+function applySelfSkin() {
+  const seq = ++selfSkinSeq;
+  let root = null;
+  if (curModel) {
+    try {
+      if (!curModel.text) throw new Error('empty');
+      if (curModel.kind === 'fbx') {
+        if (!THREE.FBXLoader) throw new Error('FBXLoader なし');
+        root = new THREE.FBXLoader().parse(b64ToBuf(curModel.text), '');
+      } else {
+        if (!THREE.OBJLoader) throw new Error('OBJLoader なし');
+        root = new THREE.OBJLoader().parse(curModel.text);
+      }
+    } catch (e) { console.error(e); root = null; }
+  }
+  customRoot = root;
+  const finish = () => { if (seq === selfSkinSeq) { try { applySkin(); } catch (e) { console.error(e); } } };
+  if (!curTex) { customTex = null; finish(); return; }
+  new THREE.TextureLoader().load(curTex, t => {
+    if (seq !== selfSkinSeq) return;
+    t.magFilter = THREE.NearestFilter;
+    t.minFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    customTex = t;
+    finish();
+  }, undefined, () => { if (seq === selfSkinSeq) { customTex = null; finish(); } });
+}
+if (curModel || curTex) applySelfSkin();
 
 // ============================================================
 // 他のプレイヤーのスキン（受け取り・組み立て）
