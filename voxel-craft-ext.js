@@ -18,7 +18,7 @@
 // ============================================================
 const EXT_KEY = 'voxelcraft_ext_v1';
 const CUSTOM_BASE = 100, CUSTOM_MAX = 255;
-const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55, T_TRAFFIC = 56;
+const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55, T_TRAFFIC = 56, T_CROWD = 57;
 const TOOLS = {
   50: { name: 'ステッキ', icon: '🪄', desc: 'タップで範囲の始点・終点を指定（3回目からは繰り返し）' },
   51: { name: 'スポイト', icon: '🧪', desc: 'ブロックをタップして登録（空気も登録できます）' },
@@ -26,9 +26,10 @@ const TOOLS = {
   53: { name: 'コピー', icon: '⧉', desc: '長押しで選択範囲をコピー' },
   54: { name: 'ペースト', icon: '📌', desc: '長押しでコピーを貼り付け（半透明プレビュー付き）' },
   55: { name: 'ペースト前の回転・反転', icon: '🔄', desc: '持っている間、上の入力欄で回転・反転を設定（ペーストに反映）' },
-  56: { name: '自動車交通制御', icon: '🚗', desc: 'ルートを引く・分岐・速度・車の設定（ルートマーカーは持っている間だけ見えます）' }
+  56: { name: '自動車交通制御', icon: '🚗', desc: 'ルートを引く・分岐・速度・車の設定（ルートマーカーは持っている間だけ見えます）' },
+  57: { name: '人混みマネージャー', icon: '👥', desc: '範囲を選んで人混みを作る（持っている間だけ範囲が見えます）' }
 };
-const isTool = id => id >= T_WAND && id <= T_TRAFFIC;
+const isTool = id => id >= T_WAND && id <= T_CROWD;
 const AIR_ID = 0;
 const ORIENT_NAMES = { fixed: '向き固定（ノーマル）', four: '4方向（かまど風）', free: '自由（原木・ボタン風）' };
 
@@ -1814,7 +1815,7 @@ function renderToolsSection() {
   const show = ext.curCat === '全て' || ext.curCat === '道具';
   sec.style.display = show ? 'block' : 'none';
   if (!show) return;
-  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC].map(id => `
+  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC, T_CROWD].map(id => `
     <div class="ext-item">
       <div style="font-size:30px;line-height:72px">${TOOLS[id].icon}</div>
       <div>${TOOLS[id].name}</div>
@@ -3156,7 +3157,7 @@ function bagNameOf(id) {
 function bagCatalog(cat) {
   const out = [];
   if (cat === '全て' || cat === '標準') for (const id of DEFAULT_IDS) out.push({ id, name: BLOCK_INFO[id].name, cat: '標準' });
-  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
+  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC, T_CROWD]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
   for (const d of ext.defs) if (cat === '全て' || d.category === cat) out.push({ id: d.id, name: d.name, cat: d.category });
   return out;
 }
@@ -3275,6 +3276,7 @@ function init() {
   BLOCK_INFO[T_PASTE] = { name: 'ペースト', color: '#445566' };
   BLOCK_INFO[T_PASTE_ROT] = { name: '回転・反転', color: '#445566' };
   BLOCK_INFO[T_TRAFFIC] = { name: '自動車交通制御', color: '#445566' };
+  BLOCK_INFO[T_CROWD] = { name: '人混みマネージャー', color: '#445566' };
   hookSettings();
   wire();
   syncTurboUI();
@@ -3293,7 +3295,7 @@ init();
 // ── 他の機能ファイル（通信・カスタム・斜め配置・見え方）が使う内部の名前を公開する ──
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
 window.VoxelExt = {
-  T_TRAFFIC, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
+  T_TRAFFIC, T_CROWD, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
   keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp
 };
 

@@ -233,6 +233,54 @@ function buildDefaults() {
   }
 }
 // 自分の車（OBJ / FBX ＋ テクスチャ）。長い方向を前後（Z）にそろえ、指定の長さに合わせる
+// ---- 3相の共通部品（自分の車・人の両方で使う）：モデル読み込み・MTL・テクスチャ ----
+function parseMtl(text) {
+  const map = new Map();
+  let cur = null;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] === '#') continue;
+    const parts = line.split(/\s+/);
+    const key = parts[0];
+    if (key === 'newmtl') { cur = { name: line.slice(6).trim(), kd: null, map: null }; map.set(cur.name, cur); }
+    else if (cur && key === 'Kd' && parts.length >= 4) cur.kd = [Number(parts[1]), Number(parts[2]), Number(parts[3])];
+    else if (cur && key === 'map_Kd') cur.map = line.split(/\s+/).pop().split(/[\\/]/).pop();
+  }
+  return map;
+}
+// モデル（OBJ / FBX の文字列）を読み、ルートを返す
+function parseModelRoot(fmt, data) {
+  let root = null;
+  if (fmt === 'fbx') {
+    if (!THREE.FBXLoader) throw new Error('FBXLoader なし');
+    const bin = atob(data), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    root = new THREE.FBXLoader().parse(u.buffer, '');
+  } else {
+    if (!THREE.OBJLoader) throw new Error('OBJLoader なし');
+    root = new THREE.OBJLoader().parse(data);
+  }
+  root.updateMatrixWorld(true);
+  return root;
+}
+// アップロードされた画像（名前→テクスチャ）
+async function loadTextures(texs) {
+  const out = new Map();
+  for (const t of texs || []) {
+    try {
+      const tex = await loadTexture(t.data);
+      out.set(t.name.toLowerCase(), tex);
+    } catch (e) { /* 読めない画像は無視 */ }
+  }
+  return out;
+}
+function texFor(texMap, fileName) {
+  if (!fileName) return null;
+  return texMap.get(String(fileName).toLowerCase()) || null;
+}
+function firstTex(texMap) { return texMap.size ? [...texMap.values()][0] : null; }
+window.VoxelModels = { parseMtl, parseModelRoot, loadTextures, texFor, firstTex };
+
 function loadTexture(dataUrl) {
   return new Promise((res, rej) => {
     new THREE.TextureLoader().load(dataUrl, t => {
@@ -241,37 +289,30 @@ function loadTexture(dataUrl) {
     }, undefined, rej);
   });
 }
+// 自分の車：長い方向を前後（Z）にそろえ、長さ × スケール倍率に合わせる。MTLの色・テクスチャを反映
 async function buildCustom(rec) {
-  let root = null;
-  if (rec.fmt === 'fbx') {
-    if (!THREE.FBXLoader) throw new Error('FBXLoader なし');
-    const bin = atob(rec.model), u = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-    root = new THREE.FBXLoader().parse(u.buffer, '');
-  } else {
-    if (!THREE.OBJLoader) throw new Error('OBJLoader なし');
-    root = new THREE.OBJLoader().parse(rec.model);
-  }
-  root.updateMatrixWorld(true);
-  let tex = null;
-  if (rec.tex) { try { tex = await loadTexture(rec.tex); } catch (e) { tex = null; } }
+  const root = parseModelRoot(rec.fmt, rec.model);
+  const texMap = await loadTextures(rec.texs || []);
+  const mtl = rec.mtl ? window.VoxelModels.parseMtl(rec.mtl) : null;
   const parts = [];
   root.traverse(m => {
     if (!m.isMesh || !m.geometry) return;
     const g = m.geometry.clone();
     g.applyMatrix4(m.matrixWorld);
-    let mat;
+    const matName = m.material && !Array.isArray(m.material) ? m.material.name : '';
+    const info = mtl && matName ? mtl.get(matName) : null;
+    let tex = info && info.map ? texFor(texMap, info.map) : null;
+    if (!tex && (!info || !info.map)) tex = firstTex(texMap);
+    const kd = info && info.kd ? new THREE.Color(info.kd[0], info.kd[1], info.kd[2]) : null;
+    const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide, color: kd || (tex ? 0xffffff : 0xbbbbbb) });
     if (tex) {
-      mat = new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide, color: 0xffffff });
+      mat.map = tex;
       if (rec.alpha === 'glow') { mat.emissive = new THREE.Color(0xffffff); mat.emissiveMap = tex; mat.emissiveIntensity = 1; }
-      else mat.alphaTest = 0.3;                              // 透過（半透明の部分をそのまま透かす）
-    } else {
-      mat = new THREE.MeshLambertMaterial({ color: 0xbbbbbb, side: THREE.DoubleSide });
+      else mat.alphaTest = 0.3;                                 // 半透明部分をそのまま透かす
     }
     parts.push({ geo: g, mat });
   });
   if (!parts.length) throw new Error('メッシュが見つかりません');
-  // 向きと大きさをそろえる
   const box = new THREE.Box3();
   for (const p of parts) { p.geo.computeBoundingBox(); box.union(p.geo.boundingBox); }
   let size = box.getSize(new THREE.Vector3());
@@ -282,14 +323,18 @@ async function buildCustom(rec) {
     for (const p of parts) { p.geo.computeBoundingBox(); box.union(p.geo.boundingBox); }
     size = box.getSize(new THREE.Vector3());
   }
-  const k = rec.len / Math.max(0.01, size.z);
+  const k = (rec.len * (rec.scale || 1)) / Math.max(0.01, size.z);
   const c = box.getCenter(new THREE.Vector3());
   const M = new THREE.Matrix4().makeTranslation(-c.x, -box.min.y, -c.z).premultiply(new THREE.Matrix4().makeScale(k, k, k));
   for (const p of parts) p.geo.applyMatrix4(M);
-  return makeVariant('c_' + rec.id, rec.name, rec.len, rec.front, rec.back, parts, false);
+  // 同じ名前の車を作り直すときは、古い描画物を外す
+  removeVariant('c_' + rec.id);
+  return makeVariant('c_' + rec.id, rec.name, rec.len * (rec.scale || 1), rec.front, rec.back, parts, false);
 }
 async function buildAllCustoms() {
   for (const rec of S.customs) {
+    if (!rec.texs) rec.texs = rec.tex ? [{ name: 'texture.png', data: rec.tex }] : [];
+    if (rec.scale == null) rec.scale = 1;
     if (variants.has('c_' + rec.id)) continue;
     try { await buildCustom(rec); }
     catch (e) { console.error(e); toast2('「' + rec.name + '」の車を読み込めませんでした'); }
@@ -767,6 +812,7 @@ function openSetPanel() {
       <b>${esc(v.name)}</b>${custom ? '（自分の車）' : '（標準）'}
       出現の重み <input type="number" min="0" step="1" value="${S.weights[v.id] == null ? 1 : S.weights[v.id]}" data-wt="${v.id}" style="width:60px">
       ${custom ? `判定 前<input type="number" min="0" step="0.1" value="${v.front}" data-df="${rec.id}" style="width:56px"> 後<input type="number" min="0" step="0.1" value="${v.back}" data-db="${rec.id}" style="width:56px">
+      スケール<input type="number" min="0.1" max="10" step="0.1" value="${rec.scale || 1}" data-sc="${rec.id}" style="width:60px">倍
       <button class="btn danger" data-del="${rec.id}">削除</button>` : `判定 前${v.front} 後${v.back}`}
     </div>`;
   }).join('');
@@ -781,10 +827,13 @@ function openSetPanel() {
     <h3>自分の車を追加</h3>
     <div class="rowv">名前 <input id="trNm" value="マイカー" style="width:120px"></div>
     <div class="rowv">長さ（マス）<input id="trLn" type="number" step="0.1" value="2" style="width:70px">
-      判定 前 <input id="trFr" type="number" step="0.1" value="1" style="width:60px"> 後 <input id="trBk" type="number" step="0.1" value="0.5" style="width:60px"></div>
+      スケール倍率 <input id="trSc" type="number" min="0.1" max="10" step="0.1" value="1" style="width:60px"></div>
+    <div class="rowv">判定 前 <input id="trFr" type="number" step="0.1" value="1" style="width:60px"> 後 <input id="trBk" type="number" step="0.1" value="0.5" style="width:60px"></div>
     <div class="rowv">テクスチャの半透明部分 <select id="trAl"><option value="cut">そのまま透過する</option><option value="glow">発光させる</option></select></div>
     <div class="rowv">モデル（.obj / .fbx）<input id="trMd" type="file" accept=".obj,.fbx"></div>
-    <div class="rowv">テクスチャ（png / jpg・任意）<input id="trTx" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"></div>
+    <div class="rowv">マテリアル（.mtl・任意）<input id="trMtl" type="file" accept=".mtl"></div>
+    <div class="rowv">テクスチャ（png / jpg・複数可）<input id="trTx" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"></div>
+    <p class="note">MTLを入れると、そのファイルの色とテクスチャ名（map_Kd）どおりに貼ります。テクスチャが1枚だけなら、全体に貼ります。</p>
     <div class="rowv"><button class="btn" data-a="add">追加する</button><span id="trMsg" class="note"></span></div>
     <h3>その他</h3>
     <div class="rowv"><button class="btn danger" data-a="clearcars">走っている車を全部消す</button>
@@ -794,6 +843,15 @@ function openSetPanel() {
     const t = e.target;
     if (t.id === 'trInt') { S.interval = clampN(Number(t.value) || 4, 0.5, 600); saveSoon(); }
     if (t.dataset.wt) { S.weights[t.dataset.wt] = Math.max(0, Number(t.value) || 0); saveSoon(); }
+    if (t.dataset.sc) {
+      const rec = S.customs.find(c => c.id === Number(t.dataset.sc));
+      if (rec) {
+        rec.scale = clampN(Number(t.value) || 1, 0.1, 10);
+        saveSoon();
+        toast2('スケールを反映しています…');
+        buildCustom(rec).then(() => toast2('スケールを変更しました')).catch(() => toast2('読み込めませんでした'));
+      }
+    }
     if (t.dataset.df || t.dataset.db) {
       const id = Number(t.dataset.df || t.dataset.db);
       const rec = S.customs.find(c => c.id === id);
@@ -825,16 +883,19 @@ function openSetPanel() {
       if (fmt !== 'obj' && fmt !== 'fbx') { msg.textContent = '.obj か .fbx を選んでください'; return; }
       msg.textContent = '読み込み中…';
       const model = await readFile(md, fmt === 'fbx' ? 'dataurl' : 'text');
-      const tf = document.getElementById('trTx').files[0];
-      const tex = tf ? await readFile(tf, 'dataurl') : null;
+      const mf = document.getElementById('trMtl').files[0];
+      const mtl = mf ? await readFile(mf, 'text') : null;
+      const texs = [];
+      for (const f of [...document.getElementById('trTx').files]) texs.push({ name: f.name, data: await readFile(f, 'dataurl') });
       const id = Date.now() % 1000000000;
       const rec = {
         id, name: document.getElementById('trNm').value || 'マイカー',
         len: clampN(Number(document.getElementById('trLn').value) || 2, 0.8, 6),
+        scale: clampN(Number(document.getElementById('trSc').value) || 1, 0.1, 10),
         front: Math.max(0, Number(document.getElementById('trFr').value) || 0),
         back: Math.max(0, Number(document.getElementById('trBk').value) || 0),
         alpha: document.getElementById('trAl').value, fmt,
-        model: fmt === 'fbx' ? model.split(',')[1] : model, tex
+        model: fmt === 'fbx' ? model.split(',')[1] : model, mtl, texs
       };
       try {
         await buildCustom(rec);
