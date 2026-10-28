@@ -254,7 +254,7 @@ function netHooks() {
       if (snapResolve) { const r = snapResolve; snapResolve = null; r(); }
     },
     onLinks: () => refreshShare(),
-    save: kv => { if (conn) idbSet('room:' + conn.id, [...kv.entries()]); }
+    save: kv => { if (conn) { idbSet('room:' + conn.id, [...kv.entries()]); ghMarkDirty(conn.id, true); } }
   };
 }
 
@@ -317,16 +317,35 @@ const GH_PART_MAX = 1000000;  // 1ファイルあたりの上限（圧縮前の�
 function ghPathOf(id, k) {
   return 'rooms/' + encodeURIComponent(id) + (k ? '.p' + k : '') + '.json';
 }
+// 読むときだけ使う。電波が弱い・回線が切り替わる環境（モバイル・フリーWi-Fi）に備えて、時間切れと再試行を入れる
+async function ghFetch(url, headers, tries = 4) {
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    try {
+      const res = await fetch(url, { headers, cache: 'no-store', signal: ctl.signal });
+      clearTimeout(timer);
+      if (res.status !== 429 && res.status < 500) return res;
+      lastErr = new Error(ghErrText(res.status));
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = new Error('GitHubに届きませんでした（通信が不安定です）');
+    }
+    await new Promise(r => setTimeout(r, 700 * (i + 1)));
+  }
+  throw lastErr;
+}
 async function ghGetFile(c, path) {
   const url = 'https://api.github.com/repos/' + c.repo + '/contents/' + path;
-  const res = await fetch(url, { headers: ghHeaders(c), cache: 'no-store' });
+  const res = await ghFetch(url, ghHeaders(c));
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(ghErrText(res.status));
   const j = await res.json();
   let text;
   if (j.content) text = new TextDecoder().decode(b64Dec(j.content));
   else {   // 1MB を超えるファイルは本文が空で返るので、生データを取り直す
-    const raw = await fetch(url, { headers: { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github.raw' }, cache: 'no-store' });
+    const raw = await ghFetch(url, { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github.raw' });
     if (!raw.ok) throw new Error(ghErrText(raw.status));
     text = await raw.text();
   }
@@ -434,9 +453,31 @@ let ghLastSig = null;
 let ghQueue = Promise.resolve();
 // 保存は1つずつ順番に行う（同時に書いて失われないように）
 function ghPush(id, kv) {
+  ghMarkDirty(id, false);                 // この時点の内容を送る。送る前後に変わったものは、また印が付く
   const job = ghQueue.then(() => ghPushOnce(id, kv));
   ghQueue = job.catch(() => {});
+  job.catch(() => ghMarkDirty(id, true)); // 送れなかったら、次の機会にまた送る
   return job;
+}
+// 「GitHubへまだ送れていない変更がある部屋」の一覧（画面を閉じても消えないように端末へ保存）
+const GH_DIRTY_KEY = 'voxelcraft_gh_dirty_v1';
+function ghDirtyIds() { try { return JSON.parse(localStorage.getItem(GH_DIRTY_KEY) || '[]'); } catch (e) { return []; } }
+function ghMarkDirty(id, on) {
+  try {
+    const set = new Set(ghDirtyIds());
+    if (on) set.add(id); else set.delete(id);
+    localStorage.setItem(GH_DIRTY_KEY, JSON.stringify([...set]));
+  } catch (e) {}
+}
+// 未送信の部屋を、GitHubへ送る（接続中はその場の最新、そうでなければ端末に保存した最新）
+function ghFlushDirty() {
+  if (!ghCfg()) return;
+  for (const id of ghDirtyIds()) {
+    const live = conn && conn.id === id && window.VoxelNet && VoxelNet.active() && VoxelNet.kv();
+    const src = live ? Promise.resolve([...VoxelNet.kv().entries()]) : idbGet('room:' + id);
+    src.then(kv => { if (Array.isArray(kv) && kv.length) return ghPush(id, kv); else ghMarkDirty(id, false); })
+      .catch(e => console.error(e));
+  }
 }
 async function ghPushOnce(id, kv) {
   const c = ghCfg();
@@ -480,17 +521,13 @@ async function ghPushOnce(id, kv) {
   }
   throw new Error('GitHubへの保存が何度も競合しました');
 }
-// 接続中は一定間隔でGitHubへ保存（変わっていなくても、1分に1回まで）
-setInterval(() => {
-  if (!conn || !window.VoxelNet || !VoxelNet.active() || !ghCfg()) return;
-  const kv = VoxelNet.kv();
-  if (!kv) return;
-  const arr = [...kv.entries()];
-  const sig = JSON.stringify(arr);          // 変わったときだけ書く（履歴が増えすぎないように）
-  if (sig === ghLastSig) return;
-  ghLastSig = sig;
-  ghPush(conn.id, arr).catch(e => { ghLastSig = null; toast('GitHub保存失敗：' + e.message); });
-}, 60000);
+// 変更の印がある部屋を、30秒ごとにGitHubへ送る（背景に回って止まっても、次に開いたときに送る）
+setInterval(() => { ghFlushDirty(); }, 30000);
+// 画面を閉じる・背景に回す・電波が戻ったときにも、未送信分を送る
+window.addEventListener('pagehide', () => ghFlushDirty());
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') ghFlushDirty(); });
+window.addEventListener('online', () => ghFlushDirty());
+setTimeout(() => ghFlushDirty(), 3000);   // 起動直後に、前回送れなかった分を送る
 
 async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
   disconnect(false);
@@ -518,9 +555,19 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
         : Promise.resolve(null)
     ]);
     const kv = new Map(Array.isArray(saved) ? saved : []);
-    if (gh) {
-      if (gh.ok) { for (const [k, v] of mergeKv([...kv.entries()], gh.r.kv)) kv.set(k, v); toast('GitHubから最新の作業を読み込みました'); }
-      else toast('GitHubから読めなかったため、この端末の保存で続けます');
+    if (!gh) {
+      toast('この端末にはGitHub設定がありません。手元の保存だけで入ります（他の端末の最新は見えません）');
+    } else if (gh.ok) {
+      for (const [k, v] of mergeKv([...kv.entries()], gh.r.kv)) kv.set(k, v);
+      toast('GitHubから最新の作業を読み込みました（' + gh.r.kv.length + '件）');
+      if (conn) ghMarkDirty(id, true);      // 入ったあとに、手元の内容もGitHubへ送る
+    } else {
+      const why = gh.e && gh.e.message ? gh.e.message : '通信エラー';
+      if (!confirm('GitHubから最新の作業を読めませんでした。\n理由：' + why + '\n\n古い可能性がある、この端末の保存で入りますか？\n（「キャンセル」なら入るのをやめます。通信が良い場所でもう一度お試しください）')) {
+        conn = null; joining = false;
+        throw new Error('GitHubから最新を読めなかったため、部屋への参加をやめました');
+      }
+      toast('この端末の保存で入ります（古い可能性があります）');
     }
 
     // 手元の作業を、少しずつ反映する（大きくても画面が止まらないように）
@@ -545,6 +592,7 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
       throw e;
     }
     saveRoomEntry({ id, name: conn.name, pw: password, tag: conn.tag, seed: conn.seed });
+    if (ghCfg()) ghFlushDirty();
     refreshShare();
     setStatus(`接続中：「${conn.name || '共同都市'}」`);
     // 他の人がいる部屋では、最新の状態を受け取ってから入る（受け取りが遅いときは12秒で入る。続きは後から反映される）
