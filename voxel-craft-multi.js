@@ -293,6 +293,105 @@ function loadHide() {
   loadPct = 0;
 }
 const tick = () => new Promise(r => setTimeout(r, 0));
+
+// ============================================================
+// 背景で保存する（画面を止めない）
+//  ・データを 800件ずつ少しずつ背景の作業役（Worker）へ渡し、そこで IndexedDB に書く
+//  ・保存の中身・場所は今までどおり（同じデータベース・同じ鍵）
+//  ・画面を閉じる・背景に回す時だけ、確実に書くため同期で書く
+// ============================================================
+function vcIoWorkerMain() {
+  var jobs = new Map(), dbs = new Map();
+  function openDb(name, store) {
+    return new Promise(function (res, rej) {
+      var r = indexedDB.open(name, 1);
+      r.onupgradeneeded = function () { r.result.createObjectStore(store); };
+      r.onsuccess = function () { res(r.result); };
+      r.onerror = function () { rej(r.error); };
+    });
+  }
+  self.onmessage = async function (e) {
+    var m = e.data, id = m.id;
+    try {
+      if (m.t === 'b') jobs.set(id, { db: m.db, store: m.store, key: m.key, field: m.field, meta: m.meta, items: [] });
+      else if (m.t === 'p') { var j0 = jobs.get(id); for (var i = 0; i < m.items.length; i++) j0.items.push(m.items[i]); }
+      else if (m.t === 'e') {
+        var j = jobs.get(id); jobs.delete(id);
+        var val = j.field ? Object.assign({}, j.meta || {}, (function () { var o = {}; o[j.field] = j.items; return o; })()) : j.items;
+        var dk = j.db + '|' + j.store;
+        if (!dbs.has(dk)) dbs.set(dk, openDb(j.db, j.store));
+        var db = await dbs.get(dk);
+        await new Promise(function (res, rej) {
+          var tx = db.transaction(j.store, 'readwrite');
+          tx.objectStore(j.store).put(val, j.key);
+          tx.oncomplete = function () { res(); };
+          tx.onerror = function () { rej(tx.error); };
+        });
+        self.postMessage({ t: 'ok', id: id });
+      }
+    } catch (err) {
+      jobs.delete(id);
+      self.postMessage({ t: 'err', id: id, msg: String((err && err.message) || err) });
+    }
+  };
+}
+const IO_SRC = '(' + vcIoWorkerMain.toString() + ')();';
+let ioW = null, ioSeq = 0, ioChain = Promise.resolve();
+const ioWaits = new Map();
+function ioWorker() {
+  if (ioW !== null) return ioW || null;
+  try {
+    ioW = new Worker(URL.createObjectURL(new Blob([IO_SRC], { type: 'text/javascript' })));
+    ioW.onmessage = function (e) {
+      const w = ioWaits.get(e.data.id);
+      if (!w) return;
+      ioWaits.delete(e.data.id);
+      if (e.data.t === 'ok') w.res(); else w.rej(new Error(e.data.msg || '保存に失敗しました'));
+    };
+    ioW.onerror = function () { ioW = false; };
+  } catch (e) { ioW = false; }
+  return ioW || null;
+}
+// iter の中身を少しずつ渡して、背景で書く（保存は1つずつ順番に）
+function ioStreamPut(db, store, key, field, meta, iter) {
+  const job = ioChain.then(() => ioStreamPutNow(db, store, key, field, meta, iter));
+  ioChain = job.catch(() => {});
+  return job;
+}
+function ioStreamPutNow(db, store, key, field, meta, iter) {
+  const w = ioWorker();
+  if (!w) return Promise.reject(new Error('背景保存が使えません'));
+  const id = ++ioSeq;
+  return new Promise(function (res, rej) {
+    ioWaits.set(id, { res: res, rej: rej });
+    w.postMessage({ t: 'b', id: id, db: db, store: store, key: key, field: field, meta: meta });
+    (async function () {
+      let batch = [];
+      for (const it of iter) {
+        batch.push(it);
+        if (batch.length >= 800) { w.postMessage({ t: 'p', id: id, items: batch }); batch = []; await tick(); }
+      }
+      if (batch.length) w.postMessage({ t: 'p', id: id, items: batch });
+      w.postMessage({ t: 'e', id: id });
+    })().catch(function (err) { ioWaits.delete(id); rej(err); });
+  });
+}
+window.VoxelIO = { ok: () => !!ioWorker(), streamPut: ioStreamPut };
+let unloadingNow = false;   // 画面を閉じる・背景に回す時は、同期で確実に書く
+window.addEventListener('pagehide', () => { unloadingNow = true; });
+document.addEventListener('visibilitychange', () => { unloadingNow = document.visibilityState === 'hidden'; });
+let roomBusy = false, roomAgain = null;
+function roomIdbSave(id, kv) {
+  if (unloadingNow || !(window.VoxelIO && VoxelIO.ok())) { idbSet('room:' + id, [...kv.entries()]); return; }
+  if (roomBusy) { roomAgain = { id, kv }; return; }        // 書いている途中なら、終わってからもう一度（最新を書くため）
+  roomBusy = true;
+  ioStreamPut('voxelcraft-net', 'kv', 'room:' + id, null, null, kv.entries())
+    .catch(() => {})
+    .then(() => {
+      roomBusy = false;
+      if (roomAgain) { const a = roomAgain; roomAgain = null; roomIdbSave(a.id, a.kv); }
+    });
+}
 const GZ_OK = typeof CompressionStream === 'function' && typeof Response === 'function' && typeof Blob === 'function';
 
 function netHooks() {
@@ -306,7 +405,7 @@ function netHooks() {
       if (snapResolve) { const r = snapResolve; snapResolve = null; r(); }
     },
     onLinks: () => refreshShare(),
-    save: kv => { if (conn) { idbSet('room:' + conn.id, [...kv.entries()]); ghMarkDirty(conn.id, true); } }
+    save: kv => { if (conn) { roomIdbSave(conn.id, kv); ghMarkDirty(conn.id, true); } }
   };
 }
 
@@ -490,16 +589,27 @@ function ghAssemble(list) {
   }
   return out;
 }
+// 項目を1つずつ文字列にしたものを覚えておく（変わっていない項目は作り直さない）
+const pairCache = new Map();   // 鍵 -> { v, s }
+function pairStr(e) {
+  const c = pairCache.get(e[0]);
+  if (c && c.v === e[1]) return c.s;
+  const str = JSON.stringify(e);
+  pairCache.set(e[0], { v: e[1], s: str });
+  return str;
+}
+function chunkStr(list) { return '[' + list.map(pairStr).join(',') + ']'; }
 // 項目を、1ファイルの上限を超えないように区切る
 function ghPack(kv) {
   const parts = [];
   let cur = [], size = 0;
   for (const e of kv) {
-    const n = JSON.stringify(e).length + 1;
+    const n = pairStr(e).length + 1;
     if (cur.length && size + n > GH_PART_MAX) { parts.push(cur); cur = []; size = 0; }
     cur.push(e); size += n;
   }
   parts.push(cur);
+  if (pairCache.size > kv.length * 2 + 1000) pairCache.clear();   // 消えた項目の分を捨てる
   return parts;
 }
 let ghLastSig = null;
@@ -593,7 +703,7 @@ async function ghWriteFile(c, id, cur, o, path, step) {
   try { msg = (await res.json()).message || ''; } catch (e) {}
   throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
 }
-// 保存：他の人の分を取り込み、「中身が変わったファイルだけ」を並列に書く（速い・通信量が少ない）
+// 保存：他の人の分を取り込み、「中身が変わったファイルだけ」を並列に書く
 async function ghPushOnce(id, kv, prog) {
   const c = ghCfg();
   if (!c || !id) return null;
@@ -603,40 +713,49 @@ async function ghPushOnce(id, kv, prog) {
   P(0, total);
   for (let attempt = 0; attempt < 3; attempt++) {
     const cur = await ghPull(id, (g, n) => { total = n; done = g; P(done, total); });
+    await tick();
     const pullN = cur.parts || 1;
     if (total < pullN) total = pullN;
     done = Math.max(done, pullN);
     const merged = mergeKv(cur.kv, kv);                     // 他の人の保存も含めて1つにする
     const chunks = ghPack(merged.flatMap(ghSplitEntry));
+    await tick();
     const changed = [];
+    const strs = [];
     for (let k = 0; k < chunks.length; k++) {
       const path = ghPathOf(id, k);
-      const same = cur.raw && cur.raw[path] === JSON.stringify(chunks[k]) && (k !== 0 || pullN === chunks.length);
+      const str = chunkStr(chunks[k]);
+      strs[k] = str;
+      const same = cur.raw && cur.raw[path] === str && (k !== 0 || pullN === chunks.length);
       if (!same || !cur.shas[path]) changed.push(k);
+      if (k % 4 === 3) await tick();
     }
     total = pullN + changed.length;
     P(done, total);
     const now = Date.now();
     const build = async k => {
-      const o = { kv: chunks[k] };
       if (GZ_OK) {
-        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr(JSON.stringify({ kv: chunks[k] })));
+        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr('{"kv":' + strs[k] + '}'));
         return k === 0 ? { v: 3, r: id, t: now, parts: chunks.length, z: 1, d } : { v: 3, r: id, t: now, z: 1, d };
       }
-      return k === 0 ? { v: 2, r: id, t: now, parts: chunks.length, kv: o.kv } : { v: 2, r: id, t: now, kv: o.kv };
+      return k === 0 ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] } : { v: 2, r: id, t: now, kv: chunks[k] };
     };
     const writeK = async k => ghWriteFile(c, id, cur, await build(k), ghPathOf(id, k), step);
-    // 分けたファイルは同時に書く。目次の役目の先頭（0番）は、最後に書く
     const results = await Promise.all(changed.filter(k => k !== 0).map(writeK));
     let conflict = results.includes('conflict');
     if (!conflict && changed.includes(0)) conflict = (await writeK(0)) === 'conflict';
     if (!conflict) {
-      await idbSet('room:' + id, merged);
+      await roomLocalSaveSafe(id, merged);
       P(total, total);
       return merged;
     }
   }
   throw new Error('GitHubへの保存が何度も競合しました');
+}
+// 端末の保存（背景で書く）。失敗しても GitHub 保存は成功にする
+function roomLocalSaveSafe(id, merged) {
+  if (window.VoxelIO && VoxelIO.ok()) return ioStreamPut('voxelcraft-net', 'kv', 'room:' + id, null, null, merged).catch(() => {});
+  return idbSet('room:' + id, merged);
 }
 // 変更の印がある部屋を、30秒ごとにGitHubへ送る（背景に回って止まっても、次に開いたときに送る）
 setInterval(() => { ghFlushDirty(); }, 8000);

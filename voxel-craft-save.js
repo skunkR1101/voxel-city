@@ -305,14 +305,28 @@ function isRoomOn() { return !!(window.VoxelMulti && VoxelMulti.roomId && VoxelM
   window.setBlock = function (x, y, z, t) { sb(x, y, z, t); if (!isRoomOn()) autoDirty = true; };
 })();
 let autoSaving = false;
+let unloadingSave = false;   // 画面を閉じる時は、確実に同期で書く
+window.addEventListener('pagehide', () => { unloadingSave = true; });
+// 世界の編集を、チャンクごとに少しずつ渡す（背景で書くので、画面は止まらない）
+function* worldEditsIter() {
+  for (const [k, ed] of editsByChunk) {
+    if (!ed || !ed.size) continue;
+    const c = decodeKey(k);
+    if (c) yield [c.cx, c.cy, c.cz, [...ed.entries()]];
+  }
+}
 async function autoSaveNow() {
   if (!autoDirty || isRoomOn() || autoSaving) return;
   autoSaving = true;
+  autoDirty = false;                        // 書いている間に変わったものは、次の保存で拾う
   try {
-    const s = buildSave();
-    await idbPut(AUTO_KEY, { seed: seedNum, edits: s.base.edits });
-    autoDirty = false;
-  } catch (e) {} finally { autoSaving = false; }
+    if (!unloadingSave && window.VoxelIO && VoxelIO.ok()) {
+      await VoxelIO.streamPut(IDB_NAME, IDB_STORE, AUTO_KEY, 'edits', { seed: seedNum }, worldEditsIter());
+    } else {
+      const s = buildSave();
+      await idbPut(AUTO_KEY, { seed: seedNum, edits: s.base.edits });
+    }
+  } catch (e) { autoDirty = true; } finally { autoSaving = false; }
 }
 async function restoreAuto() {
   let a = null;
