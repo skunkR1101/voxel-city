@@ -129,7 +129,14 @@ function sendCell(x, y, z, t) {
   blockStats.sent++;
 }
 // 変わったマスを探して送る
+// 変わりがなければ、全体の見直しは3秒に1回だけにする（毎回すべてを数えると、数秒おきに一瞬止まるため）
+let scanSig = -1, scanFullAt = 0;
 function scanBlocks() {
+  let sig = editsByChunk.size;
+  for (const ed of editsByChunk.values()) sig += ed ? ed.size : 0;
+  const t0 = performance.now();
+  if (sig === scanSig && t0 - scanFullAt < 3000) return;
+  scanSig = sig; scanFullAt = t0;
   for (const [ck, ed] of editsByChunk) {
     if (!ed || !ed.size) continue;
     const c = VoxelWorld.decodeKey(ck);
@@ -176,10 +183,12 @@ function fixBlocks() {
     blockStats.fixed++;
   }
 }
+let fixAt = 0;
 setInterval(() => {
   if (!connectedNow()) return;           // つながっているときだけ（オフラインの変更は送らない・直さない）
   scanBlocks();
-  fixBlocks();
+  const t = performance.now();
+  if (t - fixAt >= 2000) { fixAt = t; fixBlocks(); }   // 直す作業は2秒に1回（同期済みの全マスを毎回調べると重いため）
 }, SCAN_MS);
 
 // ============================================================

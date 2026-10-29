@@ -328,7 +328,7 @@ setInterval(() => {
   if (wasInRoom && !now) restoreAuto();     // 部屋を出た → ローカルの世界に戻す
   wasInRoom = now;
   autoSaveNow();
-}, 1500);
+}, 3000);
 window.addEventListener('pagehide', () => { autoSaveNow(); });
 
 // ============================================================

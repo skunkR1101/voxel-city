@@ -187,6 +187,7 @@ function publishAllDefs() {
 setInterval(() => { try { publishAllDefs(); } catch (e) { console.error(e); } }, 3000);
 
 // 部屋の記録（kv）を見直して、定義が届いているのに使えていないもの・置き場所が反映されていないものを直す
+let reconSig = '', reconFullAt = 0;
 function reconcileDefs() {
   const kv = window.VoxelNet && VoxelNet.kv && VoxelNet.kv();
   if (!kv || !VoxelMulti.connected()) return;
@@ -203,6 +204,11 @@ function reconcileDefs() {
     tryAdopt(H);
   }
   if (typeof getBlock !== 'function') return;
+  // 置き場所の見直しは、変わったときか10秒に1回だけ（毎回すべての置き場所を調べると、数秒おきに一瞬止まるため）
+  const sig = kv.size + ':' + ext.defs.length;
+  const t = Date.now();
+  if (sig === reconSig && t - reconFullAt < 10000) return;
+  reconSig = sig; reconFullAt = t;
   const byH = new Map(ext.defs.map(d => [defHash(d), d]));
   for (const [key, val] of kv) {                        // 2) 置き場所の記録があるのに、まだ見えていないもの
     if (!key.startsWith('b:') || !val || val.del || !val.v || typeof val.v.h !== 'string') continue;
