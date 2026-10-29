@@ -129,14 +129,37 @@ function sendCell(x, y, z, t) {
   blockStats.sent++;
 }
 // 変わったマスを探して送る
-// 変わりがなければ、全体の見直しは3秒に1回だけにする（毎回すべてを数えると、数秒おきに一瞬止まるため）
-let scanSig = -1, scanFullAt = 0;
-function scanBlocks() {
-  let sig = editsByChunk.size;
-  for (const ed of editsByChunk.values()) sig += ed ? ed.size : 0;
-  const t0 = performance.now();
-  if (sig === scanSig && t0 - scanFullAt < 3000) return;
-  scanSig = sig; scanFullAt = t0;
+// ----- 変えた場所だけを送る（全体を毎回調べないので、ワールドが大きくても止まらない） -----
+const pendingCells = new Map();    // "x,y,z" -> {x,y,z}：この端末で変えたばかりの場所
+let fullSentRoom = null;           // 全体を一度送った部屋（入ったときに一度だけ行う）
+// 置く・壊すのはすべてここを通る。壊したときも必ず記録する（空気として送る）
+window.setBlock = function (x, y, z, t) {
+  origSetBlock(x, y, z, t);
+  if (applyingRemote) return;                 // 受け取った変更は、送り返さない
+  if (connectedNow()) pendingCells.set(x + ',' + y + ',' + z, { x, y, z });
+};
+// 変えた場所の、今のワールドの値を送る（1回の処理量は上限つき）
+function flushCells() {
+  if (!pendingCells.size) return;
+  if (!connectedNow()) { pendingCells.clear(); return; }
+  let n = 0;
+  for (const [key, c] of pendingCells) {
+    pendingCells.delete(key);
+    const t = getBlock(c.x, c.y, c.z);
+    const s = stateStr(c.x, c.y, c.z, t);
+    const k = known.get(key);
+    if (!(k && k.t === t && k.s === s)) {
+      known.set(key, { x: c.x, y: c.y, z: c.z, t, s });
+      sendCell(c.x, c.y, c.z, t);
+    }
+    if (++n >= 1500) break;
+  }
+}
+// 部屋に入ったとき一度だけ、この端末にある全ての場所を送る
+function fullSyncOnce() {
+  const rid = conn ? conn.id : null;
+  if (!rid || fullSentRoom === rid) return;
+  fullSentRoom = rid;
   for (const [ck, ed] of editsByChunk) {
     if (!ed || !ed.size) continue;
     const c = VoxelWorld.decodeKey(ck);
@@ -177,6 +200,7 @@ function fixBlocks() {
   for (const k of known.values()) {
     if (Math.abs(k.x - pp.x) > FIX_R || Math.abs(k.z - pp.z) > FIX_R || Math.abs(k.y - pp.y) > FIX_R) continue;
     if (k.y <= BOTTOM) continue;
+    if (pendingCells.has(k.x + ',' + k.y + ',' + k.z)) continue;   // 壊した・置いたばかりは、そのまま（戻さない）
     if (getBlock(k.x, k.y, k.z) === k.t) continue;
     applyingRemote = true;
     try { origSetBlock(k.x, k.y, k.z, k.t); } finally { applyingRemote = false; }
@@ -186,9 +210,10 @@ function fixBlocks() {
 let fixAt = 0;
 setInterval(() => {
   if (!connectedNow()) return;           // つながっているときだけ（オフラインの変更は送らない・直さない）
-  scanBlocks();
+  fullSyncOnce();
+  flushCells();
   const t = performance.now();
-  if (t - fixAt >= 2000) { fixAt = t; fixBlocks(); }   // 直す作業は2秒に1回（同期済みの全マスを毎回調べると重いため）
+  if (t - fixAt >= 4000) { fixAt = t; fixBlocks(); }   // 直す作業は4秒に1回（同期済みの全マスを見るため、間隔をあける）
 }, SCAN_MS);
 
 // ============================================================
