@@ -514,7 +514,7 @@ async function ghDecodeKv(o) {
   return Array.isArray(o.kv) ? o.kv : [];
 }
 // 既にあるファイルを読む（本体と分割ファイルは同時に取りに行く＝待ち時間を短くする）
-async function ghPull(id, onProg) {
+async function ghPull(id, onProg, wantSig) {
   const c = ghCfg();
   if (!c) return { shas: {}, kv: [], raw: {} };
   const shas = {};
@@ -525,7 +525,7 @@ async function ghPull(id, onProg) {
   if (mainRes) {
     shas[ghPathOf(id, 0)] = mainRes.sha;
     n = Number(mainRes.o.parts) || 1;
-    { const a = await ghDecodeKv(mainRes.o); raw[ghPathOf(id, 0)] = JSON.stringify(a); kv = kv.concat(a); }
+    { const a = await ghDecodeKv(mainRes.o); if (wantSig) raw[ghPathOf(id, 0)] = sigOfRemote(a); for (const x of a) kv.push(x); }
     const ks = [];
     for (let k = 1; k < n; k++) ks.push(k);
     let done = 1;
@@ -538,7 +538,7 @@ async function ghPull(id, onProg) {
       const p = got[i];
       if (!p) continue;
       shas[ghPathOf(id, i + 1)] = p.sha;
-      { const a = await ghDecodeKv(p.o); raw[ghPathOf(id, i + 1)] = JSON.stringify(a); kv = kv.concat(a); }
+      { const a = await ghDecodeKv(p.o); if (wantSig) raw[ghPathOf(id, i + 1)] = sigOfRemote(a); for (const x of a) kv.push(x); }
     }
   } else {
     // 本体が無いときは、分割ファイルが残っていないかを順に確かめる
@@ -548,7 +548,7 @@ async function ghPull(id, onProg) {
       if (!p) break;
       found = true;
       shas[ghPathOf(id, k)] = p.sha;
-      { const a = await ghDecodeKv(p.o); raw[ghPathOf(id, k)] = JSON.stringify(a); kv = kv.concat(a); }
+      { const a = await ghDecodeKv(p.o); if (wantSig) raw[ghPathOf(id, k)] = sigOfRemote(a); for (const x of a) kv.push(x); }
     }
     if (!found) { await ghRepoCheck(c); return { shas: {}, kv: [], raw: {} }; }
   }
@@ -589,22 +589,38 @@ function ghAssemble(list) {
   }
   return out;
 }
-// 項目を1つずつ文字列にしたものを覚えておく（変わっていない項目は作り直さない）
-const pairCache = new Map();   // 鍵 -> { v, s }
-function pairStr(e) {
-  const c = pairCache.get(e[0]);
-  if (c && c.v === e[1]) return c.s;
-  const str = JSON.stringify(e);
-  pairCache.set(e[0], { v: e[1], s: str });
-  return str;
+// 項目ごとの「長さ」と「印（数字）」だけを覚える（文字列そのものは持たない＝メモリを増やさない）
+const pairCache = new Map();   // 鍵 -> { v, n, h }
+function strHash32(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return h;
 }
-function chunkStr(list) { return '[' + list.map(pairStr).join(',') + ']'; }
+function pairInfo(e) {
+  const c = pairCache.get(e[0]);
+  if (c && c.v === e[1]) return c;
+  const str = JSON.stringify(e);
+  const info = { v: e[1], n: str.length, h: strHash32(str) };
+  pairCache.set(e[0], info);
+  return info;
+}
+// 1つのファイルの中身の印（変わったかどうかを比べるためだけに使う）
+function sigOfLocal(list) {
+  let h = 0;
+  for (const e of list) h = (Math.imul(h, 31) + pairInfo(e).h) >>> 0;
+  return h.toString(16) + ':' + list.length;
+}
+function sigOfRemote(list) {
+  let h = 0;
+  for (const e of list) h = (Math.imul(h, 31) + strHash32(JSON.stringify(e))) >>> 0;
+  return h.toString(16) + ':' + list.length;
+}
 // 項目を、1ファイルの上限を超えないように区切る
 function ghPack(kv) {
   const parts = [];
   let cur = [], size = 0;
   for (const e of kv) {
-    const n = pairStr(e).length + 1;
+    const n = pairInfo(e).n + 1;
     if (cur.length && size + n > GH_PART_MAX) { parts.push(cur); cur = []; size = 0; }
     cur.push(e); size += n;
   }
@@ -612,6 +628,7 @@ function ghPack(kv) {
   if (pairCache.size > kv.length * 2 + 1000) pairCache.clear();   // 消えた項目の分を捨てる
   return parts;
 }
+function chunkStr(list) { return '[' + list.map(e => JSON.stringify(e)).join(',') + ']'; }
 let ghLastSig = null;
 let ghQueue = Promise.resolve();
 // 保存は1つずつ順番に行う（同時に書いて失われないように）
@@ -712,7 +729,7 @@ async function ghPushOnce(id, kv, prog) {
   const step = () => { done++; P(done, total); };
   P(0, total);
   for (let attempt = 0; attempt < 3; attempt++) {
-    const cur = await ghPull(id, (g, n) => { total = n; done = g; P(done, total); });
+    const cur = await ghPull(id, (g, n) => { total = n; done = g; P(done, total); }, true);
     await tick();
     const pullN = cur.parts || 1;
     if (total < pullN) total = pullN;
@@ -721,12 +738,10 @@ async function ghPushOnce(id, kv, prog) {
     const chunks = ghPack(merged.flatMap(ghSplitEntry));
     await tick();
     const changed = [];
-    const strs = [];
     for (let k = 0; k < chunks.length; k++) {
       const path = ghPathOf(id, k);
-      const str = chunkStr(chunks[k]);
-      strs[k] = str;
-      const same = cur.raw && cur.raw[path] === str && (k !== 0 || pullN === chunks.length);
+      const sig = sigOfLocal(chunks[k]);
+      const same = cur.raw && cur.raw[path] === sig && (k !== 0 || pullN === chunks.length);
       if (!same || !cur.shas[path]) changed.push(k);
       if (k % 4 === 3) await tick();
     }
@@ -735,7 +750,7 @@ async function ghPushOnce(id, kv, prog) {
     const now = Date.now();
     const build = async k => {
       if (GZ_OK) {
-        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr('{"kv":' + strs[k] + '}'));
+        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr('{"kv":' + chunkStr(chunks[k]) + '}'));
         return k === 0 ? { v: 3, r: id, t: now, parts: chunks.length, z: 1, d } : { v: 3, r: id, t: now, z: 1, d };
       }
       return k === 0 ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] } : { v: 2, r: id, t: now, kv: chunks[k] };

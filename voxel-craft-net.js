@@ -24,7 +24,7 @@ const MSG_MAX = 60000;           // 1通の大きさの上限（文字数）
 const FLUSH_MS = 120;            // 変更をまとめて送る間隔
 const SEEN_MAX = 20000;
 const RETRY_MS = 10000;
-const SAVE_MS = 3000;
+const SAVE_MS = 8000;           // 部屋の保存（端末）は8秒にまとめる（画面を閉じる時は必ず保存）
 const SUM_MS = 20000;            // 全体の一致を確かめる間隔
 const RESYNC_MS = 60000;         // 再接続のとき全体を取り直すまでの最短間隔
 
