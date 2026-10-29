@@ -114,7 +114,6 @@ function send(key, value, del, eph) {
 // ============================================================
 const SCAN_MS = 250;
 const FIX_R = 48;                       // 照らし合わせる範囲（プレイヤーからのマス数）
-const known = new Map();                // "x,y,z" -> { x, y, z, t, s }  この端末が知っている値
 const blockStats = { sent: 0, recv: 0, applied: 0, fixed: 0, waiting: 0 };
 let stateGetter = null;                 // (x,y,z) -> カスタムブロックの色・向き（custom.js が渡す）
 
@@ -129,16 +128,33 @@ function sendCell(x, y, z, t) {
   blockStats.sent++;
 }
 // 変わったマスを探して送る
-// ----- 変えた場所だけを送る（全体を毎回調べないので、ワールドが大きくても止まらない） -----
-const pendingCells = new Map();    // "x,y,z" -> {x,y,z}：この端末で変えたばかりの場所
-let fullSentRoom = null;           // 全体を一度送った部屋（入ったときに一度だけ行う）
-// 置く・壊すのはすべてここを通る。壊したときも必ず記録する（空気として送る）
+// ============================================================
+// ブロックの同期（正は「部屋の記録 kv」。時刻の新しい方が勝つ）
+//  ・この端末での変更は、変えた場所を覚えておき、次の処理で今の値を kv へ送る
+//  ・受け取った変更は、この端末で変更中の場所には触らない（自分の変更が必ず勝つ）
+//  ・画面の値が記録と違っていたら、記録の値へ直す（記録が正）
+// ============================================================
+const pendingCells = new Map();    // "x,y,z" -> {x,y,z}：この端末で変えて、まだ送っていない場所
+let fullSyncWanted = false;        // 部屋を作ったとき（この端末の全体を送る）だけ true
+const kvKeyOf = (x, y, z) => 'b:' + x + ',' + y + ',' + z;
+function kvBlockOf(x, y, z) {
+  const kv = window.VoxelNet && VoxelNet.kv ? VoxelNet.kv() : null;
+  return kv ? kv.get(kvKeyOf(x, y, z)) || null : null;
+}
+// 記録がすでにこの値なら、送らなくてよい
+function recordHas(x, y, z, t) {
+  const e = kvBlockOf(x, y, z);
+  if (!e) return false;
+  if (t === AIR) return e.del === true || e.v === AIR;
+  return !e.del && e.v === t;
+}
+// 置く・壊すは必ずここを通る（受け取った変更の書き込みは対象外）
 window.setBlock = function (x, y, z, t) {
   origSetBlock(x, y, z, t);
-  if (applyingRemote) return;                 // 受け取った変更は、送り返さない
+  if (applyingRemote) return;
   if (connectedNow()) pendingCells.set(x + ',' + y + ',' + z, { x, y, z });
 };
-// 変えた場所の、今のワールドの値を送る（1回の処理量は上限つき）
+// 変えた場所を、今のワールドの値で記録へ送る（1回の処理量は上限つき）
 function flushCells() {
   if (!pendingCells.size) return;
   if (!connectedNow()) { pendingCells.clear(); return; }
@@ -146,38 +162,28 @@ function flushCells() {
   for (const [key, c] of pendingCells) {
     pendingCells.delete(key);
     const t = getBlock(c.x, c.y, c.z);
-    const s = stateStr(c.x, c.y, c.z, t);
-    const k = known.get(key);
-    if (!(k && k.t === t && k.s === s)) {
-      known.set(key, { x: c.x, y: c.y, z: c.z, t, s });
-      sendCell(c.x, c.y, c.z, t);
-    }
+    if (t < CUSTOM_BASE && recordHas(c.x, c.y, c.z, t)) continue;
+    sendCell(c.x, c.y, c.z, t);
     if (++n >= 1500) break;
   }
 }
-// 部屋に入ったとき一度だけ、この端末にある全ての場所を送る
+// 部屋を作ったときだけ、この端末の全体を一度送る（記録と違う場所だけ）
 function fullSyncOnce() {
-  const rid = conn ? conn.id : null;
-  if (!rid || fullSentRoom === rid) return;
-  fullSentRoom = rid;
+  if (!fullSyncWanted || !connectedNow()) return;
+  fullSyncWanted = false;
   for (const [ck, ed] of editsByChunk) {
     if (!ed || !ed.size) continue;
     const c = VoxelWorld.decodeKey(ck);
     if (!c) continue;
     for (const [li, t] of ed) {
       const x = c.cx * CS + (li & 15), y = c.cy * CS + ((li >> 4) & 15), z = c.cz * CS + ((li >> 8) & 15);
-      const key = x + ',' + y + ',' + z;
-      const s = stateStr(x, y, z, t);
-      const k = known.get(key);
-      if (k && k.t === t && k.s === s) continue;
-      known.set(key, { x, y, z, t, s });
+      if (t < CUSTOM_BASE && recordHas(x, y, z, t)) continue;
       sendCell(x, y, z, t);
     }
   }
 }
-// 受け取った1マスを、ワールドへ反映する（送り返さないよう、known に記録する）
-function applyCell(x, y, z, t, s) {
-  known.set(x + ',' + y + ',' + z, { x, y, z, t, s });
+// 受け取った1マスを、ワールドへ反映する（この端末で変更中の場所は、自分の変更を優先）
+function applyCell(x, y, z, t) {
   applyingRemote = true;
   try { origSetBlock(x, y, z, t); } finally { applyingRemote = false; }
   blockStats.applied++;
@@ -186,24 +192,36 @@ function applyRemoteCell(key, rec) {
   const p = key.slice(2).split(',').map(Number);
   if (p.length !== 3 || p.some(n => !Number.isInteger(n))) return;
   blockStats.recv++;
+  if (pendingCells.has(p[0] + ',' + p[1] + ',' + p[2])) return;   // 自分が今変えた場所（すぐ送るので、その値が勝つ）
   let t = null;
   if (rec.del) t = AIR;
   else if (blockResolver) t = blockResolver(p[0], p[1], p[2], rec);
   else if (typeof rec.v === 'number') t = rec.v;
   if (t === null || t === undefined || !Number.isInteger(t)) { blockStats.waiting++; return; }   // 定義が届くまで待つ
-  applyCell(p[0], p[1], p[2], t, stateStr(p[0], p[1], p[2], t));
+  applyCell(p[0], p[1], p[2], t);
 }
-// 受け取った値と実際のワールドが違えば、受け取った値に直す（範囲は近くだけ）
+const posCache = new Map();        // 'b:x,y,z' -> [x,y,z]
+// 記録の値と画面が違えば、記録の値へ直す（近くだけ・自分が変更中の場所は除く）
 function fixBlocks() {
-  if (typeof player === 'undefined' || !player) return;
+  if (typeof player === 'undefined' || !player || !window.VoxelNet || !VoxelNet.kv) return;
+  const kv = VoxelNet.kv();
+  if (!kv) return;
   const pp = player.pos;
-  for (const k of known.values()) {
-    if (Math.abs(k.x - pp.x) > FIX_R || Math.abs(k.z - pp.z) > FIX_R || Math.abs(k.y - pp.y) > FIX_R) continue;
-    if (k.y <= BOTTOM) continue;
-    if (pendingCells.has(k.x + ',' + k.y + ',' + k.z)) continue;   // 壊した・置いたばかりは、そのまま（戻さない）
-    if (getBlock(k.x, k.y, k.z) === k.t) continue;
-    applyingRemote = true;
-    try { origSetBlock(k.x, k.y, k.z, k.t); } finally { applyingRemote = false; }
+  for (const [key, e] of kv) {
+    if (!e || key.charCodeAt(0) !== 98 /* b */) continue;
+    let p = posCache.get(key);                       // 位置は一度だけ読み取って覚える（毎回の文字列処理を減らす）
+    if (p === undefined) {
+      const q = key.slice(2).split(',').map(Number);
+      p = (q.length === 3 && q.every(n => Number.isInteger(n))) ? q : null;
+      posCache.set(key, p);
+    }
+    if (!p) continue;
+    if (Math.abs(p[0] - pp.x) > FIX_R || Math.abs(p[2] - pp.z) > FIX_R || Math.abs(p[1] - pp.y) > FIX_R) continue;
+    if (p[1] <= BOTTOM || pendingCells.has(p[0] + ',' + p[1] + ',' + p[2])) continue;
+    const want = e.del ? AIR : e.v;
+    if (typeof want !== 'number') continue;          // 定義つきのブロックは reconcile が直す
+    if (getBlock(p[0], p[1], p[2]) === want) continue;
+    applyCell(p[0], p[1], p[2], want);
     blockStats.fixed++;
   }
 }
@@ -573,7 +591,7 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
     const proof = await proofOf(id, password);
     conn = { id, pw: password, name: name || '', tag: (tag || cfg.tag || '').trim(), seed: seed ?? null };
     if (conn.tag) { cfg.tag = conn.tag; saveCfg(); }
-    known.clear();
+    fullSyncWanted = !!keepLocal;   // 部屋を作る時だけ、この端末の全体を送る
     // 参加するときは、この端末の編集データも空にする（シードが無いときは今のシードを使う）
     if (window.VoxelWorld) VoxelWorld.applySeed(conn.seed != null ? conn.seed : VoxelWorld.getSeed(), !keepLocal);
     // 部屋に入るときは、この端末の道路・駅・ダイヤを、部屋の状態に合わせて入れ替える（作るときは除く）
