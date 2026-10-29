@@ -417,15 +417,16 @@ async function ghDecodeKv(o) {
 // 既にあるファイルを読む（本体と分割ファイルは同時に取りに行く＝待ち時間を短くする）
 async function ghPull(id, onProg) {
   const c = ghCfg();
-  if (!c) return { shas: {}, kv: [] };
+  if (!c) return { shas: {}, kv: [], raw: {} };
   const shas = {};
+  const raw = {};
   const mainRes = await ghGetFile(c, ghPathOf(id, 0));
   let kv = [];
   let n = 1;
   if (mainRes) {
     shas[ghPathOf(id, 0)] = mainRes.sha;
     n = Number(mainRes.o.parts) || 1;
-    kv = kv.concat(await ghDecodeKv(mainRes.o));
+    { const a = await ghDecodeKv(mainRes.o); raw[ghPathOf(id, 0)] = JSON.stringify(a); kv = kv.concat(a); }
     const ks = [];
     for (let k = 1; k < n; k++) ks.push(k);
     let done = 1;
@@ -438,7 +439,7 @@ async function ghPull(id, onProg) {
       const p = got[i];
       if (!p) continue;
       shas[ghPathOf(id, i + 1)] = p.sha;
-      kv = kv.concat(await ghDecodeKv(p.o));
+      { const a = await ghDecodeKv(p.o); raw[ghPathOf(id, i + 1)] = JSON.stringify(a); kv = kv.concat(a); }
     }
   } else {
     // 本体が無いときは、分割ファイルが残っていないかを順に確かめる
@@ -448,12 +449,12 @@ async function ghPull(id, onProg) {
       if (!p) break;
       found = true;
       shas[ghPathOf(id, k)] = p.sha;
-      kv = kv.concat(await ghDecodeKv(p.o));
+      { const a = await ghDecodeKv(p.o); raw[ghPathOf(id, k)] = JSON.stringify(a); kv = kv.concat(a); }
     }
-    if (!found) { await ghRepoCheck(c); return { shas: {}, kv: [] }; }
+    if (!found) { await ghRepoCheck(c); return { shas: {}, kv: [], raw: {} }; }
   }
   if (onProg) onProg(n, n);
-  return { shas, kv: ghAssemble(kv), parts: n };
+  return { shas, kv: ghAssemble(kv), parts: n, raw };
 }
 // 大きすぎる1件は、いくつかの断片に切って別々の項目として保存する
 const GH_SPLIT_AT = 150000;   // これを超える1件は断片に切る
@@ -504,9 +505,9 @@ function ghPack(kv) {
 let ghLastSig = null;
 let ghQueue = Promise.resolve();
 // 保存は1つずつ順番に行う（同時に書いて失われないように）
-function ghPush(id, kv) {
+function ghPush(id, kv, prog) {
   ghMarkDirty(id, false);                 // この時点の内容を送る。送る前後に変わったものは、また印が付く
-  const job = ghQueue.then(() => ghPushOnce(id, kv));
+  const job = ghQueue.then(() => ghPushOnce(id, kv, prog));
   ghQueue = job.catch(() => {});
   job.catch(() => ghMarkDirty(id, true)); // 送れなかったら、次の機会にまた送る
   return job;
@@ -531,50 +532,114 @@ function ghFlushDirty() {
       .catch(e => console.error(e));
   }
 }
-async function ghPushOnce(id, kv) {
+// ---- 保存の進み具合（作業は止めずに、アイテムスロットの上に〇〇%を出す） ----
+let ghProgEl = null, ghProgHideT = 0;
+function ghProgEnsure() {
+  if (ghProgEl) return ghProgEl;
+  ghProgEl = document.createElement('div');
+  ghProgEl.id = 'ghProg';
+  ghProgEl.style.cssText = 'position:fixed;z-index:95;display:none;pointer-events:none;transform:translate(-50%,0);background:rgba(10,18,28,.88);color:#fff;font:600 12px sans-serif;padding:4px 9px;border-radius:8px;white-space:nowrap;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.4)';
+  ghProgEl.innerHTML = '<div class="gp-l"></div><div style="height:4px;width:120px;margin-top:3px;background:rgba(255,255,255,.2);border-radius:2px;overflow:hidden"><div class="gp-f" style="height:100%;width:0;background:#7fd1ff;transition:width .15s"></div></div>';
+  document.body.appendChild(ghProgEl);
+  return ghProgEl;
+}
+function ghProgPlace() {
+  const hb = document.getElementById('hotbar');
+  if (!hb || !ghProgEl) return;
+  const r = hb.getBoundingClientRect();
+  ghProgEl.style.left = (r.left + r.width / 2) + 'px';
+  ghProgEl.style.top = Math.max(4, r.top - 40) + 'px';
+}
+function ghProgSet(done, total) {
+  const el = ghProgEnsure();
+  clearTimeout(ghProgHideT);
+  const pct = Math.max(0, Math.min(100, Math.floor(done / Math.max(1, total) * 100)));
+  el.querySelector('.gp-l').textContent = 'GitHub保存中 ' + pct + '%';
+  el.querySelector('.gp-f').style.width = pct + '%';
+  el.style.display = 'block';
+  ghProgPlace();
+}
+function ghProgEnd(msg, ok) {
+  const el = ghProgEnsure();
+  el.querySelector('.gp-l').textContent = msg;
+  el.querySelector('.gp-f').style.width = ok ? '100%' : '0';
+  el.style.display = 'block';
+  ghProgPlace();
+  clearTimeout(ghProgHideT);
+  ghProgHideT = setTimeout(() => { el.style.display = 'none'; }, ok ? 1500 : 3500);
+}
+// 1つのファイルを書く（同時に複数書けるように、個別に動く）
+async function ghWriteFile(c, id, cur, o, path, step) {
+  let sha = cur.shas[path];
+  if (!sha) { const ex = await ghGetFile(c, path); sha = ex ? ex.sha : null; }
+  const body = {
+    message: 'room ' + id + ' ' + new Date().toISOString(),
+    content: b64Enc(new TextEncoder().encode(JSON.stringify(o))),
+    ...(sha ? { sha } : {})
+  };
+  let res = null;
+  for (let i = 0; i < 3 && !res; i++) {                    // 電波の一時的な失敗は、少し待って再送
+    try {
+      res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
+        { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (res.status >= 500) res = null;
+    } catch (e) { res = null; }
+    if (!res) await new Promise(r => setTimeout(r, 600 * (i + 1)));
+  }
+  if (!res) throw new Error('GitHubに届きませんでした（通信が不安定です）');
+  if (res.ok) { if (step) step(); return 'ok'; }
+  if (res.status === 409) return 'conflict';
+  let msg = '';
+  try { msg = (await res.json()).message || ''; } catch (e) {}
+  throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
+}
+// 保存：他の人の分を取り込み、「中身が変わったファイルだけ」を並列に書く（速い・通信量が少ない）
+async function ghPushOnce(id, kv, prog) {
   const c = ghCfg();
   if (!c || !id) return null;
+  const P = prog || (() => {});
+  let done = 0, total = 1;
+  const step = () => { done++; P(done, total); };
+  P(0, total);
   for (let attempt = 0; attempt < 3; attempt++) {
-    const cur = await ghPull(id);                       // 他の人の保存を取り込んでから書く
-    const merged = mergeKv(cur.kv, kv);                 // ここまでは1件ずつの完全な形
-    const chunks = ghPack(merged.flatMap(ghSplitEntry)); // 保存用にだけ断片へ切る
-    const now = Date.now();
-    let conflict = false;
-    // 分けたファイルは後ろから書き、最後に先頭（目次の役目）を書く
-    for (let k = chunks.length - 1; k >= 0 && !conflict; k--) {
+    const cur = await ghPull(id, (g, n) => { total = n; done = g; P(done, total); });
+    const pullN = cur.parts || 1;
+    if (total < pullN) total = pullN;
+    done = Math.max(done, pullN);
+    const merged = mergeKv(cur.kv, kv);                     // 他の人の保存も含めて1つにする
+    const chunks = ghPack(merged.flatMap(ghSplitEntry));
+    const changed = [];
+    for (let k = 0; k < chunks.length; k++) {
       const path = ghPathOf(id, k);
-      let o;
-      if (GZ_OK) {                                        // 圧縮できる端末は、圧縮して保存する
-        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr(JSON.stringify({ kv: chunks[k] })));
-        o = k === 0 ? { v: 3, r: id, t: now, parts: chunks.length, z: 1, d } : { v: 3, r: id, t: now, z: 1, d };
-      } else {
-        o = k === 0 ? { v: 2, r: id, t: now, parts: chunks.length, kv: chunks[k] } : { v: 2, r: id, t: now, kv: chunks[k] };
-      }
-      // 前の書き込みが途中で止まっていても、今のファイルの版番号を取り直して必ず上書きできるようにする
-      let sha = cur.shas[path];
-      if (!sha) { const ex = await ghGetFile(c, path); sha = ex ? ex.sha : null; }
-      const body = {
-        message: 'room ' + id + ' ' + new Date().toISOString(),
-        content: b64Enc(new TextEncoder().encode(JSON.stringify(o))),
-        ...(sha ? { sha } : {})
-      };
-      const res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
-        { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (res.ok) continue;
-      if (res.status === 409) { conflict = true; break; }
-      let msg = '';
-      try { msg = (await res.json()).message || ''; } catch (e) {}
-      throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
+      const same = cur.raw && cur.raw[path] === JSON.stringify(chunks[k]) && (k !== 0 || pullN === chunks.length);
+      if (!same || !cur.shas[path]) changed.push(k);
     }
+    total = pullN + changed.length;
+    P(done, total);
+    const now = Date.now();
+    const build = async k => {
+      const o = { kv: chunks[k] };
+      if (GZ_OK) {
+        const d = VoxelNet.bytesToB64(await VoxelNet.gzipStr(JSON.stringify({ kv: chunks[k] })));
+        return k === 0 ? { v: 3, r: id, t: now, parts: chunks.length, z: 1, d } : { v: 3, r: id, t: now, z: 1, d };
+      }
+      return k === 0 ? { v: 2, r: id, t: now, parts: chunks.length, kv: o.kv } : { v: 2, r: id, t: now, kv: o.kv };
+    };
+    const writeK = async k => ghWriteFile(c, id, cur, await build(k), ghPathOf(id, k), step);
+    // 分けたファイルは同時に書く。目次の役目の先頭（0番）は、最後に書く
+    const results = await Promise.all(changed.filter(k => k !== 0).map(writeK));
+    let conflict = results.includes('conflict');
+    if (!conflict && changed.includes(0)) conflict = (await writeK(0)) === 'conflict';
     if (!conflict) {
       await idbSet('room:' + id, merged);
+      P(total, total);
       return merged;
     }
   }
   throw new Error('GitHubへの保存が何度も競合しました');
 }
 // 変更の印がある部屋を、30秒ごとにGitHubへ送る（背景に回って止まっても、次に開いたときに送る）
-setInterval(() => { ghFlushDirty(); }, 30000);
+setInterval(() => { ghFlushDirty(); }, 8000);
 // 画面を閉じる・背景に回す・電波が戻ったときにも、未送信分を送る
 window.addEventListener('pagehide', () => ghFlushDirty());
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') ghFlushDirty(); });
@@ -1029,8 +1094,10 @@ function buildUI() {
   $('mpGhSync').addEventListener('click', async () => {
     if (!conn) { toast('部屋に入ってから押してください'); return; }
     const kv = window.VoxelNet && VoxelNet.kv() ? [...VoxelNet.kv().entries()] : [];
-    try { await ghPush(conn.id, kv); toast('GitHubに保存しました'); }
-    catch (e) { toast(e.message); }
+    try {
+      await ghPush(conn.id, kv, (d, t) => ghProgSet(d, t));
+      ghProgEnd('保存しました ✓', true);
+    } catch (e) { ghProgEnd('保存できませんでした', false); toast(e.message); }
   });
   buildSaveUI();
   refreshShare();
