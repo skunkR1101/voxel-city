@@ -807,7 +807,11 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
     ]);
     const kv = new Map(Array.isArray(saved) ? saved : []);
     if (!gh) {
-      toast('この端末にはGitHub設定がありません。手元の保存だけで入ります（他の端末の最新は見えません）');
+      toast('この端末にはGitHub設定がないため、最新を読めません');
+      // 初めて使う端末では、GitHub設定を入れると最新を読めるので、設定画面を開く（入るのは続けます）
+      setTimeout(() => {
+        if (confirm('この端末にはGitHub設定がないため、他の端末で保存された最新の作業を読めません。\n\nGitHubの設定（リポジトリ名と、この端末用のトークン）を入れますか？\n（「キャンセル」なら、今いる人からの情報だけで続けます）')) open();
+      }, 300);
     } else if (gh.ok) {
       for (const [k, v] of mergeKv([...kv.entries()], gh.r.kv)) kv.set(k, v);
       toast('GitHubから最新の作業を読み込みました（' + gh.r.kv.length + '件）');
