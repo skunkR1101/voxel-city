@@ -206,6 +206,7 @@ function fixBlocks() {
   if (typeof player === 'undefined' || !player || !window.VoxelNet || !VoxelNet.kv) return;
   const kv = VoxelNet.kv();
   if (!kv) return;
+  if (posCache.size > kv.size * 2 + 2000) posCache.clear();   // 消えた記録の位置を捨てる（増え続けないように）
   const pp = player.pos;
   for (const [key, e] of kv) {
     if (!e || key.charCodeAt(0) !== 98 /* b */) continue;

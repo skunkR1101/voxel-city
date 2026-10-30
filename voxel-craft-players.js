@@ -31,16 +31,20 @@ function splitStr(s) {
   for (let i = 0; i < s.length; i += CHUNK) out.push(s.slice(i, i + CHUNK));
   return out;
 }
+const skinSentRoom = new Map();    // 部屋 -> { 送った中身, 送った印 }（同じ中身は部屋ごとに一度だけ送る）
 function publishSkin() {
   if (!VoxelMulti.connected()) return;
   publishedRoom = VoxelMulti.roomId();
   if (!myPayload) { mySkin = null; return; }
+  const prev = skinSentRoom.get(publishedRoom);
+  if (prev && prev.payload === myPayload) { mySkin = prev.skin; return; }   // 送り直すと、モデルの全部が毎回部屋の記録に増えるため
   const id = Math.random().toString(36).slice(2, 8);
   const mParts = splitStr(myPayload.text || '');
   const tParts = myPayload.tex ? splitStr(myPayload.tex) : [];
   mParts.forEach((d, i) => VoxelMulti.send(`sk:${PEER}:${id}:m:${i}`, { d }));
   tParts.forEach((d, i) => VoxelMulti.send(`sk:${PEER}:${id}:t:${i}`, { d }));
   mySkin = { id, kind: myPayload.kind, mN: mParts.length, tN: tParts.length };
+  skinSentRoom.set(publishedRoom, { payload: myPayload, skin: mySkin });
 }
 function rebuildPayload() {
   if (!curModel && !curTex) myPayload = null;
@@ -556,6 +560,8 @@ window.addEventListener('pagehide', () => {
 requestAnimationFrame(frame);
 
 window.VoxelPlayers = {
+  // 表示中のほかのプレイヤー（位置は画面に出している値）
+  list: () => [...remotes.values()].filter(r => r.inited).map(r => ({ peer: r.peer, name: r.name, x: r.x, y: r.y, z: r.z })),
   count: () => remotes.size,
   names: () => [...remotes.values()].map(r => r.name),
   openChat, closeChat,
