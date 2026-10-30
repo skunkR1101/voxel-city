@@ -71,14 +71,59 @@ function uid() { return 'v' + Date.now().toString(36) + Math.random().toString(3
 // ============================================================
 // 保存・読み込み
 // ============================================================
+// ============================================================
+// 大きいデータ（テクスチャ・モデル）は、軽い保存内容から外して、IndexedDB に置く。
+//  ・保存内容（同期される）には、キーだけを書く。毎回の設置で大きな文字列を作り直さない。
+//  ・同じ内容は、部屋へ一度だけ送る（新しく入った人は、部屋の記録から受け取る）。
+// ============================================================
+const BLOB_PART = 16000;            // 通信の1かけらの大きさ（文字数）
+const blobPending = new Map();      // 部屋へまだ送っていないもの： key -> 文字列
+const blobIn = new Map();           // 受け取り中： key -> { n, parts[] }
+const blobN = new Map();            // key -> かけらの数（削除の時に使う）
+const useBlob = () => !!(window.VoxelExt && VoxelExt.blobPut && VoxelExt.blobGet);
+function blobGetSafe(key) {
+  try { return Promise.resolve(VoxelExt.blobGet(key)).then(v => (typeof v === 'string' ? v : null), () => null); }
+  catch (e) { return Promise.resolve(null); }
+}
+function queueBlob(key, text) {
+  blobPending.set(key, text);
+  try { Promise.resolve(VoxelExt.blobPut(key, text)).catch(() => toast('大きいデータを保存できませんでした（保存領域がいっぱいの可能性）')); }
+  catch (e) { /* 保存領域が使えないときは、通信の分だけ送る */ }
+}
+function sendBlob(key, text) {
+  const n = Math.max(1, Math.ceil(text.length / BLOB_PART));
+  for (let i = 0; i < n; i++) VoxelMulti.send('rbk:' + key + '#' + i, { d: text.slice(i * BLOB_PART, (i + 1) * BLOB_PART) });
+  VoxelMulti.send('rbk:' + key + '#n', { n });
+  blobN.set(key, n);
+}
+// 部屋につながっているときだけ、まだ送っていないものを送る
+function sendPendingBlobs() {
+  if (!blobPending.size || !window.VoxelMulti || !VoxelMulti.connected()) return;
+  for (const [key, text] of [...blobPending]) { blobPending.delete(key); sendBlob(key, text); }
+}
+setInterval(() => { tryBlobRx(); sendPendingBlobs(); }, 3000);
+
 function saveAll() {
   try {
+    const blobs = useBlob();
+    const vars = st.variants.map(v => {
+      if (v.builtin) return v;
+      const o = { id: v.id, kind: v.kind, name: v.name, builtin: false };
+      if (v.scale) o.scale = v.scale;
+      if (!blobs) { o.texData = v.texData || null; o.model = v.model || null; return o; }
+      if (v.texData && !v.texKey) { v.texKey = 'road:tex:' + v.id; queueBlob(v.texKey, v.texData); }
+      if (v.model && v.model.data && !v.model.key) { v.model.key = 'road:mdl:' + v.id; queueBlob(v.model.key, v.model.data); }
+      o.texKey = v.texKey || null;
+      o.model = v.model ? { format: v.model.format, key: v.model.key || null } : null;
+      return o;
+    });
     localStorage.setItem(KEY, JSON.stringify({
-      variants: st.variants,
+      variants: vars,
       pieces: st.pieces.map(p => ({ v: p.v, kind: p.kind, w: p.w, x: r4(p.x), y: r4(p.y), z: r4(p.z), q: p.q.map(r4), l: r4(p.l), ph: r4(p.ph || 0), g: p.g })),
       nodes: st.nodes.map(n => ({ x: r4(n.p.x), y: r4(n.p.y), z: r4(n.p.z), dx: r4(n.d.x), dz: r4(n.d.z), sl: r4(n.sl || 0), kind: n.kind, g: n.g })),
       sel: st.sel, undo: st.undo, gid: st.gid, grid: rs.grid, offset: rs.offset
     }));
+    sendPendingBlobs();
   } catch (e) {
     toast('保存できませんでした（容量を超えています）');
   }
@@ -148,14 +193,28 @@ function defaultTex(kind) {
   defTexCache[kind] = t;
   return t;
 }
+const TEX_MAX = 512;   // 線路・道路のテクスチャの最大の大きさ（これより大きい画像は縮める）
 function loadTex(url) {
   return new Promise(res => {
-    new THREE.TextureLoader().load(url, t => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth || 1, h = img.naturalHeight || 1;
+      const sc = Math.min(1, TEX_MAX / Math.max(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * sc));
+      c.height = Math.max(1, Math.round(h * sc));
+      const g = c.getContext('2d');
+      g.imageSmoothingEnabled = sc < 1;          // 縮めた時だけ滑らかにする（ドット絵はそのまま）
+      g.drawImage(img, 0, 0, c.width, c.height);
+      const t = new THREE.CanvasTexture(c);
       t.magFilter = THREE.NearestFilter;
       t.minFilter = THREE.LinearFilter;
       t.generateMipmaps = false;
+      img.src = '';
       res(t);
-    }, undefined, () => res(null));
+    };
+    img.onerror = () => res(null);
+    img.src = url;
   });
 }
 function jsonToGroup(json) {
@@ -247,16 +306,71 @@ async function buildParts(d) {
   if (!parts.length) throw new Error('no mesh');
   return { parts, lenZ: Math.max(size.z, 1e-4), zMin: bb.min.z, isModel: true };
 }
+// 描画の準備が済んだものの後始末（作り直すときや削除するとき、GPU の領域を返す）
+function disposeVrt(r) {
+  if (!r) return;
+  const texs = new Set();
+  if (r.parts) for (const p of r.parts) {
+    if (p.geo) p.geo.dispose();
+    if (p.mat) { if (p.mat.map) texs.add(p.mat.map); p.mat.dispose(); }
+  }
+  for (const g of r.cut.values()) g.dispose();
+  for (const t of texs) t.dispose();
+}
 async function ensureVariant(d) {
   try {
+    if (d.texKey && !d.texData) d.texData = await blobGetSafe(d.texKey);
+    if (d.model && d.model.key && !d.model.data) {
+      const t = await blobGetSafe(d.model.key);
+      if (t) d.model = { format: d.model.format, key: d.model.key, data: t };
+    }
+    if ((d.texKey && !d.texData) || (d.model && d.model.key && !d.model.data)) {
+      // まだ受け取っていない（部屋から届くのを待つ）
+      disposeVrt(vrt.get(d.id));
+      vrt.set(d.id, { parts: null, ghost: null, tri: new Map(), cut: new Map(), wait: true });
+      return;
+    }
     const r = await buildParts(d);
+    disposeVrt(vrt.get(d.id));
     vrt.set(d.id, { parts: r.parts, lenZ: r.lenZ, zMin: r.zMin, isModel: r.isModel, ghost: null, tri: new Map(), cut: new Map() });
   } catch (err) {
     console.error(err);
+    disposeVrt(vrt.get(d.id));
     vrt.set(d.id, { parts: null, ghost: null, tri: new Map(), cut: new Map() });
     toast(`「${d.name}」のモデルを読み込めませんでした`);
   }
 }
+// 部屋から届いたかけらを、つなげて保存する。全部そろったら、待っていたバリエーションを作る
+function onBlobRec(rec) {
+  const m = /^rbk:(road:(?:tex|mdl):[^#]+)#(n|\d+)$/.exec(rec.key || '');
+  if (!m || !rec.v) return;
+  const key = m[1];
+  let e = blobIn.get(key);
+  if (!e) { e = { n: -1, parts: [] }; blobIn.set(key, e); }
+  if (m[2] === 'n') e.n = Number(rec.v.n) || 0;
+  else if (typeof rec.v.d === 'string') e.parts[Number(m[2])] = rec.v.d;
+  if (e.n < 0) return;
+  for (let i = 0; i < e.n; i++) if (typeof e.parts[i] !== 'string') return;   // まだ全部届いていない
+  blobIn.delete(key);
+  const text = e.parts.slice(0, e.n).join('');
+  Promise.resolve(useBlob() ? VoxelExt.blobPut(key, text) : null).catch(() => {}).then(() => {
+    const id = key.split(':').slice(2).join(':');
+    const d = st.variants.find(x => x.id === id);
+    if (!d) return;
+    if (key.startsWith('road:tex:')) d.texData = text; else d.model = { format: d.model ? d.model.format : 'obj', key, data: text };
+    if (!vrt.has(d.id) || (vrt.get(d.id) && vrt.get(d.id).wait)) {
+      ensureVariant(d).then(() => { rebuildMain(); renderLists(); });
+    }
+  });
+}
+// 受け取りの窓口は、通信の読み込みが済んでから登録する（読み込み順に左右されないよう、待って登録する）
+let blobRxOn = false;
+function tryBlobRx() {
+  if (blobRxOn || !window.VoxelMulti || typeof VoxelMulti.onOp !== 'function') return;
+  VoxelMulti.onOp('rbk', onBlobRec);
+  blobRxOn = true;
+}
+tryBlobRx();
 async function ensureAll() {
   for (const d of allVariants()) if (!vrt.has(d.id)) await ensureVariant(d);
   rebuildMain();
@@ -275,6 +389,12 @@ function triOf(r, k) {
     uv: g.attributes.uv ? g.attributes.uv.array : null,
     count: g.attributes.position.array.length / 3
   };
+  const zm = r.zMin, zr = new Float32Array((T.count / 3) * 2);
+  for (let i = 0, t = 0; i < T.count; i += 3, t++) {
+    const z0 = T.pos[3 * i + 2] - zm, z1 = T.pos[3 * i + 5] - zm, z2 = T.pos[3 * i + 8] - zm;
+    zr[2 * t] = Math.min(z0, z1, z2); zr[2 * t + 1] = Math.max(z0, z1, z2);
+  }
+  T.zr = zr;
   r.tri.set(k, T);
   return T;
 }
@@ -307,34 +427,57 @@ function clipPoly(poly, c, sign) {
   }
   return out;
 }
-function cutTris(T, zMin, zA, zB, off, l, P, N, U) {
-  for (let i = 0; i < T.count; i += 3) {
-    // 帯の外に完全に出る三角形は早めに捨てる（軽量化）
-    let zmin = Infinity, zmax = -Infinity;
-    for (let j = 0; j < 3; j++) {
-      const z = T.pos[3 * (i + j) + 2] - zMin;
-      if (z < zmin) zmin = z;
-      if (z > zmax) zmax = z;
+const CLIP_A = new Float64Array(64), CLIP_B = new Float64Array(64);   // 1頂点8個（位置3・法線3・UV2）
+function clipFlat(src, n, c, sign, dst) {
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    const j = i + 1 < n ? i + 1 : 0;
+    const ci = i * 8, nj = j * 8;
+    const cin = sign * (src[ci + 2] - c) >= 0;
+    const nin = sign * (src[nj + 2] - c) >= 0;
+    if (cin) { for (let q = 0; q < 8; q++) dst[m * 8 + q] = src[ci + q]; m++; }
+    if (cin !== nin) {
+      const t = (c - src[ci + 2]) / (src[nj + 2] - src[ci + 2]);
+      for (let q = 0; q < 8; q++) dst[m * 8 + q] = src[ci + q] + (src[nj + q] - src[ci + q]) * t;
+      m++;
     }
-    if (zmax < zA || zmin > zB) continue;
-    let poly = [vertAt(T, i, zMin), vertAt(T, i + 1, zMin), vertAt(T, i + 2, zMin)];
-    poly = clipPoly(poly, zA, 1);
-    if (poly.length < 3) continue;
-    poly = clipPoly(poly, zB, -1);
-    if (poly.length < 3) continue;
-    for (let j = 1; j < poly.length - 1; j++) {
-      for (const v of [poly[0], poly[j], poly[j + 1]]) {
-        P.push(v.p[0], v.p[1], v.p[2] + off - l / 2);
-        N.push(v.n[0], v.n[1], v.n[2]);
-        U.push(v.uv[0], v.uv[1]);
+  }
+  return m;
+}
+function cutTris(T, zMin, zA, zB, off, l, P, N, U) {
+  const pos = T.pos, nor = T.nor, uv = T.uv, zr = T.zr, A = CLIP_A, B = CLIP_B;
+  for (let t = 0, i = 0; i < T.count; i += 3, t++) {
+    if (zr[2 * t + 1] < zA || zr[2 * t] > zB) continue;     // 帯の外の三角形は捨てる
+    for (let j = 0; j < 3; j++) {
+      const vi = i + j, o = j * 8;
+      A[o] = pos[3 * vi]; A[o + 1] = pos[3 * vi + 1]; A[o + 2] = pos[3 * vi + 2] - zMin;
+      if (nor) { A[o + 3] = nor[3 * vi]; A[o + 4] = nor[3 * vi + 1]; A[o + 5] = nor[3 * vi + 2]; }
+      else { A[o + 3] = 0; A[o + 4] = 1; A[o + 5] = 0; }
+      if (uv) { A[o + 6] = uv[2 * vi]; A[o + 7] = uv[2 * vi + 1]; } else { A[o + 6] = 0; A[o + 7] = 0; }
+    }
+    let n = clipFlat(A, 3, zA, 1, B);
+    if (n < 3) continue;
+    n = clipFlat(B, n, zB, -1, A);
+    if (n < 3) continue;
+    for (let j = 1; j < n - 1; j++) {
+      for (let q = 0; q < 3; q++) {
+        const o = (q === 0 ? 0 : q === 1 ? j : j + 1) * 8;
+        P.push(A[o], A[o + 1], A[o + 2] + off - l / 2);
+        N.push(A[o + 3], A[o + 4], A[o + 5]);
+        U.push(A[o + 6], A[o + 7]);
       }
     }
   }
 }
+let cutFrame = null;   // 描画の1フレームの中で使う時間（重い切り出しを、画面が止まらないように分ける）
+const CUT_MS = 5;      // 1フレームで切り出しに使ってよい時間（ミリ秒）
+const CUT_MAX = 96;    // 1つのバリエーションで保存する切り出しの上限
 function cutGeo(r, k, a, l) {
   const key = k + '|' + a.toFixed(4) + '|' + l.toFixed(4);
   let g = r.cut.get(key);
-  if (g) return g;
+  if (g) { r.cut.delete(key); r.cut.set(key, g); return g; }   // 使ったものを一番新しい位置へ
+  if (cutFrame && cutFrame.n > 0 && performance.now() - cutFrame.t0 > CUT_MS) return null;   // 次のフレームに回す
+  if (cutFrame) cutFrame.n++;
   const T = triOf(r, k);
   const P = [], N = [], U = [];
   const seg1 = Math.min(l, r.lenZ - a);
@@ -345,6 +488,12 @@ function cutGeo(r, k, a, l) {
   g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
   r.cut.set(key, g);
+  while (r.cut.size > CUT_MAX) {
+    const oldKey = r.cut.keys().next().value;
+    const og = r.cut.get(oldKey);
+    r.cut.delete(oldKey);
+    if (og) og.dispose();
+  }
   return g;
 }
 
@@ -549,6 +698,7 @@ function pieceMatrix(pc, out, r) {
 // 見た目が同じもの（モデル・切り方）をまとめる。切り方は1/16マス単位にそろえて数を減らす
 function bucketize(pieces) {
   const map = new Map();
+  map.incomplete = false;
   for (const pc of pieces) {
     const r = vrt.get(pc.v);
     if (!r || !r.parts) continue;
@@ -560,6 +710,7 @@ function bucketize(pieces) {
         const lq = Math.max(1 / 64, Math.round(pc.l * 64) / 64);
         key = `${pc.v}|${k}|${aq.toFixed(4)}|${lq.toFixed(4)}`;
         geo = cutGeo(r, k, aq, lq);
+        if (!geo) { map.incomplete = true; return; }
       } else {
         key = `${pc.v}|${k}`;
         geo = part.geo;
@@ -589,8 +740,9 @@ function indexPieces() {
   }
 }
 function buildChunk(c) {
-  c.meshes = [];
   const buckets = bucketize(c.pieces);
+  if (buckets.incomplete) return false;   // まだ切り出しの途中（次のフレームで続き）
+  c.meshes = [];
   for (const b of buckets.values()) {
     const r = vrt.get(b.vid);
     const mat = r.parts[b.k].mat;
@@ -601,21 +753,26 @@ function buildChunk(c) {
     scene.add(im);
     c.meshes.push(im);
   }
+  return true;
 }
 function dropChunkMeshes(c) {
   if (!c.meshes) return;
-  for (const m of c.meshes) scene.remove(m);
+  for (const m of c.meshes) { scene.remove(m); m.dispose(); }
   c.meshes = null;
 }
 // 毎フレーム：描画距離の内側の区画だけ描く（1フレームに1区画ずつ作って滑らかに）
 function updateVisible() {
+  cutFrame = { t0: performance.now(), n: 0 };
+  try { updateVisibleInner(); } finally { cutFrame = null; }
+}
+function updateVisibleInner() {
   const pcx = Math.floor(player.pos.x / RC), pcz = Math.floor(player.pos.z / RC);
   const R = Math.ceil(((RD || 6) + 1) * CS / RC) + 1;
   let budget = 1;
   for (const c of chunks.values()) {
     const inR = Math.abs(c.cx - pcx) <= R && Math.abs(c.cz - pcz) <= R;
     if (inR) {
-      if (!c.meshes && budget > 0) { buildChunk(c); budget--; }
+      if (!c.meshes && budget > 0) { if (buildChunk(c)) budget--; }
     } else if (c.meshes) {
       dropChunkMeshes(c);
     }
@@ -1008,6 +1165,7 @@ async function addVariant() {
   }
   const scale = Number(scaleStr);
   const def = { id: uid(), kind, name, texData, model, builtin: false, scale: (scaleStr && scale > 0) ? scale : undefined };
+  if (def.model) def.model.key = null;
   status.textContent = 'モデルを読み込み中…';
   await ensureVariant(def);
   if (!vrt.get(def.id).parts) { status.textContent = 'モデルを読み込めませんでした。形式を確認してください。'; return; }
@@ -1031,7 +1189,19 @@ function deleteVariant(id) {
   st.pieces = st.pieces.filter(p => p.v !== id);
   st.nodes = st.nodes.filter(n => !gs.has(n.g));
   st.undo = st.undo.filter(u => !gs.has(u.g));
+  disposeVrt(vrt.get(id));
   vrt.delete(id);
+  for (const key of [v.texKey, v.model && v.model.key]) {
+    if (!key) continue;
+    const n = blobN.get(key);
+    if (n) {
+      for (let i = 0; i < n; i++) VoxelMulti.send('rbk:' + key + '#' + i, null, true);
+      VoxelMulti.send('rbk:' + key + '#n', null, true);
+      blobN.delete(key);
+    }
+    blobPending.delete(key);
+    if (window.VoxelExt && VoxelExt.blobDel) VoxelExt.blobDel(key).catch(() => {});
+  }
   if (st.sel[v.kind] === id) st.sel[v.kind] = v.kind === 'road' ? 'std_road' : 'std_rail';
   rs.pending = null; rs.mid = null;
   rebuildMain();
