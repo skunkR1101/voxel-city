@@ -269,15 +269,21 @@ async function buildParts(d) {
     return { parts: [{ geo: boxGeo(), mat: new THREE.MeshLambertMaterial({ map: tex }) }], lenZ: 1, zMin: 0, isModel: false };
   }
   let raw;
-  if (d.model.format === 'obj') {
-    raw = new THREE.OBJLoader().parse(d.model.data);
-  } else if (d.model.format === 'fbx') {
-    const buf = await (await fetch(d.model.data)).arrayBuffer();
-    raw = new THREE.FBXLoader().parse(buf, '');
-  } else {
-    raw = jsonToGroup(JSON.parse(d.model.data));
+  const fmt = d.model.format;
+  try {
+    if (fmt === 'obj') {
+      raw = new THREE.OBJLoader().parse(d.model.data);
+    } else if (fmt === 'fbx') {
+      const buf = await (await fetch(d.model.data)).arrayBuffer();
+      raw = new THREE.FBXLoader().parse(buf, '');
+    } else {
+      raw = jsonToGroup(JSON.parse(d.model.data));
+    }
+  } catch (e) {
+    throw new Error(`${fmt} を解析できませんでした（${e && e.message ? e.message : e}）`);
   }
-  const tex = d.texData ? await loadTex(d.texData) : null;
+  // テクスチャが読めなくても、モデルだけは使えるようにする
+  const tex = d.texData ? await loadTex(d.texData).catch(() => null) : null;
   if (tex) raw.traverse(o => { if (o.isMesh) o.material = new THREE.MeshLambertMaterial({ map: tex }); });
 
   const size0 = measureSize(raw);
@@ -335,9 +341,10 @@ async function ensureVariant(d) {
     vrt.set(d.id, { parts: r.parts, lenZ: r.lenZ, zMin: r.zMin, isModel: r.isModel, ghost: null, tri: new Map(), cut: new Map() });
   } catch (err) {
     console.error(err);
+    const msg = err && err.message ? err.message : String(err);
     disposeVrt(vrt.get(d.id));
-    vrt.set(d.id, { parts: null, ghost: null, tri: new Map(), cut: new Map() });
-    toast(`「${d.name}」のモデルを読み込めませんでした`);
+    vrt.set(d.id, { parts: null, ghost: null, tri: new Map(), cut: new Map(), err: msg });
+    toast(`「${d.name}」のモデルを読み込めませんでした：${msg}`);
   }
 }
 // 部屋から届いたかけらを、つなげて保存する。全部そろったら、待っていたバリエーションを作る
@@ -1168,7 +1175,7 @@ async function addVariant() {
   if (def.model) def.model.key = null;
   status.textContent = 'モデルを読み込み中…';
   await ensureVariant(def);
-  if (!vrt.get(def.id).parts) { status.textContent = 'モデルを読み込めませんでした。形式を確認してください。'; return; }
+  if (!vrt.get(def.id).parts) { status.textContent = `モデルを読み込めませんでした：${vrt.get(def.id).err || '形式を確認してください'}`; return; }
   st.variants.push(def);
   st.sel[kind] = def.id;
   saveAll();
