@@ -41,10 +41,24 @@ function publishSkin() {
   const id = Math.random().toString(36).slice(2, 8);
   const mParts = splitStr(myPayload.text || '');
   const tParts = myPayload.tex ? splitStr(myPayload.tex) : [];
+  // 前に送ったスキン（この端末の前の回）は消す。消さないと、開くたびに部屋の記録が増え続ける
+  dropLastSkin();
   mParts.forEach((d, i) => VoxelMulti.send(`sk:${PEER}:${id}:m:${i}`, { d }));
   tParts.forEach((d, i) => VoxelMulti.send(`sk:${PEER}:${id}:t:${i}`, { d }));
   mySkin = { id, kind: myPayload.kind, mN: mParts.length, tN: tParts.length };
   skinSentRoom.set(publishedRoom, { payload: myPayload, skin: mySkin });
+  try {
+    localStorage.setItem(SKIN_LAST_KEY, JSON.stringify({ room: publishedRoom, peer: PEER, id, mN: mParts.length, tN: tParts.length }));
+  } catch (e) {}
+}
+const SKIN_LAST_KEY = 'voxelcraft_skin_last_v1';
+// 前回送ったスキンを、同じ部屋の記録から消す（この端末の前の PEER の分も含む）
+function dropLastSkin() {
+  let last = null;
+  try { last = JSON.parse(localStorage.getItem(SKIN_LAST_KEY) || 'null'); } catch (e) { last = null; }
+  if (!last || last.room !== publishedRoom) return;
+  for (let i = 0; i < (last.mN || 0); i++) VoxelMulti.send(`sk:${last.peer}:${last.id}:m:${i}`, undefined, true);
+  for (let i = 0; i < (last.tN || 0); i++) VoxelMulti.send(`sk:${last.peer}:${last.id}:t:${i}`, undefined, true);
 }
 function rebuildPayload() {
   if (!curModel && !curTex) myPayload = null;
