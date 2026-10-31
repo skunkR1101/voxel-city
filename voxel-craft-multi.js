@@ -531,13 +531,15 @@ async function ghPull(id, onProg, wantSig) {
     for (let k = 1; k < n; k++) ks.push(k);
     let done = 1;
     const got = await Promise.all(ks.map(async k => {
-      const p = await ghGetFile(c, ghPathOf(id, k));
+      // 見つからないときは、少し待って取り直す（保存直後の一時的な見えなさを避ける）
+      let p = await ghGetFile(c, ghPathOf(id, k));
+      for (let r = 0; !p && r < 2; r++) { await new Promise(res => setTimeout(res, 800 * (r + 1))); p = await ghGetFile(c, ghPathOf(id, k)); }
       if (onProg) onProg(++done, n);
+      if (!p) throw new Error('分割ファイル（' + (k + 1) + '/' + n + '）が見つかりませんでした。全部読めないため、読み込みと保存を中止しました（データを壊さないため）');
       return p;
     }));
     for (let i = 0; i < got.length; i++) {
       const p = got[i];
-      if (!p) continue;
       shas[ghPathOf(id, i + 1)] = p.sha;
       { const a = await ghDecodeKv(p.o); if (wantSig) raw[ghPathOf(id, i + 1)] = sigOfRemote(a); for (const x of a) kv.push(x); }
     }
@@ -574,19 +576,28 @@ function ghSplitEntry(e) {
 // 断片を元の1件に戻す（同じ版の断片が全部そろっているものだけ）
 function ghAssemble(list) {
   const out = [];
-  const groups = new Map();
+  const groups = new Map();   // 項目名 -> Map(時刻 -> { n, peer, del, pieces })
   for (const [k, v] of list) {
     if (!k.includes(GH_SEP) || !v || !v.pc) { out.push([k, v]); continue; }
     const base = k.split(GH_SEP)[0];
-    let g = groups.get(base);
-    if (!g || (v.ts || 0) > g.ts) { g = { ts: v.ts || 0, n: v.pc[1], peer: v.peer, del: v.del, pieces: new Map() }; groups.set(base, g); }
-    if ((v.ts || 0) === g.ts) g.pieces.set(v.pc[0], v.pv);
+    let byTs = groups.get(base);
+    if (!byTs) { byTs = new Map(); groups.set(base, byTs); }
+    const ts = v.ts || 0;
+    let g = byTs.get(ts);
+    if (!g) { g = { n: v.pc[1], peer: v.peer, del: v.del, pieces: new Map() }; byTs.set(ts, g); }
+    g.pieces.set(v.pc[0], v.pv);
   }
-  for (const [base, g] of groups) {
-    if (g.pieces.size !== g.n) continue;
-    let val;
-    try { val = JSON.parse([...Array(g.n).keys()].map(i => g.pieces.get(i)).join('')); } catch (e) { continue; }
-    out.push([base, { v: val, ts: g.ts, peer: g.peer, del: g.del }]);
+  for (const [base, byTs] of groups) {
+    // 新しい版から順に、かけらがそろっているものを使う。
+    // 新しい版の一部だけが保存されたときも、前のそろった版を残す（全体を消さない）
+    const cands = [...byTs.entries()].sort((x, y) => y[0] - x[0]);
+    for (const [ts, g] of cands) {
+      if (g.pieces.size !== g.n) continue;
+      let val;
+      try { val = JSON.parse([...Array(g.n).keys()].map(i => g.pieces.get(i)).join('')); } catch (e) { continue; }
+      out.push([base, { v: val, ts, peer: g.peer, del: g.del }]);
+      break;
+    }
   }
   return out;
 }
