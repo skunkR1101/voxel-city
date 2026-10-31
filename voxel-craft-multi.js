@@ -1164,6 +1164,8 @@ function buildUI() {
       <p class="note">トークンはこの端末にだけ保存されます。共有リンク・保存コードには入りません。</p>
       <button class="btn sub" id="mpGhSave">GitHub設定を保存</button>
       <button class="btn sub" id="mpGhSync">今すぐGitHubに保存</button>
+      <button class="btn sub" id="mpGhLoad">最新作業を読み込み（GitHubから直接）</button>
+      <p class="note">この端末の手元の保存は使わず、GitHubに保存されている内容だけで読み込み直します。欠けているブロックを取り戻すときに使います。</p>
     </details>
     <button class="btn sub" id="mpCopy">共有リンクをコピー</button>
     <button class="btn danger" id="mpLeave">退室する（一人で遊ぶ）</button>
@@ -1241,6 +1243,9 @@ function buildUI() {
     ghSaveCfg({ repo, token });
     toast('GitHub設定を保存しました');
   });
+  $('mpGhLoad').addEventListener('click', async () => {
+    try { await loadLatestFromGitHub(); } catch (e) { loadHide(); toast(e.message || String(e)); }
+  });
   $('mpGhSync').addEventListener('click', async () => {
     if (!conn) { toast('部屋に入ってから押してください'); return; }
     const kv = window.VoxelNet && VoxelNet.kv() ? [...VoxelNet.kv().entries()] : [];
@@ -1275,6 +1280,29 @@ function prefillFromHash() {
 // ============================================================
 // 公開する窓口（将来の機能はここに参加する）
 // ============================================================
+// GitHub の保存内容だけで、この部屋を読み込み直す（手元の保存は使わない）
+async function loadLatestFromGitHub() {
+  if (!ghCfg()) throw new Error('GitHubの設定（リポジトリ名とトークン）を先に保存してください');
+  const id = (conn && conn.id) || $('mpJoinId').value.trim();
+  if (!id) throw new Error('部屋IDを入力してください');
+  const pw = (conn && conn.id === id && conn.pw) || $('mpJoinPw').value;
+  if (!confirm('GitHubに保存されている最新の内容で、この部屋を読み込み直します。\nこの端末だけの手元の保存は使いません。よろしいですか？')) return;
+  loadShow('GitHubから最新の作業を読んでいます…', 4);
+  const r = await ghPull(id, (g, n) => loadShow('GitHubから読んでいます（' + g + '/' + n + '）', 4 + 30 * g / Math.max(1, n)));
+  if (!r.kv.length) throw new Error('この部屋の保存データが GitHub に見つかりませんでした');
+  // この端末の部屋の記録を、GitHub の内容だけにする（古い手元の記録が勝たないように）
+  await idbSet('room:' + id, r.kv);
+  loadShow('読み込んだ作業を反映しています…', 40);
+  if (!pw) {
+    loadHide();
+    toast('GitHubの最新内容を取り込みました。パスワードを入れて「参加する」を押すと反映されます');
+    return;
+  }
+  await joinRoom(id, pw, false, '', tagVal(), null);   // 参加の処理で、画面を部屋の内容に置き換える
+  refreshShare(); renderRooms();
+  toast('GitHubの最新の作業で読み込みました（' + r.kv.length + '件）');
+  close(); startIfNeeded();
+}
 window.VoxelMulti = {
   peer,
   tag: () => (conn ? conn.tag : cfg.tag) || '',
