@@ -11,7 +11,7 @@ if (!window.VoxelMulti) { console.warn('voxel-craft-multi.js が先に必要で�
 
 const PEER = VoxelMulti.peer;
 const PRESENCE_MS = 2000;       // 自分の位置・名前を知らせる間隔
-const STALE_MS = 15000;         // この時間、連絡がなければ退出とみなす
+const STALE_MS = 40000;         // この時間、連絡がなければ表示から外す（全体の同期中の遅れで消えないように長めに取る）
 const CHUNK = 48000;            // スキンのデータを分けて送る大きさ（文字数）
 const CHAT_KEEP_MS = 20000;     // 古いチャットは表示しない（参加時の履歴を出さないため）
 const TAG_Y = 2.2;              // 名前の表示の高さ（足元から）
@@ -527,7 +527,8 @@ function frame(now) {
   }
   // 古い人を消す
   for (const r of [...remotes.values()]) {
-    if (Date.now() - r.seen > STALE_MS) removeRemote(r.peer, true);
+    // 連絡が途切れただけでは「退出しました」は出さない（表示だけ消す）。退出は本人の退出の知らせで判断する
+    if (Date.now() - r.seen > STALE_MS) removeRemote(r.peer, false);
   }
   scanOcclusion(now);
   placeTags();

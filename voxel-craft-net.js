@@ -26,6 +26,8 @@ const SEEN_MAX = 20000;
 const RETRY_MS = 10000;
 const SAVE_MS = 20000;           // 部屋の保存（端末）は8秒にまとめる（画面を閉じる時は必ず保存）
 const SUM_MS = 20000;            // 全体の一致を確かめる間隔
+const NEED_COOLDOWN_MS = 60000;  // 全体を取り直してもらう最短の間隔
+const SNAP_QUEUE_MAX = 256 * 1024; // 送信の待ち行列がこれ以上たまったら、全体の送信を一時停止する
 const RESYNC_MS = 60000;         // 再接続のとき全体を取り直すまでの最短間隔
 
 const stats = { sent: 0, recv: 0, fail: 0, sumMis: 0 };
@@ -216,7 +218,20 @@ async function sendSnapshot(s, L) {
   }
   const pieces = splitStr(body, SNAP_PIECE);
   if (!pieces.length) pieces.push('');
-  pieces.forEach((d, i) => safeSend(L.conn, { t: 'snap', i, n: pieces.length, z, d }));
+  // 一度に全部を流し込まない。送信の待ち行列が一定以上たまったら少し待つので、
+  // 位置情報などの小さな通信が、全体の後ろで数十秒待たされることがなくなる
+  await new Promise(resolve => {
+    let i = 0;
+    (function step() {
+      if (S !== s || !L.conn.open) return resolve();
+      const dc = L.conn.dataChannel;
+      const queued = dc && typeof dc.bufferedAmount === 'number' ? dc.bufferedAmount : 0;
+      if (queued > SNAP_QUEUE_MAX) return setTimeout(step, 30);
+      const end = Math.min(pieces.length, i + 2);
+      for (; i < end; i++) safeSend(L.conn, { t: 'snap', i, n: pieces.length, z, d: pieces[i] });
+      if (i < pieces.length) setTimeout(step, 4); else resolve();
+    })();
+  });
 }
 
 // 1人からだけ全体を受け取る。届かなければ、別の人に頼み直す
@@ -352,7 +367,13 @@ function checkSum(s, L, m) {
   const d = digest(s);
   if (m.n === d.n && m.h === d.h) { L.mis = 0; return; }
   L.mis = (L.mis || 0) + 1;
-  if (L.mis >= 2) { L.mis = 0; stats.sumMis++; safeSend(L.conn, { t: 'need' }); }   // 2回続けてずれたら取り直す
+  // 2回続けてずれたら取り直す。ただし全体の送信は重いので、一度頼んだら一定時間は頼み直さない
+  const now = Date.now();
+  if (L.mis >= 2) {
+    L.mis = 0;
+    stats.sumMis++;
+    if (now - (s.needAt || 0) > NEED_COOLDOWN_MS) { s.needAt = now; safeSend(L.conn, { t: 'need' }); }
+  }
 }
 function sendSums(s) {
   const d = digest(s);
