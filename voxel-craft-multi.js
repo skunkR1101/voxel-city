@@ -232,7 +232,7 @@ setInterval(() => {
   fullSyncOnce();
   flushCells();
   const t = performance.now();
-  if (t - fixAt >= 4000) { fixAt = t; fixBlocks(); }   // 直す作業は4秒に1回（同期済みの全マスを見るため、間隔をあける）
+  if (t - fixAt >= 8000) { fixAt = t; fixBlocks(); }   // 直す作業は4秒に1回（同期済みの全マスを見るため、間隔をあける）
 }, SCAN_MS);
 
 // ============================================================
@@ -506,7 +506,7 @@ async function ghGetFile(c, path, ref) {
 // 履歴から戻したあとの参加で、同じ内容を二度ダウンロードしないための一時的な受け渡し
 let pullOverride = null;
 // 手元の履歴（この端末で保存した時点の内容を、最近の数件だけ残す）
-const SNAP_KEEP = 5;
+const SNAP_KEEP = 3;
 async function snapStore(id, sha, list) {
   try {
     await idbSet('snap:' + id + ':' + sha, list);
@@ -820,6 +820,7 @@ function ghPush(id, kv, prog) {
   const job = ghQueue.then(() => ghPushOnce(id, kv, prog));
   ghQueue = job.catch(() => {});
   job.catch(() => ghMarkDirty(id, true)); // 送れなかったら、次の機会にまた送る
+  ghLastAt.set(id, Date.now());
   job.finally(() => ghBusy.delete(id)).catch(() => {});
   return job;
 }
@@ -834,10 +835,15 @@ function ghMarkDirty(id, on) {
   } catch (e) {}
 }
 // 未送信の部屋を、GitHubへ送る（接続中はその場の最新、そうでなければ端末に保存した最新）
-function ghFlushDirty() {
+// 通常は、前の保存から60秒以上たったものだけ送る（部屋が大きいと、保存の準備が重く、頻繁だと画面が止まるため）。
+// 画面を閉じる時（force）は、待たずに送る。
+const GH_AUTO_MS = 60000;
+const ghLastAt = new Map();          // 部屋 -> 最後に送った時刻
+function ghFlushDirty(force) {
   if (!ghCfg()) return;
   for (const id of ghDirtyIds()) {
     if (ghBusy.has(id)) continue;        // 保存の最中なら、終わってから次の回に送る（待ちの列を作らない）
+    if (!force && Date.now() - (ghLastAt.get(id) || 0) < GH_AUTO_MS) continue;
     const live = conn && conn.id === id && window.VoxelNet && VoxelNet.active() && VoxelNet.kv();
     const src = live ? Promise.resolve([...VoxelNet.kv().entries()]) : idbGet('room:' + id);
     src.then(kv => { if (Array.isArray(kv) && kv.length) return ghPush(id, kv); else ghMarkDirty(id, false); })
@@ -997,8 +1003,8 @@ function roomLocalSaveSafe(id, merged) {
 // 変更の印がある部屋を、30秒ごとにGitHubへ送る（背景に回って止まっても、次に開いたときに送る）
 setInterval(() => { ghFlushDirty(); }, 8000);
 // 画面を閉じる・背景に回す・電波が戻ったときにも、未送信分を送る
-window.addEventListener('pagehide', () => ghFlushDirty());
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') ghFlushDirty(); });
+window.addEventListener('pagehide', () => ghFlushDirty(true));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') ghFlushDirty(true); });
 window.addEventListener('online', () => ghFlushDirty());
 setTimeout(() => ghFlushDirty(), 3000);   // 起動直後に、前回送れなかった分を送る
 

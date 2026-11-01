@@ -24,7 +24,7 @@ const MSG_MAX = 60000;           // 1通の大きさの上限（文字数）
 const FLUSH_MS = 120;            // 変更をまとめて送る間隔
 const SEEN_MAX = 20000;
 const RETRY_MS = 10000;
-const SAVE_MS = 8000;           // 部屋の保存（端末）は8秒にまとめる（画面を閉じる時は必ず保存）
+const SAVE_MS = 20000;           // 部屋の保存（端末）は8秒にまとめる（画面を閉じる時は必ず保存）
 const SUM_MS = 20000;            // 全体の一致を確かめる間隔
 const RESYNC_MS = 60000;         // 再接続のとき全体を取り直すまでの最短間隔
 
@@ -86,9 +86,20 @@ function safeSend(conn, msg) {
   catch (e) { stats.fail++; console.error('送信できませんでした', e && e.message); }
 }
 
+// 1項目ぶんの印（鍵・時刻・削除かどうか）。全体の印は、項目の印を XOR で足し引きして作る（順番に依らない）
+function entryHash(key, e) {
+  const str = key + '|' + e.ts + '|' + (e.del ? 1 : 0);
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < str.length; i++) { h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0; }
+  return h;
+}
 function applyEntry(s, key, val) {
   const cur = s.kv.get(key);
   if (cur && !newer(val, cur)) return false;
+  if (s.dig) {                       // 全体の印を、項目が変わった分だけ直す（全部を数え直さない）
+    if (cur) s.dig.x = (s.dig.x ^ entryHash(key, cur)) >>> 0; else s.dig.n++;
+    s.dig.x = (s.dig.x ^ entryHash(key, val)) >>> 0;
+  }
   s.kv.set(key, val);
   kvVer++; sumCache = null;
   return true;
@@ -325,17 +336,14 @@ if (typeof window !== 'undefined' && window.addEventListener) {
 }
 
 // 全体の一致の確認：件数と中身の印（ハッシュ）が違うときだけ、相手から全体を取り直す
+// 全体の印（件数と、項目の印を足し合わせたもの）。最初の一回だけ全部を数え、その後は変更の分だけ直す
 function digest(s) {
-  if (sumCache && sumCache.v === kvVer) return sumCache;
-  const keys = [...s.kv.keys()].sort();
-  let h = 0x811c9dc5 >>> 0;
-  for (const k of keys) {
-    const e = s.kv.get(k);
-    const str = k + '|' + e.ts + '|' + (e.del ? 1 : 0) + ';';
-    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  if (!s.dig) {
+    let n = 0, x = 0;
+    for (const [k, e] of s.kv) { if (!e) continue; n++; x = (x ^ entryHash(k, e)) >>> 0; }
+    s.dig = { n, x };
   }
-  sumCache = { v: kvVer, n: keys.length, h: h.toString(16) };
-  return sumCache;
+  return { n: s.dig.n, h: s.dig.x.toString(16) };
 }
 function checkSum(s, L, m) {
   const d = digest(s);

@@ -222,7 +222,7 @@ function reconcileDefs() {
     VoxelMulti.applyBlock(p[0], p[1], p[2], def.id);
   }
 }
-setInterval(() => { try { reconcileDefs(); } catch (e) { console.error(e); } }, 4000);
+setInterval(() => { try { reconcileDefs(); } catch (e) { console.error(e); } }, 12000);   // 部屋の記録の全部を見るので、間隔をあける
 
 function getIn(H) {
   let o = incoming.get(H);
