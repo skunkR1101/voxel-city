@@ -1043,9 +1043,12 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
     refreshShare();
     setStatus(`接続中：「${conn.name || '共同都市'}」`);
     // 他の人がいる部屋では、最新の状態を受け取ってから入る（受け取りが遅いときは12秒で入る。続きは後から反映される）
+    // 受け取れるまで待つ（最大60秒）。待っている間は、進み具合を画面に出す。
+    // 受け取れなかったときは、そのことを必ず知らせる（黙って古い状態で入らないように）
     if (!creator && info.others > 0) {
-      loadShow('最新の状態を受け取っています…', 50);
-      await Promise.race([snapDone, new Promise(r => setTimeout(r, 12000))]);
+      loadShow('他の人から最新の状態を受け取っています…', 50);
+      const got = await Promise.race([snapDone.then(() => true), new Promise(r => setTimeout(() => r(false), 60000))]);
+      if (!got) toast('他の人から最新の状態を受け取れませんでした。GitHubの内容で入っています（少し待ってから、再度入り直してください）');
     }
     snapResolve = null;
     joining = false;
@@ -1346,6 +1349,7 @@ function buildUI() {
       <button class="btn sub" id="mpGhSync">今すぐGitHubに保存</button>
       <button class="btn sub" id="mpGhLoad">最新作業を読み込み（GitHubから直接）</button>
       <button class="btn sub" id="mpHistBtn">過去の保存に戻す（履歴から選ぶ）</button>
+      <button class="btn sub" id="mpDiagBtn">保存ファイルを診断（件数を比べる）</button>
       <div id="mpHist"></div>
       <p class="note">この端末の手元の保存は使わず、GitHubに保存されている内容だけで読み込み直します。欠けているブロックを取り戻すときに使います。</p>
     </details>
@@ -1424,6 +1428,14 @@ function buildUI() {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) { toast('リポジトリ名は「ユーザー名/リポジトリ名」の形で入れてください'); return; }
     ghSaveCfg({ repo, token });
     toast('GitHub設定を保存しました');
+  });
+  document.getElementById('mpDiagBtn').addEventListener('click', async () => {
+    try {
+      const id = (conn && conn.id) || document.getElementById('mpJoinId').value.trim();
+      if (!id) throw new Error('部屋IDを入力してください');
+      if (!ghCfg()) throw new Error('GitHubの設定を先に保存してください');
+      await diagnoseRoom(id);
+    } catch (e) { toast(e.message || String(e)); }
   });
   $('mpHistBtn').addEventListener('click', async () => {
     try { await showHistory(); } catch (e) { toast(e.message || String(e)); }
@@ -1588,6 +1600,42 @@ async function restoreFromCommit(id, sha, pw) {
   toast('過去の保存に戻しました（' + list.length + '件）');
   close(); startIfNeeded();
 }
+// 種類ごとの数（保存ファイル側と、この端末側を比べるため）
+function kindCounts(list) {
+  const out = {}, names = new Set();
+  for (const [k, v] of list) {
+    if (!v) continue;
+    const kind = String(k).split(':')[0];
+    out[kind] = (out[kind] || 0) + 1;
+    if (kind === 'lsm') names.add(String(k).split(':')[1]);
+  }
+  return { kinds: out, mirrors: [...names] };
+}
+function fmtCounts(title, list) {
+  const c = kindCounts(list);
+  const kinds = Object.entries(c.kinds).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + '=' + n).join('  ');
+  return title + '：全' + list.length + '件\n  ' + kinds + '\n  通信で保存された乗り物など（lsm）：' + (c.mirrors.join(', ') || 'なし');
+}
+async function diagnoseRoom(id) {
+  const box = document.getElementById('mpHist');
+  box.innerHTML = '<p class="note">保存ファイルを読んで、数えています…</p>';
+  const local = await idbGet('room:' + id);
+  const live = conn && conn.id === id && window.VoxelNet && VoxelNet.active() && VoxelNet.kv() ? [...VoxelNet.kv().entries()] : null;
+  let text = '';
+  try {
+    const gh = await ghPull(id, null, false);
+    text += fmtCounts('GitHubの保存ファイル（分割 ' + gh.parts + ' 個）', gh.kv) + '\n\n';
+  } catch (e) { text += 'GitHubの保存ファイル：読めませんでした（' + (e.message || e) + '）\n\n'; }
+  text += fmtCounts('この端末の記録（保存されている分）', Array.isArray(local) ? local : []) + '\n\n';
+  if (live) text += fmtCounts('今つながっている部屋の中身', live) + '\n\n';
+  text += '※ GitHub の件数と、この端末の件数が大きく違えば、読み込みの途中で欠けています。同じなら、保存ファイルは正しく、画面への反映が欠けています。';
+  box.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'white-space:pre-wrap;font-size:12px;background:rgba(0,0,0,.25);padding:8px;border-radius:6px';
+  pre.textContent = text;
+  box.appendChild(pre);
+}
+
 // 履歴の一覧を出す（それぞれ「この時点に戻す」）
 async function showHistory() {
   const id = (conn && conn.id) || document.getElementById('mpJoinId').value.trim();

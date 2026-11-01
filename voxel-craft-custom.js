@@ -183,6 +183,7 @@ const adoptListeners = [];         // 定義が届いたときに呼ぶ関数（
 function publishAllDefs() {
   if (!VoxelMulti.connected()) return;
   for (const d of ext.defs) if (d.id >= CUSTOM_BASE) publishDef(d);
+  publishCats();
 }
 setInterval(() => { try { publishAllDefs(); } catch (e) { console.error(e); } }, 3000);
 
@@ -267,6 +268,57 @@ async function tryAdopt(H) {
   }
 }
 
+// ---------- 分類（カテゴリー）の共有 ----------
+// 分類は、ブロックの中身とは別の印として送る（中身のしるしを変えないため、今の部屋もそのまま使える）
+const catOf = new Map();          // しるし -> 分類（受け取った分）
+const pubCat = new Map();         // しるし -> 送った分類
+let pubCatRoom = null, pubCatList = '';
+function ensureCat(c) {
+  if (c && !ext.categories.includes(c)) ext.categories.push(c);
+}
+function publishCats() {
+  if (!VoxelMulti.connected()) return;
+  const room = VoxelMulti.roomId();
+  if (room !== pubCatRoom) { pubCat.clear(); pubCatList = ''; pubCatRoom = room; }
+  for (const d of ext.defs) {
+    if (d.id < CUSTOM_BASE) continue;
+    const H = defHash(d);
+    const c = String(d.category || '未分類');
+    if (pubCat.get(H) === c) continue;
+    pubCat.set(H, c);
+    VoxelMulti.send('cdcat:' + H, { c });
+  }
+  const list = JSON.stringify(ext.categories || []);
+  if (list !== pubCatList) { pubCatList = list; VoxelMulti.send('catl', { list: ext.categories || [] }); }
+}
+VoxelMulti.onOp('cdcat', rec => {
+  const H = String(rec.key || '').slice(6);
+  if (!H || rec.del || !rec.v || typeof rec.v.c !== 'string') return;
+  catOf.set(H, rec.v.c);
+  const d = defByHash(H);
+  if (d && d.category !== rec.v.c) {
+    ensureCat(rec.v.c);
+    d.category = rec.v.c;
+    saveExt();
+    if (typeof renderInventory === 'function') renderInventory();
+  }
+});
+VoxelMulti.onOp('catl', rec => {
+  if (rec.del || !rec.v || !Array.isArray(rec.v.list)) return;
+  const list = rec.v.list.filter(x => typeof x === 'string' && x);
+  if (!list.includes('未分類')) list.push('未分類');
+  ext.categories = list;
+  // 分類の一覧が届いたら、各ブロックの分類を直す（届いている分類を優先し、無いものは未分類）
+  for (const d of ext.defs) {
+    if (d.id < CUSTOM_BASE) continue;
+    const c = catOf.get(defHash(d));
+    if (c && list.includes(c)) d.category = c;
+    else if (!list.includes(d.category)) d.category = '未分類';
+  }
+  saveExt();
+  if (typeof renderInventory === 'function') renderInventory();
+});
+
 async function adoptDef(H, p) {
   const have = defByHash(H) || defByContent(p);   // 同じ中身が既にあれば、新しく増やさない
   if (have) { hashCache.set(have, H); return have.id; }
@@ -274,11 +326,12 @@ async function adoptDef(H, p) {
   if (id < 0) { if (window.VoxelWorld) VoxelWorld.toast('カスタムブロックの上限に達したため、受け取れませんでした'); giveUp.add(H); return -1; }
   const def = {
     id, name: String(p.name || 'カスタムブロック'), kind: p.kind === 'model' ? 'model' : 'cube',
-    category: (ext.categories && ext.categories[0]) || '未分類', colorable: !!p.colorable,
+    category: catOf.get(H) || (ext.categories && ext.categories[0]) || '未分類', colorable: !!p.colorable,
     texData: p.texData || null, model: p.model || null,
     orient: p.orient ?? undefined, scale: p.scale ?? undefined, alpha: p.alpha || 'cut', glowPower: p.glow ?? undefined, modelRot: p.mrot || 0,
     sounds: { break: { type: 'none' }, place: { type: 'none' } }
   };
+  ensureCat(def.category);
   ext.defs.push(def);
   hashCache.set(def, H);             // 送る側と同じしるしを、そのまま使う
   saveExt();
