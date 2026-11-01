@@ -115,9 +115,10 @@ function notifyLinks(s) {
   s.hooks.onLinks && s.hooks.onLinks(peerCount(s) + 1);   // 自分を含む人数
 }
 
-function sendHello(s, L) {
+// ask=true は「こちらの合言葉の確認がまだ。返事の hello をください」という合図
+function sendHello(s, L, ask) {
   if (!L.conn.open) return;
-  safeSend(L.conn, { t: 'hello', proof: s.proof, tag: s.tag });
+  safeSend(L.conn, { t: 'hello', proof: s.proof, tag: s.tag, ask: !!ask });
   L.helloSent = true;
 }
 
@@ -143,7 +144,9 @@ function onData(s, L, m) {
     const first = !L.ok;
     L.ok = true;
     L.name = String(m.tag || '').slice(0, 30);
-    if (!L.helloSent) sendHello(s, L);
+    // 相手が「返事がほしい」と言ってきたとき、または初めてのときは、こちらの hello を返す
+    // （片方だけ hello が届かないと、届いたほうだけが『つながった』と思い、一方通行になるため）
+    if (!L.helloSent || m.ask) sendHello(s, L, false);
     if (first) {
       notifyLinks(s);
       const now = Date.now();
@@ -356,6 +359,13 @@ function sendSums(s) {
   for (const L of s.links.values()) if (L.ok && L.conn.open) safeSend(L.conn, { t: 'sum', n: d.n, h: d.h });
 }
 
+// 一方通行のリンク（相手の hello を受け取れていない）は、2秒ごとに返事を求めて直す
+function askLinks(s) {
+  for (const L of s.links.values()) {
+    if (L.ok || !L.conn.open) continue;
+    safeSend(L.conn, { t: 'hello', proof: s.proof, tag: s.tag, ask: true });
+  }
+}
 function connectAll(s) {
   if (!s || !s.peer) return;
   const now = Date.now();
@@ -418,6 +428,7 @@ async function start(opts) {
   setTimeout(() => { if (S === s && !s.doneSent && peerCount(s) === 0) { s.doneSent = true; s.hooks.onSnapDone && s.hooks.onSnapDone(false); } }, 5000);
   setTimeout(() => { if (S === s && !s.doneSent) { s.doneSent = true; s.hooks.onSnapDone && s.hooks.onSnapDone(false); } }, 40000);
   s.sumT = setInterval(() => sendSums(s), SUM_MS);
+  s.helloT = setInterval(() => { if (S === s) askLinks(s); }, 2000);
   connectAll(s);
   notifyLinks(s);
   return { slot, others: got.filter(r => !r.p).length };   // 他の人の席の数（0なら一人の部屋）
@@ -470,6 +481,7 @@ function stop() {
   clearInterval(s.retryT);
   clearInterval(s.askT);
   clearInterval(s.sumT);
+  clearInterval(s.helloT);
   clearTimeout(s.flushT);
   clearTimeout(s.saveT);
   for (const L of s.links.values()) { try { L.conn.close(); } catch (_) {} }
