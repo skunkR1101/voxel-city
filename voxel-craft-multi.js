@@ -515,11 +515,146 @@ async function ghDecodeKv(o) {
   return Array.isArray(o.kv) ? o.kv : [];
 }
 // 既にあるファイルを読む（本体と分割ファイルは同時に取りに行く＝待ち時間を短くする）
+// ============================================================
+// 読み込みを裏（Worker）で行う：GitHub からの取得・解凍・JSON 読み取りを画面の外で行い、
+// 画面（メーター）が止まらないようにする。分割ファイルは並列に取る。
+// ============================================================
+function ghWorkerMain() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const pathOf = (id, k) => 'rooms/' + encodeURIComponent(id) + (k ? '.p' + k : '') + '.json';
+  async function fetchRetry(url, headers) {
+    let last = null;
+    for (let i = 0; i < 4; i++) {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 15000);
+      try {
+        const res = await fetch(url, { headers, cache: 'no-store', signal: ctl.signal });
+        clearTimeout(timer);
+        if (res.status !== 429 && res.status < 500) return res;
+        last = new Error('GitHubの応答が不安定です（' + res.status + '）');
+      } catch (e) { clearTimeout(timer); last = new Error('GitHubに届きませんでした（通信が不安定です）'); }
+      await sleep(700 * (i + 1));
+    }
+    throw last;
+  }
+  function unb64(b64) {
+    const bin = atob(String(b64).replace(/\s/g, ''));
+    const u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return u;
+  }
+  async function getFile(c, path, ref) {
+    const url = 'https://api.github.com/repos/' + c.repo + '/contents/' + path + (ref ? '?ref=' + encodeURIComponent(ref) : '');
+    const res = await fetchRetry(url, { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github+json' });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error('GitHubの応答が正しくありません（' + res.status + '）。トークンと権限を確認してください');
+    const j = await res.json();
+    let text;
+    if (j.content) text = new TextDecoder().decode(unb64(j.content));
+    else {   // 大きいファイルは本文が空で返るので、生データを取り直す
+      const r = await fetchRetry(url, { Authorization: 'Bearer ' + c.token, Accept: 'application/vnd.github.raw' });
+      if (!r.ok) throw new Error('GitHubの応答が正しくありません（' + r.status + '）');
+      text = await r.text();
+    }
+    return { sha: j.sha, o: text ? JSON.parse(text) : {} };
+  }
+  async function decode(o) {
+    if (!o) return [];
+    if (o.v === 3 && o.d) {
+      const u8 = unb64(o.d);
+      const text = await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      const j = JSON.parse(text);
+      return Array.isArray(j.kv) ? j.kv : [];
+    }
+    return Array.isArray(o.kv) ? o.kv : [];
+  }
+  self.onmessage = async e => {
+    const { c, id, ref } = e.data;
+    try {
+      const shas = {};
+      const files = [];
+      const main = await getFile(c, pathOf(id, 0), ref);
+      if (main) {
+        shas[pathOf(id, 0)] = main.sha;
+        const n = Number(main.o.parts) || 1;
+        files[0] = [pathOf(id, 0), await decode(main.o)];
+        self.postMessage({ t: 'prog', g: 1, n });
+        const res = new Array(n);
+        let next = 1, done = 1;
+        const lane = async () => {
+          while (next < n) {
+            const k = next++;
+            let p = await getFile(c, pathOf(id, k), ref);
+            for (let r = 0; !p && r < 2; r++) { await sleep(800 * (r + 1)); p = await getFile(c, pathOf(id, k), ref); }
+            if (!p) throw new Error('分割ファイル（' + (k + 1) + '/' + n + '）が見つかりませんでした。全部読めないため、読み込みと保存を中止しました（データを壊さないため）');
+            shas[pathOf(id, k)] = p.sha;
+            res[k] = [pathOf(id, k), await decode(p.o)];
+            self.postMessage({ t: 'prog', g: ++done, n });
+          }
+        };
+        await Promise.all([lane(), lane(), lane(), lane()]);
+        for (let k = 1; k < n; k++) files.push(res[k]);
+        self.postMessage({ t: 'done', shas, files, parts: n, empty: false });
+      } else {
+        // 本体が無いときは、分割ファイルが残っていないかを順に確かめる
+        for (let k = 1; k < 1000; k++) {
+          const p = await getFile(c, pathOf(id, k), ref);
+          if (!p) break;
+          shas[pathOf(id, k)] = p.sha;
+          files.push([pathOf(id, k), await decode(p.o)]);
+        }
+        self.postMessage({ t: 'done', shas, files, parts: 1, empty: files.length === 0 });
+      }
+    } catch (err) {
+      self.postMessage({ t: 'err', msg: (err && err.message) || String(err) });
+    }
+  };
+}
+let ghWorkerSrc = null;
+// 裏で読む。止まったら（30秒、進みがない）エラーにして知らせる
+function ghPullWorker(c, id, ref, onProg) {
+  return new Promise((resolve, reject) => {
+    let w = null, timer = null;
+    const finish = (fn, v) => { clearTimeout(timer); try { if (w) w.terminate(); } catch (e) {} fn(v); };
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => finish(reject, new Error('読み込みが止まりました（通信が遅い・不安定な可能性があります）。もう一度お試しください')), 30000);
+    };
+    try {
+      if (!ghWorkerSrc) ghWorkerSrc = '(' + ghWorkerMain.toString() + ')();';
+      w = new Worker(URL.createObjectURL(new Blob([ghWorkerSrc], { type: 'text/javascript' })));
+    } catch (e) { const x = new Error('worker unavailable'); x.workerFailed = true; return reject(x); }
+    arm();
+    w.onmessage = ev => {
+      const m = ev.data || {};
+      if (m.t === 'prog') { arm(); if (onProg) onProg(m.g, m.n); }
+      else if (m.t === 'done') finish(resolve, m);
+      else if (m.t === 'err') finish(reject, new Error(m.msg));
+    };
+    w.onerror = () => { const x = new Error('読み込みに失敗しました'); x.workerFailed = true; finish(reject, x); };
+    w.postMessage({ c, id, ref: ref || null });
+  });
+}
 async function ghPull(id, onProg, wantSig, ref) {
   const c = ghCfg();
   if (!c) return { shas: {}, kv: [], raw: {} };
   const shas = {};
   const raw = {};
+  // 裏（Worker）で読む。使えないときだけ、下の画面側の読み方で読む
+  if (typeof Worker === 'function') {
+    let r = null;
+    try { r = await ghPullWorker(c, id, ref, onProg); } catch (e) { if (!(e && e.workerFailed)) throw e; r = null; }
+    if (r) {
+      if (r.empty) { await ghRepoCheck(c); return { shas: {}, kv: [], raw: {} }; }
+      const all = [];
+      for (const [path, a] of r.files) {
+        if (wantSig) raw[path] = sigOfRemote(a);
+        for (const x of a) all.push(x);
+      }
+      if (onProg) onProg(r.parts, r.parts);
+      return { shas: r.shas, kv: ghAssemble(all), parts: r.parts, raw };
+    }
+  }
   const mainRes = await ghGetFile(c, ghPathOf(id, 0), ref);
   let kv = [];
   let n = 1;
