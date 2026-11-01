@@ -503,6 +503,25 @@ async function ghGetFile(c, path, ref) {
   }
   return { sha: j.sha, o: text ? JSON.parse(text) : {} };
 }
+// 履歴から戻したあとの参加で、同じ内容を二度ダウンロードしないための一時的な受け渡し
+let pullOverride = null;
+// 手元の履歴（この端末で保存した時点の内容を、最近の数件だけ残す）
+const SNAP_KEEP = 5;
+async function snapStore(id, sha, list) {
+  try {
+    await idbSet('snap:' + id + ':' + sha, list);
+    const idx = ((await idbGet('snapidx:' + id)) || []).filter(x => x !== sha);
+    idx.unshift(sha);
+    while (idx.length > SNAP_KEEP) { const old = idx.pop(); await idbSet('snap:' + id + ':' + old, null); }
+    await idbSet('snapidx:' + id, idx);
+  } catch (e) { console.error('履歴の保存に失敗', e); }
+}
+async function snapGet(id, sha) {
+  try { const v = await idbGet('snap:' + id + ':' + sha); return Array.isArray(v) ? v : null; } catch (e) { return null; }
+}
+async function snapList(id) {
+  try { return (await idbGet('snapidx:' + id)) || []; } catch (e) { return []; }
+}
 // 既にあるファイル（本体・分割ファイル）をすべて読む。本体が無くても、分割ファイルがあれば読む
 // ファイルの中身（圧縮版 v3／従来の JSON 版 v1・v2）を、項目の一覧にもどす
 async function ghDecodeKv(o) {
@@ -638,6 +657,11 @@ function ghPullWorker(c, id, ref, onProg) {
 async function ghPull(id, onProg, wantSig, ref) {
   const c = ghCfg();
   if (!c) return { shas: {}, kv: [], raw: {} };
+  if (pullOverride && pullOverride.id === id && !wantSig && !ref) {
+    const kv = pullOverride.kv;
+    pullOverride = null;
+    return { shas: {}, kv, parts: 1, raw: {} };
+  }
   const shas = {};
   const raw = {};
   // 裏（Worker）で読む。使えないときだけ、下の画面側の読み方で読む
@@ -871,7 +895,12 @@ async function ghWriteFile(c, id, cur, o, path, step) {
     if (!res) await new Promise(r => setTimeout(r, 600 * (i + 1)));
   }
   if (!res) throw new Error('GitHubに届きませんでした（通信が不安定です）');
-  if (res.ok) { if (step) step(); return 'ok'; }
+  if (res.ok) {
+    if (step) step();
+    let commit = 'ok';
+    try { const j = await res.json(); if (j && j.commit && j.commit.sha) commit = j.commit.sha; } catch (e) {}
+    return commit;
+  }
   if (res.status === 409) return 'conflict';
   let msg = '';
   try { msg = (await res.json()).message || ''; } catch (e) {}
@@ -915,9 +944,15 @@ async function ghPushOnce(id, kv, prog) {
     const writeK = async k => ghWriteFile(c, id, cur, await build(k), ghPathOf(id, k), step);
     const results = await Promise.all(changed.filter(k => k !== 0).map(writeK));
     let conflict = results.includes('conflict');
-    if (!conflict && changed.includes(0)) conflict = (await writeK(0)) === 'conflict';
+    let mainCommit = null;
+    if (!conflict && changed.includes(0)) {
+      const r0 = await writeK(0);
+      conflict = r0 === 'conflict';
+      if (!conflict && r0 !== 'ok') mainCommit = r0;
+    }
     if (!conflict) {
       await roomLocalSaveSafe(id, merged);
+      if (mainCommit) snapStore(id, mainCommit, merged);   // この保存の内容を、手元に残す（履歴から瞬時に戻すため）
       P(total, total);
       return merged;
     }
@@ -1453,6 +1488,78 @@ async function loadLatestFromGitHub() {
   toast('GitHubの最新の作業で読み込みました（' + r.kv.length + '件）');
   close(); startIfNeeded();
 }
+async function ghJson(c, method, path, body) {
+  const url = 'https://api.github.com/repos/' + c.repo + path;
+  let res = null;
+  for (let i = 0; i < 3 && !res; i++) {
+    try {
+      res = await fetch(url, { method, headers: { ...ghHeaders(c), ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      if (res.status >= 500) res = null;
+    } catch (e) { res = null; }
+    if (!res) await new Promise(r => setTimeout(r, 600 * (i + 1)));
+  }
+  if (!res) throw new Error('GitHubに届きませんでした（通信が不安定です）');
+  if (!res.ok) {
+    let msg = ''; try { msg = (await res.json()).message || ''; } catch (e) {}
+    throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
+  }
+  return res.json();
+}
+// 部屋のファイルだけを、指定した時点（コミット）の中身に戻す。
+// 中身は再アップロードせず、既にある版を指すだけ。ほかの部屋のファイルは変えない。
+async function ghRevertRoomTo(c, id, sha) {
+  const pref = 'rooms/' + encodeURIComponent(id);
+  const isRoomFile = p => p === pref + '.json' || (p.startsWith(pref + '.p') && p.endsWith('.json') && /^\d+$/.test(p.slice(pref.length + 2, -5)));
+  const repo = await ghJson(c, 'GET', '');
+  const branch = repo.default_branch || 'main';
+  const ref = await ghJson(c, 'GET', '/git/ref/heads/' + encodeURIComponent(branch));
+  const head = ref.object.sha;
+  const headC = await ghJson(c, 'GET', '/git/commits/' + head);
+  const oldC = await ghJson(c, 'GET', '/git/commits/' + sha);
+  const [curT, oldT] = await Promise.all([
+    ghJson(c, 'GET', '/git/trees/' + headC.tree.sha + '?recursive=1'),
+    ghJson(c, 'GET', '/git/trees/' + oldC.tree.sha + '?recursive=1')
+  ]);
+  if (curT.truncated || oldT.truncated) throw new Error('リポジトリが大きすぎて、一度で戻せません');
+  const oldFiles = oldT.tree.filter(e => e.type === 'blob' && isRoomFile(e.path));
+  if (!oldFiles.length) throw new Error('その時点の部屋のファイルが見つかりません');
+  const oldSet = new Set(oldFiles.map(e => e.path));
+  const entries = oldFiles.map(e => ({ path: e.path, mode: '100644', type: 'blob', sha: e.sha }));
+  for (const e of curT.tree) if (e.type === 'blob' && isRoomFile(e.path) && !oldSet.has(e.path)) entries.push({ path: e.path, mode: '100644', type: 'blob', sha: null });
+  const nt = await ghJson(c, 'POST', '/git/trees', { base_tree: headC.tree.sha, tree: entries });
+  const when = (oldC.committer && oldC.committer.date) || sha.slice(0, 7);
+  const nc = await ghJson(c, 'POST', '/git/commits', { message: 'room ' + id + ' を ' + when + ' の保存に戻す', tree: nt.sha, parents: [head] });
+  await ghJson(c, 'PATCH', '/git/refs/heads/' + encodeURIComponent(branch), { sha: nc.sha, force: false });
+  return nc.sha;
+}
+// 履歴から戻す（速い方法：部屋のファイルを指し替え＋手元の履歴があれば、ダウンロードなし）
+async function restoreFast(id, sha, pw) {
+  const c = ghCfg();
+  let kv = await snapGet(id, sha);
+  loadShow(kv ? '手元の履歴から準備しています…' : '過去の保存を読んでいます…', kv ? 20 : 8);
+  if (!kv) {
+    const r = await ghPull(id, (g, n) => loadShow('過去の保存を読んでいます（' + g + '/' + n + '）', 8 + 30 * g / Math.max(1, n)), false, sha);
+    kv = r.kv;
+    if (!kv.length) throw new Error('その時点の保存が読めませんでした');
+  }
+  loadShow('GitHubの保存を戻しています…', 50);
+  try {
+    await ghRevertRoomTo(c, id, sha);
+  } catch (e) {
+    // 速い方法が使えないときは、確実な方法（内容を書き直す）で戻す
+    console.error('速い戻しに失敗したため、通常の方法で戻します', e);
+    loadHide();
+    return restoreFromCommit(id, sha, pw);
+  }
+  await idbSet('room:' + id, kv);
+  loadShow('戻した作業を反映しています…', 80);
+  if (!pw) { loadHide(); toast('戻しました。パスワードを入れて「参加する」を押すと反映されます'); return; }
+  pullOverride = { id, kv };
+  try { await joinRoom(id, pw, false, '', tagVal(), null); } finally { pullOverride = null; }
+  refreshShare(); renderRooms();
+  toast('過去の保存に戻しました（' + kv.length + '件）');
+  close(); startIfNeeded();
+}
 // 過去の保存（コミット）の内容に、部屋全体を戻す。
 //  ・その時点の項目は、今の時刻の新しい版として書く（今の内容より必ず新しく勝つ）
 //  ・その時点に無い項目は、削除の印を今の時刻で書く（後から増えた分も消える）
@@ -1489,6 +1596,7 @@ async function showHistory() {
   const box = document.getElementById('mpHist');
   box.innerHTML = '<p class="note">履歴を読んでいます…</p>';
   const list = await ghHistory(id);
+  const cached = new Set(await snapList(id));
   box.innerHTML = '';
   if (!list.length) { box.innerHTML = '<p class="note">この部屋の保存履歴が見つかりませんでした。</p>'; return; }
   const note = document.createElement('p');
@@ -1500,11 +1608,11 @@ async function showHistory() {
     b.className = 'btn sub';
     b.style.margin = '3px 0';
     const d = h.date ? new Date(h.date).toLocaleString('ja-JP') : '日時不明';
-    b.textContent = d + '　' + (h.msg || '').split('\n')[0].slice(0, 30);
+    b.textContent = (cached.has(h.sha) ? '⚡ ' : '') + d + '　' + (h.msg || '').split('\n')[0].slice(0, 30);
     b.addEventListener('click', async () => {
-      if (!confirm(d + ' の保存に戻します。よろしいですか？\n（戻す前の内容も、GitHub の履歴に残ります）')) return;
+      if (!confirm(d + ' の保存に戻します。よろしいですか？\n\n・戻す前に、部屋の他の人は退室してください（新しい内容が戻されてしまうため）\n・戻す前の内容も、GitHub の履歴に残ります')) return;
       const pw = (conn && conn.id === id && conn.pw) || document.getElementById('mpJoinPw').value;
-      try { await restoreFromCommit(id, h.sha, pw); } catch (e) { loadHide(); toast(e.message || String(e)); }
+      try { await restoreFast(id, h.sha, pw); } catch (e) { loadHide(); toast(e.message || String(e)); }
     });
     box.appendChild(b);
   }
