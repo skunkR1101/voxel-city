@@ -815,9 +815,11 @@ let ghQueue = Promise.resolve();
 // 保存は1つずつ順番に行う（同時に書いて失われないように）
 function ghPush(id, kv, prog) {
   ghMarkDirty(id, false);                 // この時点の内容を送る。送る前後に変わったものは、また印が付く
+  ghBusy.add(id);
   const job = ghQueue.then(() => ghPushOnce(id, kv, prog));
   ghQueue = job.catch(() => {});
   job.catch(() => ghMarkDirty(id, true)); // 送れなかったら、次の機会にまた送る
+  job.finally(() => ghBusy.delete(id)).catch(() => {});
   return job;
 }
 // 「GitHubへまだ送れていない変更がある部屋」の一覧（画面を閉じても消えないように端末へ保存）
@@ -834,6 +836,7 @@ function ghMarkDirty(id, on) {
 function ghFlushDirty() {
   if (!ghCfg()) return;
   for (const id of ghDirtyIds()) {
+    if (ghBusy.has(id)) continue;        // 保存の最中なら、終わってから次の回に送る（待ちの列を作らない）
     const live = conn && conn.id === id && window.VoxelNet && VoxelNet.active() && VoxelNet.kv();
     const src = live ? Promise.resolve([...VoxelNet.kv().entries()]) : idbGet('room:' + id);
     src.then(kv => { if (Array.isArray(kv) && kv.length) return ghPush(id, kv); else ghMarkDirty(id, false); })
@@ -897,9 +900,9 @@ async function ghWriteFile(c, id, cur, o, path, step) {
   if (!res) throw new Error('GitHubに届きませんでした（通信が不安定です）');
   if (res.ok) {
     if (step) step();
-    let commit = 'ok';
-    try { const j = await res.json(); if (j && j.commit && j.commit.sha) commit = j.commit.sha; } catch (e) {}
-    return commit;
+    let out = { ok: true, commit: null, sha: null };
+    try { const j = await res.json(); out = { ok: true, commit: (j.commit && j.commit.sha) || null, sha: (j.content && j.content.sha) || null }; } catch (e) {}
+    return out;
   }
   if (res.status === 409) return 'conflict';
   let msg = '';
@@ -907,6 +910,9 @@ async function ghWriteFile(c, id, cur, o, path, step) {
   throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
 }
 // 保存：他の人の分を取り込み、「中身が変わったファイルだけ」を並列に書く
+// 直前の保存の結果（同じ端末が最後に書いた内容）。本体の印が同じなら、他の人の保存は無いので読み直さない
+const ghLastSave = new Map();   // 部屋 -> { mainSha, shas, raw, kv, parts }
+const ghBusy = new Set();       // 保存の最中（またはすぐ待っている）部屋
 async function ghPushOnce(id, kv, prog) {
   const c = ghCfg();
   if (!c || !id) return null;
@@ -915,7 +921,16 @@ async function ghPushOnce(id, kv, prog) {
   const step = () => { done++; P(done, total); };
   P(0, total);
   for (let attempt = 0; attempt < 3; attempt++) {
-    const cur = await ghPull(id, (g, n) => { total = n; done = g; P(done, total); }, true);
+    let cur = null;
+    const last = ghLastSave.get(id);
+    if (last) {
+      const head = await ghGetFile(c, ghPathOf(id, 0));          // 本体ファイルの印だけを見る（1回の通信）
+      if (head && head.sha === last.mainSha) cur = { shas: last.shas, raw: last.raw, kv: last.kv, parts: last.parts };
+    }
+    if (!cur) {
+      ghLastSave.delete(id);
+      cur = await ghPull(id, (g, n) => { total = n; done = g; P(done, total); }, true);
+    }
     await tick();
     const pullN = cur.parts || 1;
     if (total < pullN) total = pullN;
@@ -943,19 +958,29 @@ async function ghPushOnce(id, kv, prog) {
     };
     const writeK = async k => ghWriteFile(c, id, cur, await build(k), ghPathOf(id, k), step);
     const results = await Promise.all(changed.filter(k => k !== 0).map(writeK));
-    let conflict = results.includes('conflict');
-    let mainCommit = null;
+    let conflict = results.some(r => r === 'conflict');
+    let mainRes = null;
     if (!conflict && changed.includes(0)) {
       const r0 = await writeK(0);
       conflict = r0 === 'conflict';
-      if (!conflict && r0 !== 'ok') mainCommit = r0;
+      if (!conflict) mainRes = r0;
     }
     if (!conflict) {
+      // この保存の結果を覚える（次の保存で、読み直しを省くため）
+      const shas = { ...cur.shas }, raw = { ...(cur.raw || {}) };
+      for (let k = 0; k < chunks.length; k++) raw[ghPathOf(id, k)] = sigOfLocal(chunks[k]);
+      for (const k of changed) {
+        const r = k === 0 ? mainRes : results[changed.filter(x => x !== 0).indexOf(k)];
+        if (r && r.sha) shas[ghPathOf(id, k)] = r.sha;
+      }
+      if (mainRes && mainRes.sha) ghLastSave.set(id, { mainSha: mainRes.sha, shas, raw, kv: merged, parts: chunks.length });
+      else ghLastSave.delete(id);
       await roomLocalSaveSafe(id, merged);
-      if (mainCommit) snapStore(id, mainCommit, merged);   // この保存の内容を、手元に残す（履歴から瞬時に戻すため）
+      if (mainRes && mainRes.commit) snapStore(id, mainRes.commit, merged);   // この保存の内容を、手元に残す（履歴から瞬時に戻すため）
       P(total, total);
       return merged;
     }
+    ghLastSave.delete(id);
   }
   throw new Error('GitHubへの保存が何度も競合しました');
 }
