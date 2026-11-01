@@ -816,6 +816,7 @@ let ghQueue = Promise.resolve();
 function ghPush(id, kv, prog) {
   ghMarkDirty(id, false);                 // この時点の内容を送る。送る前後に変わったものは、また印が付く
   ghBusy.add(id);
+  setTimeout(() => ghBusy.delete(id), 240000);   // 万一止まっても、4分後には次の保存を始められるように
   const job = ghQueue.then(() => ghPushOnce(id, kv, prog));
   ghQueue = job.catch(() => {});
   job.catch(() => ghMarkDirty(id, true)); // 送れなかったら、次の機会にまた送る
@@ -891,8 +892,12 @@ async function ghWriteFile(c, id, cur, o, path, step) {
   let res = null;
   for (let i = 0; i < 3 && !res; i++) {                    // 電波の一時的な失敗は、少し待って再送
     try {
-      res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
-        { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const ctl = new AbortController();
+      const tmo = setTimeout(() => ctl.abort(), 30000);   // 応答が無いまま止まらないように
+      try {
+        res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
+          { method: 'PUT', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctl.signal });
+      } finally { clearTimeout(tmo); }
       if (res.status >= 500) res = null;
     } catch (e) { res = null; }
     if (!res) await new Promise(r => setTimeout(r, 600 * (i + 1)));
@@ -1377,6 +1382,7 @@ function buildUI() {
       <button class="btn sub" id="mpHistBtn">過去の保存に戻す（履歴から選ぶ）</button>
       <button class="btn sub" id="mpDiagBtn">保存ファイルを診断（件数を比べる）</button>
       <button class="btn sub" id="mpReconBtn">GitHubと照らし合わせて足りない分を補う</button>
+      <p id="mpReconMsg" class="note" style="min-height:1.4em;color:#9fd8ff"></p>
       <div id="mpHist"></div>
       <p class="note">この端末の手元の保存は使わず、GitHubに保存されている内容だけで読み込み直します。欠けているブロックを取り戻すときに使います。</p>
     </details>
@@ -1457,10 +1463,12 @@ function buildUI() {
     toast('GitHub設定を保存しました');
   });
   document.getElementById('mpReconBtn').addEventListener('click', async () => {
+    reconMsg('押されました。確認しています…');
+    toast('照らし合わせを始めます');
     try {
-      if (!conn) throw new Error('部屋に入ってから押してください');
+      if (!conn) { reconMsg('部屋に入ってから押してください'); toast('部屋に入ってから押してください'); return; }
       await reconcileFromGitHub(conn.id, true);
-    } catch (e) { loadHide(); toast(e.message || String(e)); }
+    } catch (e) { loadHide(); reconSet(false); reconMsg('失敗：' + (e.message || e)); toast(e.message || String(e)); }
   });
   document.getElementById('mpDiagBtn').addEventListener('click', async () => {
     try {
@@ -1635,27 +1643,55 @@ async function restoreFromCommit(id, sha, pw) {
 }
 // GitHub の保存にあって、今の部屋に無い（または古い）記録を補う。
 // 今の部屋の新しい変更は、時刻で守られる（古い内容では上書きしない）
-let reconBusy = false;
+let reconBusy = false, reconSince = 0, reconTimer = null;
+// 照合の状況を、パネル内の一行に出す（押したことが分かるように、経過秒も出す）
+function reconMsg(text) {
+  const el = document.getElementById('mpReconMsg');
+  if (el) el.textContent = text;
+}
+function reconSet(busy) {
+  const b = document.getElementById('mpReconBtn');
+  if (!b) return;
+  b.disabled = !!busy;
+  b.textContent = busy ? '照らし合わせ中…（押されました）' : 'GitHubと照らし合わせて足りない分を補う';
+}
 async function reconcileFromGitHub(id, manual) {
-  if (reconBusy || !ghCfg() || !conn || conn.id !== id || !VoxelNet.active() || ghBusy.has(id)) return 0;
-  reconBusy = true;
+  if (manual) {
+    if (!ghCfg()) { reconMsg('GitHubの設定がありません。先に「GitHub設定を保存」してください'); toast('GitHubの設定がありません'); return 0; }
+    if (!conn || (id && conn.id !== id)) { reconMsg('部屋に入ってから押してください'); toast('部屋に入ってから押してください'); return 0; }
+    if (reconBusy) { reconMsg('すでに照らし合わせ中です（終わるまでお待ちください）'); toast('すでに照らし合わせ中です'); return 0; }
+  }
+  if (reconBusy || !ghCfg() || !conn || conn.id !== id || !VoxelNet.active()) return 0;
+  reconBusy = true; reconSince = Date.now();
+  if (manual) {
+    reconSet(true);
+    reconMsg('GitHubの保存を読んでいます…（0秒）');
+    clearInterval(reconTimer);
+    reconTimer = setInterval(() => reconMsg('GitHubの保存を照らし合わせています…（' + Math.round((Date.now() - reconSince) / 1000) + '秒）'), 1000);
+    loadShow('GitHubの保存と照らし合わせています…', 10);
+  }
   try {
-    if (manual) loadShow('GitHubの保存と照らし合わせています…', 10);
-    const gh = await ghPull(id, null, false);
+    const gh = await ghPull(id, (g, n) => { if (manual) reconMsg('GitHubの保存を読んでいます（' + g + '/' + n + '）'); }, false);
+    if (manual) reconMsg('この端末と比べて、足りない分を補っています…（' + gh.kv.length + '件を確認）');
     let n = 0;
     for (let i = 0; i < gh.kv.length; i += 300) {
       applyingRemote = true;
       try { n += VoxelNet.merge(gh.kv.slice(i, i + 300)); } finally { applyingRemote = false; }
+      if (manual) loadShow('足りない分を補っています…', 40 + 60 * (i / Math.max(1, gh.kv.length)));
       await tick();
     }
-    if (manual) loadHide();
     if (n) toast('GitHubの保存から、この端末に足りなかった ' + n + ' 件を補いました');
     else if (manual) toast('足りないものはありませんでした（GitHubと一致しています）');
+    if (manual) reconMsg('完了：' + (n ? n + '件を補いました' : '足りないものはありませんでした（一致）') + '（' + Math.round((Date.now() - reconSince) / 1000) + '秒）');
     return n;
   } catch (e) {
-    if (manual) { loadHide(); toast('照らし合わせに失敗しました：' + (e.message || e)); }
+    if (manual) { reconMsg('照らし合わせに失敗しました：' + (e.message || e)); toast('照らし合わせに失敗しました：' + (e.message || e)); }
     return 0;
-  } finally { reconBusy = false; }
+  } finally {
+    reconBusy = false;
+    clearInterval(reconTimer);
+    if (manual) { loadHide(); reconSet(false); }
+  }
 }
 setInterval(() => { if (conn) reconcileFromGitHub(conn.id, false); }, 300000);   // つながっている間、5分おきに補う
 
