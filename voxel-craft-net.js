@@ -415,6 +415,26 @@ async function start(opts) {
   return { slot, others: got.filter(r => !r.p).length };   // 他の人の席の数（0なら一人の部屋）
 }
 
+// 別の場所（GitHub の保存など）にある記録を、この部屋へ補う。
+// 時刻は元のまま使う（新しい方が勝つ）。だから、今の部屋の新しい変更を古い内容で上書きしない。
+// 補えた分（この端末が持っていなかった・古かった分）は、つながっている人にも送る。
+function mergeEntries(list) {
+  const s = S;
+  if (!s || !Array.isArray(list)) return 0;
+  const fwd = [];
+  for (const [key, val] of list) {
+    if (!val || typeof key !== 'string') continue;
+    const e = val.del ? { del: true, ts: Number(val.ts) || 0, peer: String(val.peer || '') } : { v: val.v, ts: Number(val.ts) || 0, peer: String(val.peer || '') };
+    if (!e.ts) continue;
+    seeTs(e.ts);
+    if (!applyEntry(s, key, e)) continue;
+    fwd.push({ key, ts: e.ts, peer: e.peer, del: !!e.del, eph: false, v: e.v });
+    s.hooks.onEntry && s.hooks.onEntry({ key, v: e.v, del: !!e.del, ts: e.ts, peer: e.peer });
+  }
+  if (fwd.length) { broadcast(s, fwd, null); persistSoon(s); }
+  return fwd.length;
+}
+
 // 変更を送る。eph=true は記録に残さない一時的な情報（位置など）
 function send(key, value, del, eph) {
   const s = S;
@@ -453,7 +473,7 @@ function stop() {
 function linkCount() { return S ? peerCount(S) + 1 : 0; }
 
 window.VoxelNet = {
-  start, gzipStr, gunzipStr, bytesToB64, b64ToBytes, send, stop, linkCount,
+  start, gzipStr, gunzipStr, bytesToB64, b64ToBytes, send, stop, linkCount, merge: mergeEntries,
   nowTs,                                  // 変更の時刻（時計ずれに強い）。各機能はこれを使う
   seeTs,
   active: () => !!S,

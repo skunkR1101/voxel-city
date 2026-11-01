@@ -1077,6 +1077,7 @@ async function joinRoom(id, password, keepLocal, name, tag, seed, creator) {
     }
     snapResolve = null;
     joining = false;
+    setTimeout(() => reconcileFromGitHub(id, false), 4000);   // 入ったあと、GitHub の保存と照らし合わせて足りない分を補う
     return id;
   } finally {
     loadHide();
@@ -1375,6 +1376,7 @@ function buildUI() {
       <button class="btn sub" id="mpGhLoad">最新作業を読み込み（GitHubから直接）</button>
       <button class="btn sub" id="mpHistBtn">過去の保存に戻す（履歴から選ぶ）</button>
       <button class="btn sub" id="mpDiagBtn">保存ファイルを診断（件数を比べる）</button>
+      <button class="btn sub" id="mpReconBtn">GitHubと照らし合わせて足りない分を補う</button>
       <div id="mpHist"></div>
       <p class="note">この端末の手元の保存は使わず、GitHubに保存されている内容だけで読み込み直します。欠けているブロックを取り戻すときに使います。</p>
     </details>
@@ -1453,6 +1455,12 @@ function buildUI() {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) { toast('リポジトリ名は「ユーザー名/リポジトリ名」の形で入れてください'); return; }
     ghSaveCfg({ repo, token });
     toast('GitHub設定を保存しました');
+  });
+  document.getElementById('mpReconBtn').addEventListener('click', async () => {
+    try {
+      if (!conn) throw new Error('部屋に入ってから押してください');
+      await reconcileFromGitHub(conn.id, true);
+    } catch (e) { loadHide(); toast(e.message || String(e)); }
   });
   document.getElementById('mpDiagBtn').addEventListener('click', async () => {
     try {
@@ -1625,6 +1633,32 @@ async function restoreFromCommit(id, sha, pw) {
   toast('過去の保存に戻しました（' + list.length + '件）');
   close(); startIfNeeded();
 }
+// GitHub の保存にあって、今の部屋に無い（または古い）記録を補う。
+// 今の部屋の新しい変更は、時刻で守られる（古い内容では上書きしない）
+let reconBusy = false;
+async function reconcileFromGitHub(id, manual) {
+  if (reconBusy || !ghCfg() || !conn || conn.id !== id || !VoxelNet.active() || ghBusy.has(id)) return 0;
+  reconBusy = true;
+  try {
+    if (manual) loadShow('GitHubの保存と照らし合わせています…', 10);
+    const gh = await ghPull(id, null, false);
+    let n = 0;
+    for (let i = 0; i < gh.kv.length; i += 300) {
+      applyingRemote = true;
+      try { n += VoxelNet.merge(gh.kv.slice(i, i + 300)); } finally { applyingRemote = false; }
+      await tick();
+    }
+    if (manual) loadHide();
+    if (n) toast('GitHubの保存から、この端末に足りなかった ' + n + ' 件を補いました');
+    else if (manual) toast('足りないものはありませんでした（GitHubと一致しています）');
+    return n;
+  } catch (e) {
+    if (manual) { loadHide(); toast('照らし合わせに失敗しました：' + (e.message || e)); }
+    return 0;
+  } finally { reconBusy = false; }
+}
+setInterval(() => { if (conn) reconcileFromGitHub(conn.id, false); }, 300000);   // つながっている間、5分おきに補う
+
 // 種類ごとの数（保存ファイル側と、この端末側を比べるため）
 function kindCounts(list) {
   const out = {}, names = new Set();
