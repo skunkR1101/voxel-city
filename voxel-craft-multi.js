@@ -488,8 +488,8 @@ async function ghFetch(url, headers, tries = 4) {
   }
   throw lastErr;
 }
-async function ghGetFile(c, path) {
-  const url = 'https://api.github.com/repos/' + c.repo + '/contents/' + path;
+async function ghGetFile(c, path, ref) {
+  const url = 'https://api.github.com/repos/' + c.repo + '/contents/' + path + (ref ? '?ref=' + encodeURIComponent(ref) : '');
   const res = await ghFetch(url, ghHeaders(c));
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(ghErrText(res.status));
@@ -515,12 +515,12 @@ async function ghDecodeKv(o) {
   return Array.isArray(o.kv) ? o.kv : [];
 }
 // 既にあるファイルを読む（本体と分割ファイルは同時に取りに行く＝待ち時間を短くする）
-async function ghPull(id, onProg, wantSig) {
+async function ghPull(id, onProg, wantSig, ref) {
   const c = ghCfg();
   if (!c) return { shas: {}, kv: [], raw: {} };
   const shas = {};
   const raw = {};
-  const mainRes = await ghGetFile(c, ghPathOf(id, 0));
+  const mainRes = await ghGetFile(c, ghPathOf(id, 0), ref);
   let kv = [];
   let n = 1;
   if (mainRes) {
@@ -532,8 +532,8 @@ async function ghPull(id, onProg, wantSig) {
     let done = 1;
     const got = await Promise.all(ks.map(async k => {
       // 見つからないときは、少し待って取り直す（保存直後の一時的な見えなさを避ける）
-      let p = await ghGetFile(c, ghPathOf(id, k));
-      for (let r = 0; !p && r < 2; r++) { await new Promise(res => setTimeout(res, 800 * (r + 1))); p = await ghGetFile(c, ghPathOf(id, k)); }
+      let p = await ghGetFile(c, ghPathOf(id, k), ref);
+      for (let r = 0; !p && r < 2; r++) { await new Promise(res => setTimeout(res, 800 * (r + 1))); p = await ghGetFile(c, ghPathOf(id, k), ref); }
       if (onProg) onProg(++done, n);
       if (!p) throw new Error('分割ファイル（' + (k + 1) + '/' + n + '）が見つかりませんでした。全部読めないため、読み込みと保存を中止しました（データを壊さないため）');
       return p;
@@ -547,7 +547,7 @@ async function ghPull(id, onProg, wantSig) {
     // 本体が無いときは、分割ファイルが残っていないかを順に確かめる
     let k = 1, found = false;
     for (; k < 1000; k++) {
-      const p = await ghGetFile(c, ghPathOf(id, k));
+      const p = await ghGetFile(c, ghPathOf(id, k), ref);
       if (!p) break;
       found = true;
       shas[ghPathOf(id, k)] = p.sha;
@@ -557,6 +557,16 @@ async function ghPull(id, onProg, wantSig) {
   }
   if (onProg) onProg(n, n);
   return { shas, kv: ghAssemble(kv), parts: n, raw };
+}
+// この部屋の保存の履歴（本体ファイルが変わった回の一覧・新しい順）
+async function ghHistory(id) {
+  const c = ghCfg();
+  if (!c) throw new Error('GitHubの設定がありません');
+  const url = 'https://api.github.com/repos/' + c.repo + '/commits?path=' + encodeURIComponent(ghPathOf(id, 0)) + '&per_page=30';
+  const res = await ghFetch(url, ghHeaders(c));
+  if (!res.ok) throw new Error(ghErrText(res.status));
+  const list = await res.json();
+  return list.map(x => ({ sha: x.sha, date: (x.commit && x.commit.committer && x.commit.committer.date) || '', msg: (x.commit && x.commit.message) || '' }));
 }
 // 大きすぎる1件は、いくつかの断片に切って別々の項目として保存する
 const GH_SPLIT_AT = 150000;   // これを超える1件は断片に切る
@@ -1165,6 +1175,8 @@ function buildUI() {
       <button class="btn sub" id="mpGhSave">GitHub設定を保存</button>
       <button class="btn sub" id="mpGhSync">今すぐGitHubに保存</button>
       <button class="btn sub" id="mpGhLoad">最新作業を読み込み（GitHubから直接）</button>
+      <button class="btn sub" id="mpHistBtn">過去の保存に戻す（履歴から選ぶ）</button>
+      <div id="mpHist"></div>
       <p class="note">この端末の手元の保存は使わず、GitHubに保存されている内容だけで読み込み直します。欠けているブロックを取り戻すときに使います。</p>
     </details>
     <button class="btn sub" id="mpCopy">共有リンクをコピー</button>
@@ -1243,6 +1255,9 @@ function buildUI() {
     ghSaveCfg({ repo, token });
     toast('GitHub設定を保存しました');
   });
+  $('mpHistBtn').addEventListener('click', async () => {
+    try { await showHistory(); } catch (e) { toast(e.message || String(e)); }
+  });
   $('mpGhLoad').addEventListener('click', async () => {
     try { await loadLatestFromGitHub(); } catch (e) { loadHide(); toast(e.message || String(e)); }
   });
@@ -1283,9 +1298,9 @@ function prefillFromHash() {
 // GitHub の保存内容だけで、この部屋を読み込み直す（手元の保存は使わない）
 async function loadLatestFromGitHub() {
   if (!ghCfg()) throw new Error('GitHubの設定（リポジトリ名とトークン）を先に保存してください');
-  const id = (conn && conn.id) || $('mpJoinId').value.trim();
+  const id = (conn && conn.id) || document.getElementById('mpJoinId').value.trim();
   if (!id) throw new Error('部屋IDを入力してください');
-  const pw = (conn && conn.id === id && conn.pw) || $('mpJoinPw').value;
+  const pw = (conn && conn.id === id && conn.pw) || document.getElementById('mpJoinPw').value;
   if (!confirm('GitHubに保存されている最新の内容で、この部屋を読み込み直します。\nこの端末だけの手元の保存は使いません。よろしいですか？')) return;
   loadShow('GitHubから最新の作業を読んでいます…', 4);
   const r = await ghPull(id, (g, n) => loadShow('GitHubから読んでいます（' + g + '/' + n + '）', 4 + 30 * g / Math.max(1, n)));
@@ -1302,6 +1317,62 @@ async function loadLatestFromGitHub() {
   refreshShare(); renderRooms();
   toast('GitHubの最新の作業で読み込みました（' + r.kv.length + '件）');
   close(); startIfNeeded();
+}
+// 過去の保存（コミット）の内容に、部屋全体を戻す。
+//  ・その時点の項目は、今の時刻の新しい版として書く（今の内容より必ず新しく勝つ）
+//  ・その時点に無い項目は、削除の印を今の時刻で書く（後から増えた分も消える）
+async function restoreFromCommit(id, sha, pw) {
+  const prog = (g, n) => loadShow('過去の保存を読んでいます（' + g + '/' + n + '）', 4 + 30 * g / Math.max(1, n));
+  const snap = await ghPull(id, prog, false, sha);
+  if (!snap.kv.length) throw new Error('その時点の保存が読めませんでした');
+  const cur = await ghPull(id, null, false);
+  let maxTs = 0;
+  for (const [, v] of cur.kv) maxTs = Math.max(maxTs, Number(v && v.ts) || 0);
+  const now = Math.max(Date.now(), maxTs + 1);
+  const map = new Map();
+  for (const [k, v] of snap.kv) {
+    if (!v) continue;
+    map.set(k, v.del ? { del: true, ts: now, peer: 'restore' } : { v: v.v, ts: now, peer: 'restore' });
+  }
+  for (const [k, v] of cur.kv) if (!map.has(k) && v && !v.del) map.set(k, { del: true, ts: now, peer: 'restore' });
+  const list = [...map.entries()];
+  loadShow('GitHubに戻した内容を保存しています…', 36);
+  await ghPush(id, list, (d, t) => loadShow('GitHubに保存しています（' + d + '/' + t + '）', 36 + 40 * d / Math.max(1, t)));
+  await idbSet('room:' + id, list);
+  loadShow('戻した作業を反映しています…', 80);
+  if (!pw) { loadHide(); toast('GitHubの内容を戻しました。パスワードを入れて「参加する」を押すと反映されます'); return; }
+  await joinRoom(id, pw, false, '', tagVal(), null);
+  refreshShare(); renderRooms();
+  toast('過去の保存に戻しました（' + list.length + '件）');
+  close(); startIfNeeded();
+}
+// 履歴の一覧を出す（それぞれ「この時点に戻す」）
+async function showHistory() {
+  const id = (conn && conn.id) || document.getElementById('mpJoinId').value.trim();
+  if (!id) throw new Error('部屋IDを入力してください');
+  if (!ghCfg()) throw new Error('GitHubの設定を先に保存してください');
+  const box = document.getElementById('mpHist');
+  box.innerHTML = '<p class="note">履歴を読んでいます…</p>';
+  const list = await ghHistory(id);
+  box.innerHTML = '';
+  if (!list.length) { box.innerHTML = '<p class="note">この部屋の保存履歴が見つかりませんでした。</p>'; return; }
+  const note = document.createElement('p');
+  note.className = 'note';
+  note.textContent = '戻したい時点を選ぶと、その時点の全体に戻します（戻す前の内容も、履歴に残ります）。';
+  box.appendChild(note);
+  for (const h of list) {
+    const b = document.createElement('button');
+    b.className = 'btn sub';
+    b.style.margin = '3px 0';
+    const d = h.date ? new Date(h.date).toLocaleString('ja-JP') : '日時不明';
+    b.textContent = d + '　' + (h.msg || '').split('\n')[0].slice(0, 30);
+    b.addEventListener('click', async () => {
+      if (!confirm(d + ' の保存に戻します。よろしいですか？\n（戻す前の内容も、GitHub の履歴に残ります）')) return;
+      const pw = (conn && conn.id === id && conn.pw) || document.getElementById('mpJoinPw').value;
+      try { await restoreFromCommit(id, h.sha, pw); } catch (e) { loadHide(); toast(e.message || String(e)); }
+    });
+    box.appendChild(b);
+  }
 }
 window.VoxelMulti = {
   peer,
