@@ -18,6 +18,8 @@
 const FORMAT = 'voxelcraft-world';
 const VERSION = 1;
 const SEED_KEY = 'voxelcraft_world_seed';
+// この端末だけに置く情報：保存ファイルに入れない・読み込みで消さない（GitHub のトークンなど）
+const DEVICE_KEYS = ['voxelcraft_gh_v1', 'voxelcraft_gh_dirty_v1', 'voxelcraft_rooms_v1', 'voxelcraft_multi'];
 let autoDirty = false;             // ローカルの世界が変わり、まだ自動保存していない
 const IDB_NAME = 'voxelcraft', IDB_STORE = 'kv', PENDING = 'pendingWorld';
 
@@ -128,7 +130,7 @@ function buildSave() {
   const storage = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (k && k.startsWith('voxelcraft_') && k !== SEED_KEY) storage[k] = localStorage.getItem(k);
+    if (k && k.startsWith('voxelcraft_') && k !== SEED_KEY && !DEVICE_KEYS.includes(k)) storage[k] = localStorage.getItem(k);
   }
   return {
     format: FORMAT, version: VERSION, savedAt: new Date().toISOString(),
@@ -165,12 +167,13 @@ async function loadFile(file) {
   if (typeof data.version !== 'number' || data.version > VERSION) { toast('このファイルは新しい版で作られています'); return; }
   try {
     // 保存データの項目を入れ替える（ページを読み直すと、各機能がこの内容で動き出す）
+    // この端末だけの情報（GitHub のトークン・部屋の一覧など）は、ファイルの読み込みで消さない・上書きしない
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const k = localStorage.key(i);
-      if (k && k.startsWith('voxelcraft_')) localStorage.removeItem(k);
+      if (k && k.startsWith('voxelcraft_') && !DEVICE_KEYS.includes(k)) localStorage.removeItem(k);
     }
     for (const [k, v] of Object.entries(data.storage || {})) {
-      if (typeof v !== 'string') continue;
+      if (typeof v !== 'string' || DEVICE_KEYS.includes(k)) continue;
       if (k === 'voxelcraft_ext_v1' && window.VoxelExt && VoxelExt.importExtJson) await VoxelExt.importExtJson(v);
       else localStorage.setItem(k, v);
     }
