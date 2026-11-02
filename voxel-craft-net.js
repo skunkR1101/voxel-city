@@ -120,7 +120,8 @@ function notifyLinks(s) {
 // ask=true は「こちらの合言葉の確認がまだ。返事の hello をください」という合図
 function sendHello(s, L, ask) {
   if (!L.conn.open) return;
-  safeSend(L.conn, { t: 'hello', proof: s.proof, tag: s.tag, ask: !!ask });
+  // gz：こちらが圧縮を展開できるか（相手は、できる相手にだけ圧縮して全体を送る）
+  safeSend(L.conn, { t: 'hello', proof: s.proof, tag: s.tag, ask: !!ask, gz: HAS_GZ });
   L.helloSent = true;
 }
 
@@ -145,6 +146,7 @@ function onData(s, L, m) {
     }
     const first = !L.ok;
     L.ok = true;
+    L.gz = !!m.gz;
     L.name = String(m.tag || '').slice(0, 30);
     // 相手が「返事がほしい」と言ってきたとき、または初めてのときは、こちらの hello を返す
     // （片方だけ hello が届かないと、届いたほうだけが『つながった』と思い、一方通行になるため）
@@ -189,7 +191,9 @@ function splitStr(str, size) {
   return out;
 }
 const SNAP_PIECE = 60000;             // 1通の大きさ（文字数）
-const HAS_GZ = typeof CompressionStream === 'function' && typeof Response === 'function' && typeof Blob === 'function';
+// 圧縮が使えるか（iPad などの古い Safari は、Blob.stream や DecompressionStream が無いことがある）
+const HAS_GZ = typeof CompressionStream === 'function' && typeof DecompressionStream === 'function' &&
+  typeof Response === 'function' && typeof Blob === 'function' && typeof Blob.prototype.stream === 'function';
 async function gzipStr(str) {
   const bytes = new TextEncoder().encode(str);
   const buf = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
@@ -213,7 +217,8 @@ function b64ToBytes(b64) {
 async function sendSnapshot(s, L) {
   const json = JSON.stringify([...s.kv.entries()]);
   let z = 0, body = json;
-  if (HAS_GZ && json.length > 1000) {
+  // 相手が展開できると言っているときだけ圧縮する（できない相手には、そのまま送る）
+  if (HAS_GZ && L.gz && json.length > 1000) {
     try { body = bytesToB64(await gzipStr(json)); z = 1; } catch (e) { body = json; z = 0; }
   }
   const pieces = splitStr(body, SNAP_PIECE);

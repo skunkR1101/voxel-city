@@ -57,5 +57,16 @@ function showError(msg) {
 window.addEventListener('error', e => showError('エラー: ' + (e.message || '') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : '')));
 window.addEventListener('unhandledrejection', e => showError('非同期エラー: ' + (e.reason && (e.reason.message || e.reason) || '')));
 
+// 描画（WebGL）が、GPUのメモリ不足などで失われたとき（iPad などで起きやすい・白い画面の原因）
+// 自動で読み直す。読み直す前に、保存と同じ処理（pagehide）が走るので、作業は保存される
+const cv = document.getElementById('c');
+if (cv) {
+  cv.addEventListener('webglcontextlost', e => {
+    e.preventDefault();
+    showError('描画が止まりました（端末のメモリ不足の可能性）。2秒後に自動で読み直します');
+    setTimeout(() => location.reload(), 2000);
+  }, false);
+}
+
 window.VoxelFix = { syncSeed };
 })();
