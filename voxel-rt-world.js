@@ -31,6 +31,7 @@ window.setBlock = function (x, y, z, t) {
 function onBlk(key, v, meta) {
   const m = KEY_RE.exec(key);
   if (!m) return;
+  if (window.VoxelRTUnify && VoxelRTUnify.skipBlk(key)) return;   // 統一より前の変更は無視
   const t = v === undefined ? 0 : v;              // 削除は空気（0）として扱う
   if (!Number.isInteger(t) || t < 0 || t > 65535) return;
   queue.push([+m[1], +m[2], +m[3], t]);
@@ -61,6 +62,7 @@ function applyEntries(list) {
   for (const [key, e] of list) {
     const m = KEY_RE.exec(key);
     if (!m) continue;
+    if (window.VoxelRTUnify && VoxelRTUnify.skipBlk(key)) continue;
     const t = !e || e.del ? 0 : e.v;
     if (!Number.isInteger(t) || t < 0 || t > 65535) continue;
     queue.push([+m[1], +m[2], +m[3], t]);

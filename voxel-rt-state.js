@@ -156,6 +156,7 @@ function recentlyAdopted() {
 }
 // 読み込んで、再読み込みする（部屋に入り直すために、招待リンクを #に入れておく）
 function adoptAndReload(room, diffs) {
+  if (window.VoxelRTUnify && VoxelRTUnify.busy()) return;
   for (const k of Object.keys(diffs)) setLocal(k, diffs[k]);
   try { sessionStorage.setItem(ADOPT_MARK, String(Date.now())); } catch (e) {}
   const inv = L.makeInvite(location.href, room.roomId, room.password);
@@ -166,6 +167,7 @@ function adoptAndReload(room, diffs) {
 // 入ったとき：部屋に作業データが無ければ、この端末から出す。あれば、確認して読み込む
 function joinCheck(room) {
   if (rm !== room) return;
+  if (window.VoxelRTUnify && VoxelRTUnify.busy()) return;   // 統一の読み込みが先（統一の方で扱う）
   const hasRemote = KEYS.some(k => kvValue(room, k) !== null);
   if (!hasRemote) { pushLocal(room, true); return; }
   assembleBlobs(room);
@@ -182,6 +184,7 @@ function joinCheck(room) {
 // 画面を開いたまま、相手の変更が届いたとき：ボタンで反映する（画面は自動では変えない）
 function checkLive(room) {
   if (rm !== room) return;
+  if (window.VoxelRTUnify && VoxelRTUnify.busy()) { hideBanner(); return; }
   assembleBlobs(room);
   pushLocal(room);
   const diffs = remoteDiffs(room);
@@ -202,6 +205,7 @@ function buildBanner() {
   bannerBtn.style.cssText = 'background:#2e6a9a;color:#fff;border:none;border-radius:6px;padding:6px 10px;font-size:14px';
   bannerBtn.addEventListener('click', () => {
     if (!rm) return;
+    if (window.VoxelRTUnify && VoxelRTUnify.busy()) return;
     assembleBlobs(rm);
     const diffs = remoteDiffs(rm);
     if (!Object.keys(diffs).length) { hideBanner(); return; }
