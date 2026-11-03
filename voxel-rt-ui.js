@@ -410,6 +410,57 @@ function tick(now) {
 }
 
 // ---------- 起動 ----------
+// 招待リンクで開いたときは、メニューを出さずに、そのまま部屋のワールドへ入る
+// （ゲーマータグが未設定のときだけ、名前の入力を一度だけ出す）
+function enterFromInvite(inv) {
+  roomIn.value = inv.roomId;
+  passIn.value = inv.password;
+  const go = () => {
+    const name = currentName();
+    startWorldQuietly();
+    joinRoom(inv.roomId, inv.password, name);
+  };
+  if (readName()) { go(); return; }
+  askNameOnce(go);
+}
+// 開始画面（ワールド一覧・クリックして開始）を飛ばして、ゲームを始める
+function startWorldQuietly() {
+  let tries = 0;
+  const t = setInterval(() => {
+    tries++;
+    const title = document.getElementById('wsTitle');
+    const ready = window.VoxelWorld && VoxelWorld.start && title;
+    if (ready && title.style.display !== 'none') { clearInterval(t); VoxelWorld.start(); }
+    else if (ready || tries > 100) clearInterval(t);     // 既に開始済み、または見つからない
+    const ov = document.getElementById('overlay');
+    if (ov) ov.style.display = 'none';
+  }, 100);
+}
+// 名前を一度だけ聞く（最低限の画面）
+function askNameOnce(done) {
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;inset:0;z-index:95;background:rgba(8,16,28,.85);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:#14202e;color:#fff;border-radius:12px;padding:18px;width:min(92vw,360px);font:15px/1.6 system-ui,sans-serif';
+  const h = document.createElement('div'); h.textContent = 'ゲーマータグ（16文字まで）'; card.appendChild(h);
+  const input = document.createElement('input');
+  input.type = 'text'; input.placeholder = L.DEFAULT_NAME; input.maxLength = 40;
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:#1f2b38;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:10px;font-size:16px;margin:8px 0';
+  card.appendChild(input);
+  const ok = document.createElement('button'); ok.textContent = '参加する';
+  ok.style.cssText = 'width:100%;background:#2e6a9a;color:#fff;border:none;border-radius:8px;padding:12px;font-size:16px';
+  ok.addEventListener('click', () => {
+    nameIn.value = cleanText(input.value, L.NAME_MAX) || L.DEFAULT_NAME;
+    saveName(nameIn.value);
+    box.remove();
+    done();
+  });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') ok.click(); });
+  card.appendChild(ok);
+  box.appendChild(card);
+  document.body.appendChild(box);
+  setTimeout(() => input.focus(), 50);
+}
 function startUp() {
   buildCard();
   buildChat();
@@ -417,11 +468,7 @@ function startUp() {
   requestAnimationFrame(tick);
   window.addEventListener('pagehide', () => leaveRoom(false));
   const inv = L.parseInvite(location.hash);
-  if (inv) {
-    roomIn.value = inv.roomId;
-    passIn.value = inv.password;
-    joinRoom(inv.roomId, inv.password, currentName());
-  }
+  if (inv) enterFromInvite(inv);
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
