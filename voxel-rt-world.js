@@ -56,6 +56,18 @@ function pump() {
   requestAnimationFrame(step);
 }
 
+// 保存（GitHub）から読んだ変更を、画面のブロックへ反映する（送り返さない）
+function applyEntries(list) {
+  for (const [key, e] of list) {
+    const m = KEY_RE.exec(key);
+    if (!m) continue;
+    const t = !e || e.del ? 0 : e.v;
+    if (!Number.isInteger(t) || t < 0 || t > 65535) continue;
+    queue.push([+m[1], +m[2], +m[3], t]);
+  }
+  pump();
+}
+
 function attach(room) {
   if (detach) { detach(); detach = null; }
   queue.length = 0;
@@ -66,5 +78,5 @@ function attach(room) {
 }
 
 if (window.VoxelRTUI && window.VoxelRTUI.onRoom) window.VoxelRTUI.onRoom(attach);
-window.VoxelRTWorld = { attach, pending: () => queue.length };
+window.VoxelRTWorld = { attach, apply: applyEntries, pending: () => queue.length };
 })();

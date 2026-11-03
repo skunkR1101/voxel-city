@@ -69,12 +69,15 @@ class Room {
 
   // ---------- 部屋に入る ----------
   async join() {
+    let lastErr = '';
     for (let k = 0; k < SLOTS; k++) {
       let ok = false;
-      try { ok = await this.transport.claimSlot(k, this.roomId); } catch (e) { ok = false; }
+      try { ok = await this.transport.claimSlot(k, this.roomId); }
+      catch (e) { lastErr = (e && e.message) || 'error'; break; }      // 仲介サービスに届かない：席の数だけ繰り返さない
       if (ok) { this.slot = k; this.peerId = this.roomId + '-' + k; break; }
     }
-    if (!this.peerId) throw new Error('部屋がいっぱいです（8人まで）');
+    if (!this.peerId) throw new Error(lastErr ? '仲介サービスに接続できません（' + lastErr + '）' : '部屋がいっぱいです（8人まで）');
+
     this.active = true;
     this.transport.onConnection(conn => { if (this.active) this.attach(conn); });
     this.timers.push(setInterval(() => this.connectAll(), 3000));
