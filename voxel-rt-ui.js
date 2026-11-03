@@ -27,6 +27,8 @@ const LOG_MAX = 80;
 const STRIP_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]', 'g');
 
 let room = null, transport = null;
+const roomListeners = [];       // 部屋に入った・出たときに知らせる先（世界の同期など）
+function notifyRoom(rm) { for (const f of roomListeners) { try { f(rm); } catch (e) { console.error(e); } } }
 let myName = L.DEFAULT_NAME;
 let quietUntil = 0;
 let lastRejectMsg = 0;
@@ -60,7 +62,10 @@ function injectCss() {
     '#rtCard .go:disabled{opacity:.5}' +
     '#rtCard .m{font-size:12px;color:#9fb3c8;line-height:1.6;margin:6px 0 0}' +
     '#rtCard .tp{display:block;width:100%;text-align:left;background:#1f2b38;color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:8px;font-size:14px;margin-top:6px;cursor:pointer}' +
-    '#rtChat{position:fixed;left:8px;top:8px;width:min(380px,62vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
+    '#rtChat{position:fixed;left:8px;bottom:110px;width:min(340px,46vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
+    '#rtChat .hd{pointer-events:auto;display:none;width:100%;text-align:left;background:rgba(0,0,0,.55);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:4px 8px;font-size:13px}' +
+    '#rtChat.on .hd{display:block}' +
+    '#rtChat.min .log,#rtChat.min form{display:none !important}' +
     '#rtChat .log{max-height:34vh;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:2px}' +
     '#rtChat .ln{background:rgba(0,0,0,.45);color:#fff;border-radius:6px;padding:2px 8px;width:fit-content;max-width:100%;word-break:break-word;text-shadow:0 1px 2px #000}' +
     '#rtChat .ln.sys{color:#ffe600}' +
@@ -81,6 +86,9 @@ function injectCss() {
 let chatBox, chatLog, chatForm, chatInput;
 function buildChat() {
   chatBox = el('div'); chatBox.id = 'rtChat';
+  const hd = el('button', 'hd', 'チャット ▾');
+  hd.addEventListener('click', () => { const m = chatBox.classList.toggle('min'); hd.textContent = m ? 'チャット ▸' : 'チャット ▾'; });
+  chatBox.appendChild(hd);
   chatLog = el('div', 'log'); chatBox.appendChild(chatLog);
   chatForm = el('form');
   chatInput = el('input');
@@ -137,6 +145,7 @@ function buildOverlays() {
 function placeLocator() {
   if (!locBar) return;
   const hb = document.getElementById('hotbar');
+  if (hb && chatBox) chatBox.style.bottom = Math.round(window.innerHeight - hb.getBoundingClientRect().top + 34) + 'px';
   const show = !!room && remotes.size > 0 && hb;
   locBar.style.display = show ? 'block' : 'none';
   if (!show) return;
@@ -297,6 +306,7 @@ async function joinRoom(roomId, password, name) {
   const rm = VR.create({ roomId, password, name: myName, transport: tp });
   transport = tp; room = rm;
   wireRoom(rm);
+  notifyRoom(rm);
   setStatus('部屋に入っています…');
   updateButtons();
   try {
@@ -305,6 +315,7 @@ async function joinRoom(roomId, password, name) {
     setStatus('部屋に入れませんでした：' + (e && e.message || e) + (tp.lastError ? '（' + tp.lastError + '）' : ''));
     rm.leave(); tp.close();
     room = null; transport = null;
+    notifyRoom(null);
     setChatOn(false);
     updateButtons();
     return;
@@ -357,6 +368,7 @@ function leaveRoom(announce) {
   const rm = room, tp = transport;
   try { rm.ephemeral('bye:' + rm.peerId, { n: myName }); } catch (e) {}
   room = null; transport = null;
+  notifyRoom(null);
   rm.leave();
   if (tp) tp.close();
   remotes.clear();
@@ -414,5 +426,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTUI = { join: joinRoom, leave: () => leaveRoom(true), remotes: () => remotes, say: t => { chatInput.value = t; sendChat(); } };
+window.VoxelRTUI = { onRoom: fn => { roomListeners.push(fn); if (room) fn(room); }, room: () => room, join: joinRoom, leave: () => leaveRoom(true), remotes: () => remotes, say: t => { chatInput.value = t; sendChat(); } };
 })();
