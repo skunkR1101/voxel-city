@@ -145,13 +145,93 @@ async function loadRoom(room) {
   return mergeInto(room, cur.json.entries);
 }
 
+// ---------- 旧サーバーワールドの取り込み（旧版の rooms/<部屋ID>.json と .pN を読む） ----------
+const OLD_SEP = '\u0001';                    // 旧版の、分割した項目の区切り
+async function gunzipB64(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+}
+// 旧版の、1ファイルの中の項目の一覧（圧縮されているものも開く）
+async function oldFileList(o) {
+  if (!o) return [];
+  if (o.v === 3 && o.d) {
+    const j = JSON.parse(await gunzipB64(o.d));
+    return Array.isArray(j.kv) ? j.kv : [];
+  }
+  return Array.isArray(o.kv) ? o.kv : [];
+}
+// 分けて保存された項目を、元に戻す（旧版の ghAssemble と同じ考え方）
+function oldAssemble(list) {
+  const out = [];
+  const groups = new Map();
+  for (const [k, v] of list) {
+    if (!k.includes(OLD_SEP) || !v || !v.pc) { out.push([k, v]); continue; }
+    const base = k.split(OLD_SEP)[0];
+    let byTs = groups.get(base);
+    if (!byTs) { byTs = new Map(); groups.set(base, byTs); }
+    const ts = v.ts || 0;
+    let g = byTs.get(ts);
+    if (!g) { g = { n: v.pc[1], peer: v.peer, del: v.del, pieces: new Map() }; byTs.set(ts, g); }
+    g.pieces.set(v.pc[0], v.pv);
+  }
+  for (const [base, byTs] of groups) {
+    const cands = [...byTs.entries()].sort((x, y) => y[0] - x[0]);
+    for (const [ts, g] of cands) {
+      if (g.pieces.size !== g.n) continue;
+      let val;
+      try { val = JSON.parse([...Array(g.n).keys()].map(i => g.pieces.get(i)).join('')); } catch (e) { continue; }
+      out.push([base, { v: val, ts, peer: g.peer, del: g.del }]);
+      break;
+    }
+  }
+  return out;
+}
+// 旧サーバーワールドを読み、新しい形（blk:）に直す。戻り値：{entries, blocks, skipped}
+async function readOldWorld(c, oldId) {
+  const base = 'rooms/' + encodeURIComponent(oldId);
+  let list = [];
+  let found = 0;
+  for (let k = 0; k < 200; k++) {
+    const path = base + (k ? '.p' + k : '') + '.json';
+    const f = await getFile(c, path);
+    if (!f) break;
+    found++;
+    list = list.concat(await oldFileList(f.json));
+  }
+  if (!found) return null;
+  const items = oldAssemble(list);
+  const entries = [];
+  let skipped = 0;
+  for (const [key, val] of items) {
+    if (!val || typeof key !== 'string' || !key.startsWith('b:')) { skipped++; continue; }
+    const pos = key.slice(2);
+    if (val.del) { entries.push(['blk:' + pos, { ts: val.ts || 0, peer: String(val.peer || ''), del: true }]); continue; }
+    if (typeof val.v !== 'number' || !Number.isInteger(val.v)) { skipped++; continue; }   // カスタムブロック等は、今の仕組みで別に同期する
+    entries.push(['blk:' + pos, { v: val.v, ts: val.ts || 0, peer: String(val.peer || ''), del: false }]);
+  }
+  return { entries, blocks: entries.length, skipped, files: found };
+}
+async function importOldWorld(oldId) {
+  if (!rm) throw new Error('部屋に入ってから取り込んでください');
+  const c = ghCfg();
+  if (!c) throw new Error('GitHub のトークンが、この端末にありません');
+  const r = await readOldWorld(c, oldId);
+  if (!r) throw new Error('旧版の保存（rooms/' + oldId + '.json）が見つかりません（部屋IDを確かめてください）');
+  const n = mergeInto(rm, r.entries);
+  return { n, blocks: r.blocks, skipped: r.skipped, files: r.files };
+}
+
 // ---------- 画面（部屋パネルの下） ----------
-let statusEl, saveBtn, loadBtn;
+let statusEl, saveBtn, loadBtn, oldBtn;
 function setStatus(t) { if (statusEl) statusEl.textContent = t; }
 function updateButtons() {
   const on = !!rm;
   if (saveBtn) saveBtn.disabled = !on || busy;
   if (loadBtn) loadBtn.disabled = !on || busy;
+  if (oldBtn) oldBtn.disabled = !on || busy;
 }
 function buildCard() {
   const host = document.getElementById('rtCard');
@@ -170,6 +250,9 @@ function buildCard() {
   loadBtn = document.createElement('button'); loadBtn.className = 'go sub'; loadBtn.textContent = 'GitHub から読み込む';
   loadBtn.addEventListener('click', () => manualLoad());
   box.appendChild(loadBtn);
+  oldBtn = document.createElement('button'); oldBtn.className = 'go sub'; oldBtn.textContent = '旧版のサーバーワールドを取り込む';
+  oldBtn.addEventListener('click', () => manualImportOld());
+  box.appendChild(oldBtn);
   host.parentNode.insertBefore(box, host.nextSibling);
   updateButtons();
 }
@@ -178,6 +261,17 @@ async function manualSave() {
   busy = true; updateButtons(); setStatus('保存しています…');
   try { const n = await saveRoom(rm); setStatus('保存しました（' + n + ' 件）'); }
   catch (e) { setStatus('保存できませんでした：' + (e && e.message || e)); }
+  finally { busy = false; updateButtons(); }
+}
+async function manualImportOld() {
+  if (!rm) return;
+  const id = window.prompt('旧版のサーバーワールドの部屋IDを入れてください（今の部屋IDと同じなら、そのまま OK）', rm.roomId);
+  if (!id) return;
+  busy = true; updateButtons(); setStatus('旧版の保存を読んでいます…');
+  try {
+    const r = await importOldWorld(id.trim());
+    setStatus('取り込みました（ブロック ' + r.blocks + ' 件・対象外 ' + r.skipped + ' 件）。「今すぐ保存」で新しい保存先にも残せます');
+  } catch (e) { setStatus('取り込めませんでした：' + (e && e.message || e)); }
   finally { busy = false; updateButtons(); }
 }
 async function manualLoad() {
@@ -237,5 +331,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTGh = { saveRoom, loadRoom, mergeInto, ghCfg, pathOf };
+window.VoxelRTGh = { saveRoom, loadRoom, mergeInto, ghCfg, pathOf, readOldWorld, importOldWorld };
 })();
