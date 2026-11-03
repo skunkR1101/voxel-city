@@ -16,7 +16,7 @@ const TELEPORT_DIST = 8;           // これより遠くへ一気に動いたら
 let mine = null;                   // { model: { kind, text } | null, tex: dataURL | null }
 let rm = null;                     // 今の部屋
 let unsubLinks = null;
-let lastLinks = 0, lastSend = 0, resendTimer = null;
+let lastLinks = 0;
 let applySeq = 0;
 const heads = new Map();           // 相手の peer -> { id, kind, mN, tN }
 const chunks = new Map();          // "peer|id|m|t" -> Map(番号 -> データ)
@@ -85,30 +85,56 @@ function applySelf() {
   }, undefined, () => { if (seq === applySeq) { customTex = null; finish(); } });
 }
 
-// ---------- 自分のスキンを送る ----------
+// ---------- 自分のスキンを送る（少しずつ・詰まったら待つ） ----------
+// 一度にたくさん送ると、通信の送信バッファがあふれて、途中の分が届かないため
+const PACE_MS = 40;                 // 1通ごとの間隔
+const CONGESTED_BYTES = 256 * 1024; // 送信待ちがこれ以上なら、少し待つ
+const CONGEST_WAIT_MS = 150;
+let outQ = [];                      // [キー, 中身] の送信待ち
+let outTimer = null;
+let pendingRestart = false;         // 送信の途中で、新しい人が入ったら、終わったあと送り直す
+
 function splitStr(s) {
   const out = [];
   for (let i = 0; i < s.length; i += CHUNK) out.push(s.slice(i, i + CHUNK));
   return out;
 }
-function sendMySkin(room) {
-  if (!room || !room.peerId) return;
+function congested() {
+  if (!rm || !rm.links) return false;
+  for (const L of rm.links.values()) {
+    if (L.conn && (L.conn.bufferedAmount || 0) > CONGESTED_BYTES) return true;
+  }
+  return false;
+}
+// 自分のスキンの送り直し（古い送信は止めて、最初から送る）
+function enqueueSkin() {
+  if (!rm || !rm.peerId) return;
   const id = Math.random().toString(36).slice(2, 8);
   const kind = mine && mine.model ? mine.model.kind : 'default';
-  const mParts = splitStr(mine && mine.model ? mine.model.text || '' : '');
+  const mParts = splitStr(mine && mine.model ? (mine.model.text || '') : '');
   const tParts = splitStr(mine && mine.tex ? mine.tex : '');
-  mParts.forEach((d, i) => room.ephemeral('sk:' + room.peerId + ':' + id + ':m:' + i, { d }));
-  tParts.forEach((d, i) => room.ephemeral('sk:' + room.peerId + ':' + id + ':t:' + i, { d }));
-  room.ephemeral('skh:' + room.peerId, { id, kind, mN: mParts.length, tN: tParts.length });
-  lastSend = Date.now();
+  const self = rm.peerId;
+  outQ = [];
+  mParts.forEach((d, i) => outQ.push(['sk:' + self + ':' + id + ':m:' + i, { d }]));
+  tParts.forEach((d, i) => outQ.push(['sk:' + self + ':' + id + ':t:' + i, { d }]));
+  outQ.push(['skh:' + self, { id, kind, mN: mParts.length, tN: tParts.length }]);   // 最後に知らせる
+  pumpOut(0);
 }
-// 送る回数を抑える（たくさん入ってきても、2秒に1回まで）
-function scheduleSend() {
-  if (!rm) return;
-  const wait = RESEND_GAP_MS - (Date.now() - lastSend);
-  if (wait <= 0) { sendMySkin(rm); return; }
-  if (resendTimer) return;
-  resendTimer = setTimeout(() => { resendTimer = null; if (rm) sendMySkin(rm); }, wait);
+function pumpOut(wait) {
+  if (outTimer) return;
+  outTimer = setTimeout(stepOut, wait);
+}
+function stepOut() {
+  outTimer = null;
+  if (!rm) { outQ = []; return; }
+  if (!outQ.length) {
+    if (pendingRestart) { pendingRestart = false; enqueueSkin(); }
+    return;
+  }
+  if (congested()) { pumpOut(CONGEST_WAIT_MS); return; }
+  const [key, value] = outQ.shift();
+  try { rm.ephemeral(key, value); } catch (e) { console.error(e); }
+  pumpOut(PACE_MS);
 }
 
 // ---------- 相手のスキンを受け取る ----------
@@ -270,7 +296,9 @@ function frame(now) {
 // ---------- 部屋に入った・出た ----------
 function detachRoom() {
   if (unsubLinks) { unsubLinks(); unsubLinks = null; }
-  if (resendTimer) { clearTimeout(resendTimer); resendTimer = null; }
+  if (outTimer) { clearTimeout(outTimer); outTimer = null; }
+  outQ = [];
+  pendingRestart = false;
   if (rm && rm.handlers) { rm.handlers.delete('sk'); rm.handlers.delete('skh'); }
   rm = null;
   heads.clear();
@@ -286,7 +314,7 @@ function attachRoom(room) {
   // つながりが増えたら、自分のスキンを送り直す（後から入った人にも届く）
   unsubLinks = rm.onEvent((ev, data) => {
     if (ev !== 'links' || rm !== room) return;
-    if (typeof data === 'number' && data > lastLinks) scheduleSend();
+    if (typeof data === 'number' && data > lastLinks) { if (outQ.length) pendingRestart = true; else enqueueSkin(); }
     lastLinks = typeof data === 'number' ? data : 0;
   });
 }
@@ -302,7 +330,7 @@ function readAs(file, mode) {
     else r.readAsDataURL(file);
   });
 }
-function changed() { saveMine(); applySelf(); scheduleSend(); }
+function changed() { saveMine(); applySelf(); enqueueSkin(); }
 
 const modelInput = document.getElementById('modelFile');
 const texInput = document.getElementById('texFile');
@@ -339,5 +367,5 @@ applySelf();
 if (window.VoxelRTUI && window.VoxelRTUI.onRoom) window.VoxelRTUI.onRoom(attachRoom);
 requestAnimationFrame(frame);
 
-window.VoxelRTSkin = { attachRoom, resolveSpec, splitStr, joinChunks, sendMySkin };
+window.VoxelRTSkin = { attachRoom, resolveSpec, splitStr, joinChunks, enqueueSkin, pending: () => outQ.length };
 })();

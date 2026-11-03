@@ -41,6 +41,7 @@ function wrapConn(c, name) {
   return {
     peer: name,
     get open() { return !!c.open; },
+    get bufferedAmount() { const dc = c.dataChannel; return dc ? (dc.bufferedAmount || 0) : 0; },
     send(m) { c.send(m); },
     on(ev, fn) { c.on(ev, fn); },
     close() { try { c.close(); } catch (e) {} }
