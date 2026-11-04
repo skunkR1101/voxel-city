@@ -142,9 +142,12 @@ function allReady(room, diffs) {
 }
 
 // ---------- 部屋の内容と、この端末の違い ----------
+const EXT_K = 'voxelcraft_ext_v1';   // カスタムブロックの設定：ボタンなしで、すぐ反映する（checkLive で扱う）
+let extBusy = false;
 function remoteDiffs(room) {
   const out = {};
   for (const k of KEYS) {
+    if (k === EXT_K) continue;
     const rv = kvValue(room, k);
     if (rv === null) continue;
     if (rv !== getLocal(k)) out[k] = rv;
@@ -187,16 +190,25 @@ function checkLive(room) {
   if (window.VoxelRTUnify && VoxelRTUnify.busy()) { hideBanner(); return; }
   assembleBlobs(room);
   pushLocal(room);
+  // カスタムブロックの追加・カテゴリ移動は、画面を変えずにそのまま反映する
+  const rext = kvValue(room, EXT_K);
+  if (rext !== null && rext !== getLocal(EXT_K) && !extBusy && window.VoxelExt && VoxelExt.applyRemoteExt) {
+    extBusy = true;
+    Promise.resolve(VoxelExt.applyRemoteExt(rext)).then(r => {
+      extBusy = false;
+      if (r === 'applied' && rm === room) lastSeen.set(EXT_K, getLocal(EXT_K));
+    }, e => { extBusy = false; console.error(e); });
+  }
   const diffs = remoteDiffs(room);
   if (!Object.keys(diffs).length) { hideBanner(); return; }
-  showBanner(room);
+  showBanner(room);   // 道路などの変更だけ、設定メニュー内の表示で知らせる
 }
 
 // ---------- 画面 ----------
 function buildBanner() {
   banner = document.createElement('div');
   banner.id = 'rtStateBar';
-  banner.style.cssText = 'position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:70;display:none;' +
+  banner.style.cssText = 'display:none;margin-top:8px;' +
     'background:rgba(40,60,90,.95);color:#fff;border-radius:10px;padding:8px 12px;font:14px/1.5 system-ui,sans-serif;' +
     'box-shadow:0 2px 8px rgba(0,0,0,.4);max-width:92vw;align-items:center;gap:10px';
   bannerMsg = document.createElement('span');
@@ -214,7 +226,14 @@ function buildBanner() {
   });
   banner.appendChild(bannerMsg);
   banner.appendChild(bannerBtn);
-  document.body.appendChild(banner);
+  // 設定メニュー（部屋の欄）の中に置く。画面の上には出さない
+  let tries = 0;
+  const place = setInterval(() => {
+    const host = document.getElementById('rtCard');
+    tries++;
+    if (host && host.parentNode) { clearInterval(place); host.parentNode.insertBefore(banner, host.nextSibling); }
+    else if (tries > 100) clearInterval(place);
+  }, 200);
 }
 function showBanner(room) {
   if (!banner) return;

@@ -3308,9 +3308,50 @@ init();
 
 // ── 他の機能ファイル（通信・カスタム・斜め配置・見え方）が使う内部の名前を公開する ──
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
+// 相手の端末で変わったカスタムブロック（追加・削除・カテゴリ移動など）を、再読み込みなしでこの画面に反映する
+//  戻り値：'same'（同じ内容）／'applied'（反映した）／'wait'（中身の受け取りがまだ）
+const remoteDefJson = new Map();   // id -> 受け取った定義の文字列（変わったものだけ作り直すため）
+async function applyRemoteExt(text) {
+  if (typeof text !== 'string' || text === localStorage.getItem(EXT_KEY)) return 'same';
+  let s;
+  try { s = JSON.parse(text); } catch (e) { return 'same'; }
+  const rdefs = Array.isArray(s.defs) ? s.defs : [];
+  for (const d of rdefs) {
+    const refs = [d.texData, d.model && d.model.data, d.model && d.model.mtl, d.model && d.model.images];
+    for (const v of refs) if (isRef(v) && !(await blobGet(v.__blob).catch(() => null))) return 'wait';
+  }
+  const next = [];
+  for (const d of rdefs) {
+    const o = { ...d };
+    if (isRef(d.texData)) o.texData = await resolveRef(d.texData);
+    if (d.model) {
+      const m = { ...d.model };
+      if (isRef(m.data)) m.data = await resolveRef(m.data);
+      if (isRef(m.mtl)) m.mtl = await resolveRef(m.mtl);
+      if (isRef(m.images)) m.images = await resolveRef(m.images);
+      o.model = m;
+    }
+    next.push({ o, raw: JSON.stringify(d) });
+  }
+  const ids = new Set(next.map(x => x.o.id));
+  for (const d of [...ext.defs]) {
+    if (ids.has(d.id)) continue;
+    defRT.delete(d.id); delete BLOCK_INFO[d.id]; remoteDefJson.delete(d.id);
+  }
+  const changed = [];
+  for (const x of next) if (remoteDefJson.get(x.o.id) !== x.raw) { remoteDefJson.set(x.o.id, x.raw); changed.push(x.o); }
+  ext.defs.splice(0, ext.defs.length, ...next.map(x => x.o));
+  if (Array.isArray(s.categories) && s.categories.length) ext.categories = s.categories;
+  if (Array.isArray(s.colorHistory)) ext.colorHistory = s.colorHistory.slice(0, 12);
+  try { localStorage.setItem(EXT_KEY, text); } catch (e) { return 'same'; }
+  for (const d of changed) { try { await registerDef(d); } catch (e) { console.error(e); } }
+  renderInventory();
+  return 'applied';
+}
 window.VoxelExt = {
   T_TRAFFIC, T_CROWD, T_SOUND, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
-  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp
+  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp,
+  applyRemoteExt
 };
 
 })();
