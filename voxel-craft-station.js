@@ -523,6 +523,9 @@ function dispatchCheck() {
 // 毎フレーム
 // ============================================================
 function updateAll(dt) {
+  const fm = window.VoxelFrame ? VoxelFrame.mode('train') : 'local';
+  if (fm === 'remote') { applyRemoteTrains(); return; }                 // ほかの人が計算している列車は、位置だけ受け取って表示する
+  if (fm === 'owner') for (const t of trains) if (t.remoteDwell) { t.remoteDwell = false; t.state = 'run'; t.dwell = null; }   // 持ち主になったら、停車中の途中から走り直す
   rebuildWaitCoords();   // 駅の設定が変わっても取りこぼさないよう、毎回作り直す（件数は少ない）
   // 先に、各列車の位置と向きを決める（衝突判定に使う）
   for (const t of trains) if (!t.dead) updateTrainPos(t);
@@ -542,6 +545,47 @@ function updateAll(dt) {
     if (t.cars && t.shown) for (const c of t.cars) scene.remove(c.root);
     trains.splice(i, 1);
   }
+  if (fm === 'owner') publishTrains();
+}
+
+// ---- フレーム同期：持ち主が計算した列車の位置を、ほかの人が受け取って表示する ----
+const r2 = v => Math.round(v * 100) / 100;
+function ownsTrains() { return !(window.VoxelFrame && VoxelFrame.mode('train') === 'remote'); }
+function publishTrains() {
+  VoxelFrame.publish('train', () => trains.filter(t => !t.dead).map(t => {
+    const d = t.dwell;
+    return [t.id, t.line.id, t.routeId, r2(t.s), r2(t.speed), t.si, t.state, !!t.reversed,
+      d ? [d.opened ? 1 : 0, d.closing ? 1 : 0, r2(gclock - (d.openedAt || gclock)), r2(gclock - (d.closedG || gclock))] : null];
+  }));
+}
+function applyRemoteTrains() {
+  const list = (window.VoxelFrame && VoxelFrame.remote('train')) || [];
+  const byId = new Map(trains.map(t => [t.id, t]));
+  const keep = new Set();
+  for (const a of list) {
+    const [id, lineId, routeId, s, speed, si, state, reversed, dw] = a;
+    let t = byId.get(id);
+    if (!t) {
+      const L = lineById(lineId), R = L && L.routes.find(r => r.id === routeId);
+      if (!R) continue;
+      t = spawn(L, R, 0);
+      if (!t) continue;
+      t.id = id;
+    }
+    keep.add(id);
+    t.s = s; t.speed = speed; t.si = si; t.state = state; t.reversed = reversed;
+    t.remoteDwell = !!dw;
+    t.dwell = dw ? { st: t.stops[si] || null, opened: !!dw[0], closing: !!dw[1], openedAt: gclock - dw[2], closedG: gclock - dw[3], arriveG: gclock - dw[2] } : null;
+    updateTrainPos(t);
+    renderTrain(t);
+  }
+  for (const t of trains) if (!keep.has(t.id)) t.dead = true;
+  for (let i = trains.length - 1; i >= 0; i--) {
+    const t = trains[i];
+    if (!t.dead) continue;
+    if (t.cars && t.shown) for (const c of t.cars) scene.remove(c.root);
+    trains.splice(i, 1);
+  }
 }
 
 function frame(now) {
@@ -550,11 +594,11 @@ function frame(now) {
   lastFrame = now;
   if (started && !paused) {
     gclock += dt;
-    if (sdb.auto) dispatchCheck();
+    if (sdb.auto && ownsTrains()) dispatchCheck();
     updateAll(dt);
     pumpQueue();
   }
-  if (started && !paused) processPending();
+  if (started && !paused && ownsTrains()) processPending();
   refreshRail(false);
   updateBar();
 }
@@ -958,9 +1002,6 @@ window.VoxelStation = {
   clock: () => gclock,
   stations: () => sdb.stations
 };
-window.VoxelSync = window.VoxelSync || {};
-VoxelSync.station = { reload: () => { load(); rebuildWaitCoords(); renderPanel(); } };
-
 init();
 
 })();

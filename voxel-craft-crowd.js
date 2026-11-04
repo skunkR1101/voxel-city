@@ -215,7 +215,27 @@ function spawnHuman(g) {
   });
 }
 
+// ---- フレーム同期：持ち主が計算した人の位置を、ほかの人が受け取って表示する ----
+function packHuman(h) {
+  const r = v => Math.round(v * 100) / 100;
+  return [h.id, r(h.x), r(h.y), r(h.z), r(h.a), r(h.ph), h.v, h.g, r(h.sp)];
+}
+function applyRemoteCrowd() {
+  const list = (window.VoxelFrame && VoxelFrame.remote('crowd')) || [];
+  const old = new Map(C.humans.map(h => [h.id, h]));
+  C.humans = list.map(([id, x, y, z, a, ph, v, g, sp]) => {
+    const o = old.get(id);
+    const k = o ? 0.4 : 1;                                   // 受け取った位置へ、なめらかに寄せる
+    return {
+      id, v, g, a, ph, sp, dead: false,
+      x: o ? o.x + (x - o.x) * k : x, y: o ? o.y + (y - o.y) * k : y, z: o ? o.z + (z - o.z) * k : z,
+      tt: 3, tg: 0.5
+    };
+  });
+}
 function simulateCrowd(dt) {
+  const fm = window.VoxelFrame ? VoxelFrame.mode('crowd') : 'local';
+  if (fm === 'remote') { applyRemoteCrowd(); return; }
   // 人数を目標に合わせる（上限あり）
   let budget = 6;
   for (const g of C.groups) {
@@ -244,6 +264,7 @@ function simulateCrowd(dt) {
     }
   }
   C.humans = C.humans.filter(h => !h.dead);
+  if (fm === 'owner') VoxelFrame.publish('crowd', () => C.humans.map(packHuman));
 }
 
 // ============================================================

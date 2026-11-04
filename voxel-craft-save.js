@@ -140,22 +140,44 @@ function buildSave() {
     sounds: window.VoxelDia && VoxelDia.soundsWithData ? VoxelDia.soundsWithData() : []
   };
 }
+// 書き出し：大きい世界でも保存できるように、1つの長い文字列にせず、少しずつ分けて組み立てる
+//  （以前は JSON.stringify で全体を一度に作っていて、大きい世界で文字数の上限を超えていた）
 async function downloadSave() {
-  const data = buildSave();
-  // ワールドの書き出しには、大きいモデルの中身も含める（別の端末で読み込めるように）
-  if (window.VoxelExt && VoxelExt.fullExtJson && data.storage['voxelcraft_ext_v1'] !== undefined) {
-    data.storage['voxelcraft_ext_v1'] = await VoxelExt.fullExtJson();
+  try {
+    const parts = [];
+    const head = { format: FORMAT, version: VERSION, savedAt: new Date().toISOString(), seed: seedNum };
+    parts.push(JSON.stringify(head).slice(0, -1) + ',"base":{"edits":[');
+    let first = true;
+    for (const e of worldEditsIter()) { parts.push((first ? '' : ',') + JSON.stringify(e)); first = false; }
+    parts.push(']},"storage":{');
+    let firstS = true;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!(k && k.startsWith('voxelcraft_') && k !== SEED_KEY && !DEVICE_KEYS.includes(k))) continue;
+      let v = localStorage.getItem(k);
+      // ワールドの書き出しには、大きいモデルの中身も含める（別の端末で読み込めるように）
+      if (k === 'voxelcraft_ext_v1' && window.VoxelExt && VoxelExt.fullExtJson) v = await VoxelExt.fullExtJson();
+      parts.push((firstS ? '' : ',') + JSON.stringify(k) + ':' + JSON.stringify(v));
+      firstS = false;
+    }
+    parts.push('},"sounds":[');
+    const snds = window.VoxelDia && VoxelDia.soundsWithData ? VoxelDia.soundsWithData() : [];
+    snds.forEach((s, i) => parts.push((i ? ',' : '') + JSON.stringify(s)));
+    parts.push(']}');
+    const blob = new Blob(parts, { type: 'application/json' });
+    const a = document.createElement('a');
+    const d = new Date();
+    const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes());
+    a.href = URL.createObjectURL(blob);
+    a.download = `voxelcraft-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    toast('ワールドを保存しました（ダウンロード）');
+  } catch (e) {
+    console.error(e);
+    toast('保存できませんでした（ワールドが大きすぎるか、保存領域が足りません）');
   }
-  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-  const a = document.createElement('a');
-  const d = new Date();
-  const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes());
-  a.href = URL.createObjectURL(blob);
-  a.download = `voxelcraft-${stamp}.json`;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-  toast('ワールドを保存しました（ダウンロード）');
 }
 function pad(n) { return String(n).padStart(2, '0'); }
 

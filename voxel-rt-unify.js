@@ -35,7 +35,7 @@ let timers = [];
 let pressing = false;
 let adopting = false;
 const declined = new Set();
-let card = null, statusEl = null, unifyBtn = null, recvBtn = null;
+let card = null, statusEl = null, unifyBtn = null, recvBtn = null, idEl = null;
 
 function getLocal(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function setLocal(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
@@ -146,6 +146,14 @@ async function press() {
       sendAll(room, dels);
     }
     say('統一しました。同じ部屋の全員が、この端末のワールドに置き換わります');
+    // GitHub に保存しておく（全員がオフラインでも、統一IDとパスワードで、あとから再開できるように）
+    if (window.VoxelRTGh && VoxelRTGh.ghCfg && VoxelRTGh.ghCfg()) {
+      Promise.resolve().then(() => VoxelRTGh.saveRoom(room)).then(
+        () => say('統一しました。GitHub にも保存しました（統一IDとパスワードで、あとから再開できます）'),
+        e => say('統一しました。GitHub への保存は失敗しました：' + ((e && e.message) || 'エラー')));
+    } else {
+      say('統一しました。GitHub が未設定のため、部屋の人がオンラインのときだけ再開できます');
+    }
   } catch (e) {
     console.error(e);
     say('統一できませんでした：' + ((e && e.message) || 'エラー'));
@@ -252,11 +260,37 @@ function manualReceive() {
   adopt(room, e.v, e.ts, data);
 }
 
+// ---------- 統一IDを新しく作る（IDとパスワードを、ほかの人に伝えて共同で作業する） ----------
+function newWorkId() {
+  const a = new Uint8Array(8);
+  crypto.getRandomValues(a);
+  const alphabet = '0123456789abcdefghijklmnopqrstuv';
+  return 'w' + Array.from(a, b => alphabet[b & 31]).join('');
+}
+async function createWork() {
+  if (pressing) return;
+  if (!window.VoxelRTUI || !VoxelRTUI.join) { say('この画面では作れません'); return; }
+  const pw = window.prompt('新しい統一IDのパスワードを決めてください（' + PW_MIN + '文字以上）。ほかの人に、IDと一緒に伝えてください');
+  if (pw === null) return;
+  if (pw.length < PW_MIN || pw.length > PW_MAX) { say('パスワードは' + PW_MIN + '文字以上' + PW_MAX + '文字以下で入力してください'); return; }
+  const id = newWorkId();
+  const name = (localStorage.getItem('vcrt_name_v1') || '').trim() || 'プレイヤー';
+  say('統一IDを作っています…');
+  try { await VoxelRTUI.join(id, pw, name); } catch (e) { say('統一IDを作れませんでした'); return; }
+  const room = VoxelRTUI.room();
+  if (!room || room.roomId !== id) { say('統一IDを作れませんでした（部屋に入れません）'); return; }
+  // パスワードの確かめ用を、この統一IDに書く（統一するときに、同じパスワードを入力する）
+  const salt = newSalt();
+  room.set(PW, { salt, h: await hashPw(pw, salt) });
+  say('統一ID：' + id + '　（この IDとパスワードを、ほかの人に伝えてください）');
+}
+
 // ---------- 画面 ----------
 function say(msg) { setStatusText(msg); }
 function setStatusText(msg) { if (statusEl) statusEl.textContent = msg; }
 function updateUi() {
   if (!card) return;
+  idEl.textContent = rm ? '今の統一ID：' + rm.roomId : '統一IDに入ると、ここに表示されます';
   unifyBtn.disabled = !rm || pressing;
   recvBtn.style.display = busy() ? '' : 'none';
   if (!rm) setStatusText('部屋に入ると使えます。押した端末のワールドを、同じ部屋の全員に上書きします（統一用パスワードが必要）');
@@ -270,11 +304,16 @@ function buildCard() {
   card.style.marginTop = '8px';
   const h = document.createElement('h2'); h.textContent = 'ワールド作業データの統一';
   card.appendChild(h);
+  idEl = document.createElement('p'); idEl.className = 'm';
+  card.appendChild(idEl);
   statusEl = document.createElement('p'); statusEl.className = 'm';
   card.appendChild(statusEl);
   unifyBtn = document.createElement('button'); unifyBtn.className = 'go'; unifyBtn.textContent = 'ワールド作業データを統一';
   unifyBtn.addEventListener('click', () => { press(); });
   card.appendChild(unifyBtn);
+  const newBtn = document.createElement('button'); newBtn.className = 'go sub'; newBtn.textContent = '新しい統一IDを作る';
+  newBtn.addEventListener('click', () => { createWork(); });
+  card.appendChild(newBtn);
   recvBtn = document.createElement('button'); recvBtn.className = 'go sub'; recvBtn.textContent = '統一データを受け取る';
   recvBtn.style.display = 'none';
   recvBtn.addEventListener('click', () => manualReceive());

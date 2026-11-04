@@ -949,15 +949,32 @@ window.startAct = function (kind) {
 // ============================================================
 // 9. 毎フレーム
 // ============================================================
+// ---- フレーム同期：持ち主が計算した車の位置を、ほかの人が受け取って表示する ----
+function packCar(c) {
+  if (!c.fid) c.fid = Math.random().toString(36).slice(2, 10);
+  return [c.fid, c.vid, c.e, Math.round(c.s * 100) / 100, Math.round(c.sp * 100) / 100];
+}
+function applyRemoteCars() {
+  const list = (window.VoxelFrame && VoxelFrame.remote('traffic')) || [];
+  const old = new Map(S.cars.map(c => [c.fid, c]));
+  S.cars = list.map(([fid, vid, e, s, sp]) => {
+    const o = old.get(fid);
+    const sm = o && o.e === e ? o.s + (s - o.s) * 0.4 : s;   // 同じ区間の中は、なめらかにつなぐ
+    return { fid, vid, e, s: sm, sp, blocked: false, dead: false };
+  });
+}
 let lastT = performance.now();
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, Math.max(0, (now - lastT) / 1000));
   lastT = now;
-  if (started && !paused) {
+  const fm = window.VoxelFrame ? VoxelFrame.mode('traffic') : 'local';
+  if (fm === 'remote') applyRemoteCars();                 // ほかの人が計算している車は、位置だけ受け取って表示する
+  else if (started && !paused) {
     simulate(dt);
     S.spawnAcc += dt;
     if (S.spawnAcc >= S.interval) { S.spawnAcc = 0; spawnOne(); }
+    if (fm === 'owner') VoxelFrame.publish('traffic', () => S.cars.map(packCar));
   }
   renderCars();
   updateMarkers();
