@@ -380,7 +380,7 @@ function tryBlobRx() {
 tryBlobRx();
 async function ensureAll() {
   for (const d of allVariants()) if (!vrt.has(d.id)) await ensureVariant(d);
-  rebuildMain();
+  rebuildMain();   // 素材がそろったあとで、区画を作り直す（途中で作った区画に、素材のない敷設が残らないように）
   renderLists();
 }
 
@@ -495,11 +495,10 @@ function cutGeo(r, k, a, l) {
   g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
   r.cut.set(key, g);
+  // 古い切り方を捨てるとき dispose しない：まだ区画が使っている形状を消すと、線路が透明になる原因になるため
   while (r.cut.size > CUT_MAX) {
     const oldKey = r.cut.keys().next().value;
-    const og = r.cut.get(oldKey);
     r.cut.delete(oldKey);
-    if (og) og.dispose();
   }
   return g;
 }
@@ -672,11 +671,13 @@ function computePath(from, to, mid) {
   if (out.length > 2) {
     const sm2 = out.map((s, i) => {
       const a = out[Math.max(0, i - 1)].tan, c = out[Math.min(out.length - 1, i + 1)].tan;
-      return new V3(
+      const v = new V3(
         a.x * 0.25 + s.tan.x * 0.5 + c.x * 0.25,
         a.y * 0.25 + s.tan.y * 0.5 + c.y * 0.25,
         a.z * 0.25 + s.tan.z * 0.5 + c.z * 0.25
-      ).normalize();
+      );
+      // 逆向きの接線が打ち消し合ってゼロになると向きが壊れて線路が消えるので、元の接線に戻す
+      return v.lengthSq() < 1e-10 ? s.tan : v.normalize();
     });
     for (let i = 0; i < out.length; i++) out[i].tan = sm2[i];
   }
@@ -702,13 +703,19 @@ function pieceMatrix(pc, out, r) {
   return out.compose(_p, _q, _s);
 }
 
+// 数値が壊れた敷設片は描かない
+function isFinitePiece(pc) {
+  return Number.isFinite(pc.x) && Number.isFinite(pc.y) && Number.isFinite(pc.z) &&
+    Number.isFinite(pc.l) && Number.isFinite(pc.w) && pc.q.every(Number.isFinite);
+}
 // 見た目が同じもの（モデル・切り方）をまとめる。切り方は1/16マス単位にそろえて数を減らす
 function bucketize(pieces) {
   const map = new Map();
   map.incomplete = false;
   for (const pc of pieces) {
+    if (!isFinitePiece(pc)) continue;                  // 数値が壊れた敷設は描かない（見えなくなるのを防ぐ）
     const r = vrt.get(pc.v);
-    if (!r || !r.parts) continue;
+    if (!r || !r.parts) { map.incomplete = true; continue; }   // 素材がまだ届いていない：区画は作らず、あとで作り直す
     r.parts.forEach((part, k) => {
       let key, geo;
       if (r.isModel) {
@@ -901,7 +908,39 @@ function ghostMat(r, k) {
   }
   return r.ghost[k];
 }
+// 「線路・道路に実際のプレビューを表示する」（設定。オフなら、予定の敷設は立方体のつながりで表示して軽くする）
+const PREVIEW_KEY = 'vcrt_rd_preview_v1';   // 端末ごとの設定（保存データには入れない）
+function realPreviewOn() {
+  try { return localStorage.getItem(PREVIEW_KEY) !== '0'; } catch (e) { return true; }
+}
+let boxGhostMat = null;
+function boxGhost() {
+  if (!boxGhostMat) boxGhostMat = new THREE.MeshLambertMaterial({ color: 0xbfe9ff, transparent: true, opacity: 0.5, depthWrite: false });
+  return boxGhostMat;
+}
+function showBoxPreview(pieces) {
+  if (prevVid !== '__box') { clearPreview(); prevVid = '__box'; }
+  for (const rec of prevPool.values()) rec.im.visible = false;
+  const ok = pieces.filter(isFinitePiece);
+  if (!ok.length) return;
+  let rec = prevPool.get('box');
+  if (!rec || rec.cap < ok.length) {
+    if (rec) scene.remove(rec.im);
+    const cap = Math.max(64, ok.length * 2);
+    const im = new THREE.InstancedMesh(boxGeo(), boxGhost(), cap);
+    im.frustumCulled = false;
+    im.renderOrder = 6;
+    scene.add(im);
+    rec = { im, cap };
+    prevPool.set('box', rec);
+  }
+  rec.im.visible = true;
+  rec.im.count = ok.length;
+  ok.forEach((pc, i) => rec.im.setMatrixAt(i, pieceMatrix(pc, _M, { isModel: false })));
+  rec.im.instanceMatrix.needsUpdate = true;
+}
 function showPreview(pieces, vid) {
+  if (!realPreviewOn()) { showBoxPreview(pieces); return; }
   if (vid !== prevVid) { clearPreview(); prevVid = vid; }
   for (const rec of prevPool.values()) rec.im.visible = false;
   const r = vrt.get(vid);
@@ -1390,6 +1429,34 @@ window.VoxelRoad = {
   getGrid: () => rs.grid,
   getOffset: () => rs.offset
 };
+
+// 設定パネル：「線路・道路に実際のプレビューを表示する」（この端末だけの設定）
+function addPreviewSection() {
+  const sbox = document.querySelector('#settings .sbox');
+  const closeBtn = document.getElementById('settingsClose');
+  if (!sbox || !closeBtn || document.getElementById('rdPreviewToggle')) return;
+  const sec = document.createElement('div');
+  sec.innerHTML =
+    '<h3>線路・道路の敷設プレビュー</h3>' +
+    '<label class="chk"><input type="checkbox" id="rdPreviewToggle"> 線路・道路に実際のプレビューを表示する</label>' +
+    '<p class="note">オフにすると、敷設の前の半透明プレビューは立方体のつながりだけで表示し、軽くなります。敷設を確定すると、実際のモデルで敷かれます（この端末だけの設定です）。</p>';
+  sbox.insertBefore(sec, closeBtn);
+  const cb = document.getElementById('rdPreviewToggle');
+  cb.checked = realPreviewOn();
+  cb.addEventListener('change', () => {
+    try { localStorage.setItem(PREVIEW_KEY, cb.checked ? '1' : '0'); } catch (e) {}
+    clearPreview();          // 表示を作り直す
+    lastPreviewKey = '';
+  });
+}
+// 設定パネルが後から組まれることもあるので、入るまで少しずつ試す
+{
+  let tries = 0;
+  const timer = setInterval(() => {
+    addPreviewSection();
+    if (document.getElementById('rdPreviewToggle') || ++tries > 60) clearInterval(timer);
+  }, 500);
+}
 
 })();
 
