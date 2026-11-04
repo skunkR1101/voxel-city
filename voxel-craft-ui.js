@@ -355,7 +355,8 @@ window.VoxelSpeed = { get: () => speedK, set: setSpeed };
     if (Number.isFinite(s.yaw)) player.yaw = s.yaw;
     if (Number.isFinite(s.pitch)) player.pitch = s.pitch;
     player.vel.set(0, 0, 0);
-    if (Array.isArray(s.hotbar)) s.hotbar.forEach((id, i) => { if (i < HOTBAR.length && Number.isInteger(id)) HOTBAR[i] = id; });
+    // 名前の分からないブロック（ほかの世界のカスタムブロックなど）は入れない（選ぶと止まるのを防ぐ）
+    if (Array.isArray(s.hotbar)) s.hotbar.forEach((id, i) => { if (i < HOTBAR.length && Number.isInteger(id) && BLOCK_INFO[id]) HOTBAR[i] = id; });
     if (Number.isInteger(s.sel) && s.sel >= 0 && s.sel < HOTBAR.length) selectSlot(s.sel);
     VoxelExt.refreshHotbarVisuals && VoxelExt.refreshHotbarVisuals();
   }
