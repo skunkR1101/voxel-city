@@ -110,7 +110,8 @@ function dedupeDefs() {
   if (typeof renderInventory === 'function') renderInventory();
   return true;
 }
-setInterval(() => { try { dedupeDefs(); } catch (e) { console.error(e); } }, 2000);
+// 自動の整理（同じ中身の番号を付け替える）は止める：端末ごとに番号が変わり、
+// 部屋の配置と食い違って、別のブロックに見える原因になるため。（dedupeDefs は使わない）
 
 // ============================================================
 // 3. 送る側：定義（中身）を部屋へ送り、ブロックには「しるし＋状態」だけを載せる
