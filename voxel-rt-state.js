@@ -115,13 +115,13 @@ function blobReady(room, key) {
   const meta = remoteMetaOf(room, key);
   return !!meta && localFpOf(key) === meta.fp;
 }
-function assembleBlobs(room) {
+function assembleBlobs(room, force) {
   for (const k of KEYS) {
     const remote = kvValue(room, k);
     if (!remote) continue;
     for (const key of refsOf(remote)) {
       const meta = remoteMetaOf(room, key);
-      if (!meta || localFpOf(key) === meta.fp) continue;
+      if (!meta || (!force && localFpOf(key) === meta.fp)) continue;   // force: 統一のときは、この端末の同じ名前の中身も書き直す
       let text = '';
       let complete = true;
       for (let i = 0; i < meta.n; i++) {
@@ -250,5 +250,6 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTState = { KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length };
+window.VoxelRTState = { KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length,
+  forgetSent: () => sentFp.clear() };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
 })();

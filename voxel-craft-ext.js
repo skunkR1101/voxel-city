@@ -186,27 +186,39 @@ function writeBlob(key, val) {
   });
 }
 // 定義の中身を「軽い形」にする：大きい文字列は IndexedDB のキーに置き換える
+function contentKey(s) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = Math.imul(h2 + c, 2246822519) >>> 0;
+  }
+  return 'h' + s.length.toString(36) + '-' + h1.toString(36) + '-' + h2.toString(36);
+}
 function lightenDefs(defs) {
   const live = new Set(), pending = [];
   const put = (key, v) => { const pr = writeBlob(key, v); if (pr) pending.push(pr); };
-  const ref = (key, v) => {
+  // 中身から決まるキー（同じ中身なら同じキー）。端末ごとの番号で付けると、別の端末の中身と取り違えるため
+  const ref = (_unused, v) => {
     if (isRef(v)) { live.add(v.__blob); return v; }
     if (typeof v !== 'string' || v.length < BIG_TEXT) return v;
+    const key = contentKey(v);
     live.add(key); put(key, v);
     return { __blob: key };
   };
   const out = defs.map(d => {
     const o = { ...d };
-    if (d.texData !== undefined) o.texData = ref(d.id + ':tex', d.texData);
+    if (d.texData !== undefined) o.texData = ref(null, d.texData);
     if (d.model) {
       const m = { ...d.model };
-      m.data = ref(d.id + ':mdl', m.data);
-      if (m.mtl !== undefined) m.mtl = ref(d.id + ':mtl', m.mtl);
+      m.data = ref(null, m.data);
+      if (m.mtl !== undefined) m.mtl = ref(null, m.mtl);
       if (isRef(m.images)) { live.add(m.images.__blob); }
       else if (m.images && typeof m.images === 'object' && Object.keys(m.images).length) {
-        live.add(d.id + ':img');
-        put(d.id + ':img', JSON.stringify(m.images));
-        m.images = { __blob: d.id + ':img', json: true };
+        const s = JSON.stringify(m.images), k = contentKey(s);
+        live.add(k);
+        put(k, s);
+        m.images = { __blob: k, json: true };
       } else m.images = undefined;
       o.model = m;
     }

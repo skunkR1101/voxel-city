@@ -112,7 +112,10 @@ async function press() {
   pressing = true; updateUi();
   try {
     say('統一データを準備しています…');
-    if (window.VoxelRTState && VoxelRTState.pushLocal) VoxelRTState.pushLocal(room, true);
+    if (window.VoxelRTState && VoxelRTState.pushLocal) {
+      VoxelRTState.forgetSent && VoxelRTState.forgetSent();   // 中身（テクスチャなど）も、すべて送り直す
+      VoxelRTState.pushLocal(room, true);
+    }
     // 作業データの送信が終わるまで待つ（最大1分）
     for (let i = 0; i < 300 && window.VoxelRTState && VoxelRTState.pending() > 0; i++) {
       await new Promise(r => setTimeout(r, 200));
@@ -171,7 +174,8 @@ function readyFor(room, gen) {
   const diffs = {};
   for (const k of KEYS) if (typeof data.ws[k] === 'string') diffs[k] = data.ws[k];
   if (window.VoxelRTState) {
-    VoxelRTState.assembleBlobs(room);
+    // 統一の中身は、この端末の同じ名前の中身より優先して書き直す（名前が同じでも別の中身のことがあるため）
+    VoxelRTState.assembleBlobs(room, true);
     if (!VoxelRTState.allReady(room, diffs)) return null;
   }
   return data;
