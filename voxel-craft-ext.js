@@ -3310,9 +3310,16 @@ init();
 // ext.js は1つの関数の中に閉じているため、外のファイルからは見えない。そこで window.VoxelExt にまとめて渡す。
 // 相手の端末で変わったカスタムブロック（追加・削除・カテゴリ移動など）を、再読み込みなしでこの画面に反映する
 //  戻り値：'same'（同じ内容）／'applied'（反映した）／'wait'（中身の受け取りがまだ）
-const remoteDefJson = new Map();   // id -> 受け取った定義の文字列（変わったものだけ作り直すため）
+// 相手の内容は「足す」だけにする。番号・分類・見た目を、相手の内容で置き換えない：
+//  ・ブロックは中身（しるし）で照らし合わせ、同じ中身はこの端末の番号をそのまま使う
+//  ・知らない中身は、この端末の空き番号で新しく足す（相手の番号は使わない。番号は端末ごとに違うため）
+//  ・この端末に無いものを理由なく消さない（消すのは、この端末で削除したものだけ）
+//  ・分類は足すだけ。ブロックの分類が変わったときだけ、その分類へ動かす
+//  戻り値：'same'（変わらない）／'applied'（足した・動かした）／'wait'（中身の受け取りがまだ）
+let lastRemoteExtText = null;      // 最後に処理した相手の内容（同じものを何度も処理しない）
 async function applyRemoteExt(text) {
-  if (typeof text !== 'string' || text === localStorage.getItem(EXT_KEY)) return 'same';
+  if (typeof text !== 'string' || text === localStorage.getItem(EXT_KEY) || text === lastRemoteExtText) return 'same';
+  if (!window.VoxelCustom) return 'same';
   let s;
   try { s = JSON.parse(text); } catch (e) { return 'same'; }
   const rdefs = Array.isArray(s.defs) ? s.defs : [];
@@ -3320,7 +3327,14 @@ async function applyRemoteExt(text) {
     const refs = [d.texData, d.model && d.model.data, d.model && d.model.mtl, d.model && d.model.images];
     for (const v of refs) if (isRef(v) && !(await blobGet(v.__blob).catch(() => null))) return 'wait';
   }
-  const next = [];
+  let changed = false;
+  const added = [];
+  // 分類：足すだけ
+  if (Array.isArray(s.categories)) {
+    for (const c of s.categories) {
+      if (typeof c === 'string' && c && !ext.categories.includes(c)) { ext.categories.push(c); changed = true; }
+    }
+  }
   for (const d of rdefs) {
     const o = { ...d };
     if (isRef(d.texData)) o.texData = await resolveRef(d.texData);
@@ -3331,21 +3345,29 @@ async function applyRemoteExt(text) {
       if (isRef(m.images)) m.images = await resolveRef(m.images);
       o.model = m;
     }
-    next.push({ o, raw: JSON.stringify(d) });
+    const H = VoxelCustom.defHash(o);
+    const have = ext.defs.find(x => VoxelCustom.defHash(x) === H);
+    if (have) {
+      // 同じ中身：分類だけ、相手が動かしていれば合わせる（この端末に無い分類へは動かさない）
+      if (o.category && o.category !== have.category && ext.categories.includes(o.category)) {
+        have.category = o.category; changed = true;
+      }
+      continue;
+    }
+    if (VoxelCustom.isForgotten(H)) continue;          // この端末で消したものは戻さない
+    const id = nextId();
+    if (id < 0) continue;                              // 上限：無理に置き換えない
+    if (o.category && !ext.categories.includes(o.category)) ext.categories.push(o.category);
+    const nd = { ...o, id };
+    ext.defs.push(nd);
+    added.push(nd); changed = true;
   }
-  const ids = new Set(next.map(x => x.o.id));
-  for (const d of [...ext.defs]) {
-    if (ids.has(d.id)) continue;
-    defRT.delete(d.id); delete BLOCK_INFO[d.id]; remoteDefJson.delete(d.id);
-  }
-  const changed = [];
-  for (const x of next) if (remoteDefJson.get(x.o.id) !== x.raw) { remoteDefJson.set(x.o.id, x.raw); changed.push(x.o); }
-  ext.defs.splice(0, ext.defs.length, ...next.map(x => x.o));
-  if (Array.isArray(s.categories) && s.categories.length) ext.categories = s.categories;
-  if (Array.isArray(s.colorHistory)) ext.colorHistory = s.colorHistory.slice(0, 12);
-  try { localStorage.setItem(EXT_KEY, text); } catch (e) { return 'same'; }
-  for (const d of changed) { try { await registerDef(d); } catch (e) { console.error(e); } }
+  if (!changed) { lastRemoteExtText = text; return 'same'; }
+  if (Array.isArray(s.colorHistory) && !(ext.colorHistory && ext.colorHistory.length)) ext.colorHistory = s.colorHistory.slice(0, 12);
+  saveExt();                                           // この端末の形で保存（この端末の内容を書き換えるのは、足した分だけ）
+  for (const d of added) { try { await registerDef(d); } catch (e) { console.error(e); } }
   renderInventory();
+  lastRemoteExtText = text;
   return 'applied';
 }
 window.VoxelExt = {

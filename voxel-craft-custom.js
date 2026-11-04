@@ -304,20 +304,24 @@ VoxelMulti.onOp('cdcat', rec => {
     if (typeof renderInventory === 'function') renderInventory();
   }
 });
+// 分類の一覧は「足す」だけにする。相手の一覧で、こちらの分類や各ブロックの分類を消さない
+// （以前は一覧を丸ごと置き換え、知らない分類のブロックを「未分類」に戻していた）
 VoxelMulti.onOp('catl', rec => {
   if (rec.del || !rec.v || !Array.isArray(rec.v.list)) return;
-  const list = rec.v.list.filter(x => typeof x === 'string' && x);
-  if (!list.includes('未分類')) list.push('未分類');
-  ext.categories = list;
-  // 分類の一覧が届いたら、各ブロックの分類を直す（届いている分類を優先し、無いものは未分類）
+  let changed = false;
+  for (const c of rec.v.list) {
+    if (typeof c === 'string' && c && !ext.categories.includes(c)) { ext.categories.push(c); changed = true; }
+  }
+  if (!ext.categories.includes('未分類')) { ext.categories.push('未分類'); changed = true; }
   for (const d of ext.defs) {
     if (d.id < CUSTOM_BASE) continue;
     const c = catOf.get(defHash(d));
-    if (c && list.includes(c)) d.category = c;
-    else if (!list.includes(d.category)) d.category = '未分類';
+    if (c && c !== d.category && ext.categories.includes(c)) { d.category = c; changed = true; }
   }
-  saveExt();
-  if (typeof renderInventory === 'function') renderInventory();
+  if (changed) {
+    saveExt();
+    if (typeof renderInventory === 'function') renderInventory();
+  }
 });
 
 async function adoptDef(H, p) {
@@ -365,6 +369,7 @@ window.VoxelCustom = {
   localIdFor: H => { const d = defByHash(H); return d ? d.id : null; },
   onAdopt: fn => adoptListeners.push(fn),
   forget: forgetDef,                                        // 削除したとき（この端末・部屋の記録から外す）
-  unforget: unforgetDef                                     // 同じ中身を新しく作ったとき
+  unforget: unforgetDef,                                    // 同じ中身を新しく作ったとき
+  isForgotten: H => forgotten.has(H)                        // この端末で消したものか（消したものだけ、部屋の内容で外す）
 };
 })();
