@@ -115,6 +115,10 @@ function saveAll() {
       if (v.model && v.model.data && !v.model.key) { v.model.key = 'road:mdl:' + v.id; queueBlob(v.model.key, v.model.data); }
       o.texKey = v.texKey || null;
       o.model = v.model ? { format: v.model.format, key: v.model.key || null } : null;
+      o.aid = v.aid || null;
+      // 素材（テクスチャ・モデル）の参照を、部屋の同期が認識する形でも書く。
+      // これで統一・参加のときに、素材もいっしょに相手へ届く（以前は届かず、線路・道路が相手に出なかった）
+      o.blobRefs = [v.texKey, v.model && v.model.key].filter(Boolean).map(k => ({ __blob: k }));
       return o;
     });
     localStorage.setItem(KEY, JSON.stringify({
@@ -131,7 +135,7 @@ function saveAll() {
 function loadAll() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY) || '{}');
-    if (Array.isArray(s.variants)) st.variants = s.variants;
+    if (Array.isArray(s.variants)) st.variants = s.variants.map(v => (v && !v.aid ? { ...v, aid: newAid() } : v));
     if (Array.isArray(s.pieces)) {
       st.pieces = s.pieces.map((p, i) => ({
         v: p.v, kind: p.kind, w: p.w, x: p.x, y: p.y, z: p.z, q: p.q, l: p.l,
@@ -382,6 +386,107 @@ async function ensureAll() {
   for (const d of allVariants()) if (!vrt.has(d.id)) await ensureVariant(d);
   rebuildMain();   // 素材がそろったあとで、区画を作り直す（途中で作った区画に、素材のない敷設が残らないように）
   renderLists();
+}
+// 素材の受け取りを待っている線路・道路を、数秒ごとに読み直す（届いたら、そのまま表示されるように）
+let retrying = false;
+async function retryWaiting() {
+  if (retrying) return;
+  retrying = true;
+  try {
+    let changed = false;
+    for (const d of st.variants.slice()) {
+      const r = vrt.get(d.id);
+      if (!r || !r.wait) continue;
+      await ensureVariant(d);
+      const now = vrt.get(d.id);
+      if (now && !now.wait) changed = true;
+    }
+    if (changed) { rebuildMain(); renderLists(); }
+  } finally {
+    retrying = false;
+  }
+}
+setInterval(() => { retryWaiting().catch(() => {}); }, 3000);
+
+// ============================================================
+// アセット（線路・道路のバリエーション）の保存・読み込み。カスタムブロックと同じ考え方（同じ印＝同じもの）
+// ============================================================
+function newAid() { return 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9); }
+function uniqueName(base, names) {
+  for (let n = 1; ; n++) {
+    const c = `${base}(${n})`;
+    if (!names.includes(c)) return c;
+  }
+}
+async function resolvedVariant(v) {
+  const texData = v.texData || (v.texKey ? await blobGetSafe(v.texKey) : null);
+  let model = null;
+  if (v.model) {
+    const data = v.model.data || (v.model.key ? await blobGetSafe(v.model.key) : null);
+    if (data) model = { format: v.model.format, data };
+  }
+  return { aid: v.aid, kind: v.kind, name: v.name, scale: v.scale || null, texData: texData || null, model };
+}
+function sameAsset(a, b) {
+  return a.kind === b.kind && a.name === b.name && (a.scale || null) === (b.scale || null) &&
+    (a.texData || null) === (b.texData || null) &&
+    ((a.model && a.model.data) || null) === ((b.model && b.model.data) || null);
+}
+async function setVariantContent(v, c) {
+  v.kind = c.kind;
+  v.name = c.name;
+  v.scale = c.scale || undefined;
+  v.texData = c.texData || null;
+  v.texKey = v.texData ? 'road:tex:' + v.id : null;
+  if (v.texKey) queueBlob(v.texKey, v.texData);
+  v.model = c.model && c.model.data ? { format: c.model.format || 'obj', key: 'road:mdl:' + v.id, data: c.model.data } : null;
+  if (v.model) queueBlob(v.model.key, v.model.data);
+}
+async function exportAssets() {
+  let changed = false;
+  for (const v of st.variants) if (!v.aid) { v.aid = newAid(); changed = true; }
+  if (changed) saveAll();
+  const out = [];
+  for (const v of st.variants) out.push(await resolvedVariant(v));
+  return out;
+}
+// 同じIDで中身が違うものの数（読み込む前に、上書きか名前変更かを聞くため）
+async function assetConflicts(list) {
+  let n = 0;
+  for (const c of list) {
+    if (!c || !c.aid) continue;
+    const have = st.variants.find(v => v.aid === c.aid);
+    if (have && !sameAsset(await resolvedVariant(have), c)) n++;
+  }
+  return n;
+}
+async function importAssets(list, mode) {
+  const r = { added: 0, over: 0, ren: 0, same: 0 };
+  for (const c of list) {
+    if (!c || typeof c.name !== 'string' || !['road', 'rail'].includes(c.kind)) continue;
+    const have = c.aid ? st.variants.find(v => v.aid === c.aid) : null;
+    if (have && sameAsset(await resolvedVariant(have), c)) { r.same++; continue; }
+    if (have && mode === 'overwrite') {
+      disposeVrt(vrt.get(have.id));
+      vrt.delete(have.id);
+      await setVariantContent(have, c);
+      await ensureVariant(have);
+      r.over++;
+      continue;
+    }
+    const v = {
+      id: uid(), aid: have || !c.aid ? newAid() : c.aid, kind: c.kind, name: c.name, builtin: false
+    };
+    if (have) v.name = uniqueName(c.name, st.variants.map(x => x.name));   // 同じIDで中身が違う → (1)などを付けて追加
+    await setVariantContent(v, c);
+    st.variants.push(v);
+    await ensureVariant(v);
+    if (have) r.ren++; else r.added++;
+  }
+  saveAll();
+  rebuildMain();
+  renderLists();
+  return r;
 }
 
 // ============================================================
@@ -1210,7 +1315,7 @@ async function addVariant() {
     return;
   }
   const scale = Number(scaleStr);
-  const def = { id: uid(), kind, name, texData, model, builtin: false, scale: (scaleStr && scale > 0) ? scale : undefined };
+  const def = { id: uid(), aid: newAid(), kind, name, texData, model, builtin: false, scale: (scaleStr && scale > 0) ? scale : undefined };
   if (def.model) def.model.key = null;
   status.textContent = 'モデルを読み込み中…';
   await ensureVariant(def);
@@ -1409,6 +1514,8 @@ function buildUI() {
 // ============================================================
 function init() {
   loadAll();
+  // 以前の保存形式（素材の参照なし）のものも、一度書き直して、統一・参加で素材が届くようにする
+  if (st.variants.some(v => !v.builtin && (v.texKey || (v.model && v.model.key)))) saveAll();
   buildUI();
   markerCur = makeMarker(0x66e0ff);
   markerPend = makeMarker(0xffd84a);
@@ -1427,7 +1534,8 @@ init();
 window.VoxelRoad = {
   surfacePoint, computePath, Y_LIFT,
   getGrid: () => rs.grid,
-  getOffset: () => rs.offset
+  getOffset: () => rs.offset,
+  exportAssets, assetConflicts, importAssets        // アセットの保存・読み込み（voxel-craft-ext.js の設定から使う）
 };
 
 // 設定パネル：「線路・道路に実際のプレビューを表示する」（この端末だけの設定）

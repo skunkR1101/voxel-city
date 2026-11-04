@@ -2324,7 +2324,7 @@ async function saveDraft() {
   const id = nextId();
   if (id < 0) { toast('登録できるカスタムブロックの上限に達しました'); return; }
   const def = {
-    id, name: draft.name, kind: draft.kind, category: draft.category, colorable: draft.colorable,
+    id, aid: newAid(), name: draft.name, kind: draft.kind, category: draft.category, colorable: draft.colorable,
     texData: draft.kind === 'cube' ? draft.texData : draft.modelTex,
     model: draft.kind === 'model' ? {
       format: draft.model.format, data: draft.model.data,
@@ -2342,13 +2342,229 @@ async function saveDraft() {
   if (window.VoxelCustom && VoxelCustom.unforget) VoxelCustom.unforget(VoxelCustom.defHash(def));
   await registerDef(def);
   if (window.VoxelFx && VoxelFx.apply) VoxelFx.apply(def);
+  if (bulk) {
+    // 一括作成：次のものへ（設定は次にも引き継ぐ。もちろん次で変えられる）
+    bulk.done++;
+    bulk.keep = pickKeep(draft);
+    bulk.i++;
+    toast(`「${name}」を登録しました`);
+    if (bulk.i >= bulk.items.length) { bulkFinish(); return; }
+    await bulkShow();
+    return;
+  }
   closeImport();
   renderInventory();
   toast(`「${name}」を登録しました`);
 }
 function closeImport() {
   draft = null;
+  bulk = null;
+  const bb = document.getElementById('extBulkBar'); if (bb) bb.style.display = 'none';
+  const sv = document.getElementById('extSave'); if (sv) sv.textContent = '保存して登録';
   closePanel();
+}
+
+// ============================================================
+// 一括作成：選んだ複数のファイルを、1つずつ同じ作成画面で設定して登録する
+// ============================================================
+let bulk = null;                                     // { items, i, done, keep }
+function baseName(n) { return String(n).replace(/\.[^.]+$/, ''); }
+function pickKeep(d) {
+  return { category: d.category, colorable: d.colorable, look: d.look, glow: d.glow, orient: d.orient,
+    modelRot: d.modelRot, scaleMode: d.scaleMode, customScale: d.customScale, sounds: d.sounds };
+}
+async function modelItemsFrom(files) {
+  const extOf = f => f.name.split('.').pop().toLowerCase();
+  // 同じ名前（拡張子を除く）のものを対応づける：.mtl はマテリアル、同名の画像はテクスチャ
+  const mtls = new Map(), pngs = new Map(), imgs = {}, mains = [];
+  for (const f of files) {
+    const x = extOf(f);
+    if (x === 'mtl') mtls.set(baseName(f.name).toLowerCase(), await readAs(f, 'text'));
+    else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(x)) {
+      const d = await readAs(f, 'dataurl');
+      imgs[f.name.toLowerCase()] = d;
+      pngs.set(baseName(f.name).toLowerCase(), d);
+    } else if (['obj', 'fbx', 'json', 'bbmodel'].includes(x)) mains.push(f);
+  }
+  const out = [];
+  for (const f of mains) {
+    const x = extOf(f);
+    const format = x === 'obj' ? 'obj' : x === 'fbx' ? 'fbx' : 'json';
+    const data = format === 'fbx' ? await readAs(f, 'dataurl') : await readAs(f, 'text');
+    const mdl = { format, data };
+    const key = baseName(f.name).toLowerCase();
+    const mtl = mtls.get(key);
+    if (mtl !== undefined) { mdl.mtl = mtl; mdl.images = { ...imgs }; }
+    const item = { kind: 'model', name: baseName(f.name), model: mdl };
+    if (mtl === undefined && pngs.has(key)) item.modelTex = pngs.get(key);   // 同名のPNGは、そのモデルのテクスチャにする
+    out.push(item);
+  }
+  return out;
+}
+function startBulk(items) {
+  if (!items.length) return;
+  bulk = { items, i: 0, done: 0, keep: null };
+  draft = newDraft();
+  openPanel('extImport');
+  bulkShow();
+}
+async function bulkShow() {
+  const it = bulk.items[bulk.i];
+  draft = newDraft();
+  if (bulk.keep) Object.assign(draft, JSON.parse(JSON.stringify(bulk.keep)));
+  draft.kind = it.kind;
+  draft.name = it.name;
+  if (it.kind === 'cube') draft.texData = it.texData;
+  else { draft.model = it.model; draft.modelTex = it.modelTex || null; draft.resolvedScale = null; }
+  fillImportForm();
+  if (it.kind === 'model') await rebuildDraftTemplate();
+  document.getElementById('extBulkBar').style.display = 'flex';
+  document.getElementById('extBulkMsg').textContent =
+    `一括作成 ${bulk.i + 1} / ${bulk.items.length}：${it.name}（保存すると次へ進みます）`;
+  document.getElementById('extSave').textContent = '保存して次へ';
+}
+async function bulkSkip() {
+  if (!bulk) return;
+  bulk.i++;
+  if (bulk.i >= bulk.items.length) { bulkFinish(); return; }
+  await bulkShow();
+}
+function bulkStop() {
+  if (!bulk) return;
+  bulkFinish(`一括作成を中止しました（${bulk.done} 個登録済み）`);
+}
+function bulkFinish(msg) {
+  const n = bulk ? bulk.done : 0;
+  bulk = null;
+  closeImport();
+  renderInventory();
+  toast(msg || `一括で ${n} 個登録しました`);
+}
+
+// ============================================================
+// アセット（カスタムブロック・線路・道路）の保存と読み込み
+// ============================================================
+function newAid() { return 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9); }
+function uniqueName(base, names) {
+  for (let n = 1; ; n++) {
+    const c = `${base}(${n})`;
+    if (!names.includes(c)) return c;
+  }
+}
+async function resolvedDef(d) {
+  const o = { ...d };
+  delete o.id;
+  if (d.texData !== undefined) o.texData = await resolveRef(d.texData);
+  if (d.model) {
+    const m = { ...d.model };
+    m.data = await resolveRef(m.data);
+    if (m.mtl !== undefined) m.mtl = await resolveRef(m.mtl);
+    if (m.images !== undefined) m.images = await resolveRef(m.images);
+    o.model = m;
+  }
+  return o;
+}
+async function exportAssets() {
+  let changed = false;
+  for (const d of ext.defs) if (!d.aid) { d.aid = newAid(); changed = true; }
+  if (changed) saveExt();
+  const head = JSON.stringify({ format: 'voxelcraft-assets', version: 1, exportedAt: new Date().toISOString(),
+    categories: ext.categories.slice() });
+  const parts = [head.slice(0, -1) + ',"customs":['];
+  let first = true;
+  for (const d of ext.defs) {
+    if (d.id < CUSTOM_BASE) continue;
+    const o = await resolvedDef(d);
+    parts.push((first ? '' : ',') + JSON.stringify(o));
+    first = false;
+  }
+  parts.push('],"roads":');
+  const roads = window.VoxelRoad && VoxelRoad.exportAssets ? await VoxelRoad.exportAssets() : [];
+  parts.push(JSON.stringify(roads) + '}');
+  const blob = new Blob(parts, { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  a.href = url;
+  a.download = `voxelcraft-assets-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  toast(`保存しました（カスタムブロック ${ext.defs.length} 個・線路・道路 ${roads.length} 個）`);
+}
+let conflictResolve = null;
+function askConflict(n) {
+  return new Promise(res => {
+    conflictResolve = res;
+    document.getElementById('extConflictMsg').textContent =
+      `同じIDのブロックが ${n} 個あります（中身が違います）。この読み込みで見つかった分は、すべて同じ方法で処理します。`;
+    openPanel('extConflict');
+  });
+}
+function resolveConflict(v) {
+  const r = conflictResolve;
+  conflictResolve = null;
+  closePanel();
+  if (r) r(v);
+}
+const DEF_FIELDS = ['name', 'kind', 'colorable', 'texData', 'model', 'orient', 'modelRot', 'scale', 'alpha', 'glowPower'];
+async function importAssets(file) {
+  let s;
+  try { s = JSON.parse(await readAs(file, 'text')); } catch (e) { toast('ファイルを読めませんでした'); return; }
+  if (!s || s.format !== 'voxelcraft-assets') { toast('アセットファイルではありません'); return; }
+  const customs = Array.isArray(s.customs) ? s.customs : [];
+  const roads = Array.isArray(s.roads) ? s.roads : [];
+  // 同じIDで中身が違うものの数（ブロック＋線路・道路）
+  let conflicts = 0;
+  for (const c of customs) {
+    if (!c.aid) continue;
+    const have = ext.defs.find(d => d.aid === c.aid);
+    if (have && VoxelCustom.defHash(c) !== VoxelCustom.defHash(have)) conflicts++;
+  }
+  const roadConflicts = window.VoxelRoad && VoxelRoad.assetConflicts ? await VoxelRoad.assetConflicts(roads) : 0;
+  let mode = 'rename';
+  if (conflicts + roadConflicts > 0) {
+    mode = await askConflict(conflicts + roadConflicts);
+    if (!mode) { toast('読み込みを取り消しました'); return; }
+  }
+  let added = 0, over = 0, ren = 0, same = 0;
+  for (const c of customs) {
+    const H = VoxelCustom.defHash(c);
+    const byAid = c.aid ? ext.defs.find(d => d.aid === c.aid) : null;
+    if (byAid && VoxelCustom.defHash(byAid) === H) { same++; continue; }
+    if (!byAid && ext.defs.some(d => VoxelCustom.defHash(d) === H)) { same++; continue; }
+    if (byAid && mode === 'overwrite') {
+      for (const k of DEF_FIELDS) byAid[k] = c[k];
+      byAid.sounds = c.sounds || { break: { type: 'none' }, place: { type: 'none' } };
+      if (c.category && !ext.categories.includes(c.category)) ext.categories.push(c.category);
+      byAid.category = c.category || byAid.category;
+      VoxelCustom.invalidate(byAid);
+      VoxelCustom.unforget(H);
+      await registerDef(byAid);
+      over++;
+      continue;
+    }
+    const id = nextId();
+    if (id < 0) { toast('カスタムブロックの上限に達したため、残りを読み込めませんでした'); break; }
+    const isCopy = !!byAid;                              // 同じIDで中身が違う → 名前を変えて追加
+    const nd = { ...c, id, aid: isCopy || !c.aid ? newAid() : c.aid,
+      name: isCopy ? uniqueName(c.name || 'カスタムブロック', ext.defs.map(d => d.name)) : (c.name || 'カスタムブロック'),
+      sounds: c.sounds || { break: { type: 'none' }, place: { type: 'none' } } };
+    if (!nd.category || !ext.categories.includes(nd.category)) {
+      if (nd.category) ext.categories.push(nd.category); else nd.category = ext.categories[0] || '未分類';
+    }
+    ext.defs.push(nd);
+    VoxelCustom.unforget(H);
+    await registerDef(nd);
+    if (isCopy) ren++; else added++;
+  }
+  if (Array.isArray(s.categories)) for (const c of s.categories) if (typeof c === 'string' && c && !ext.categories.includes(c)) ext.categories.push(c);
+  saveExt();
+  renderInventory();
+  let rr = { added: 0, over: 0, ren: 0, same: 0 };
+  if (roads.length && window.VoxelRoad && VoxelRoad.importAssets) rr = await VoxelRoad.importAssets(roads, mode);
+  toast(`読み込みました：追加 ${added + rr.added}・上書き ${over + rr.over}・名前を変えて追加 ${ren + rr.ren}・同じものは省略 ${same + rr.same}`);
 }
 
 // ============================================================
@@ -2440,6 +2656,23 @@ function hookSettings() {
     <p class="note">グリッド1.0かつ角度0°のときは通常のブロック（当たり判定あり）を置きます。それ以外は傾き・フリー配置で、見た目だけのブロックになります（当たり判定はありません）。</p>
     <label class="chk" style="margin-top:8px"><input type="checkbox" id="extQuickTog"> 切り替えボタンを画面に表示（設定を開かずに、グリッド・傾き・斜めを変えられます）</label>`;
   sbox.insertBefore(sec, closeBtn);
+  const asec = document.createElement('div');
+  asec.innerHTML = `
+    <h3>カスタムブロック・線路・道路のアセット</h3>
+    <div class="ext-row" style="margin-top:6px">
+      <button class="ext-btn" id="extAssetSave">全てのカスタムブロック・線路・道路を保存</button>
+      <button class="ext-btn sub" id="extAssetLoad">ファイルから読み込む</button>
+      <input type="file" id="extAssetFile" accept=".json,application/json" style="display:none">
+    </div>
+    <p class="note">保存したファイルを別のワールドで読み込むと、ブロックの見た目や設定を引き継げます。同じIDのブロックが中身の違うまま既にある場合は、上書きか名前を変えて追加かを選べます（名前を変えると「(1)」などが付きます）。</p>`;
+  sbox.insertBefore(asec, closeBtn);
+  document.getElementById('extAssetSave').addEventListener('click', () => exportAssets().catch(e => { console.error(e); toast('保存できませんでした'); }));
+  document.getElementById('extAssetLoad').addEventListener('click', () => document.getElementById('extAssetFile').click());
+  document.getElementById('extAssetFile').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) await importAssets(f).catch(err => { console.error(err); toast('読み込みに失敗しました'); });
+  });
   buildQuickBar();
   document.getElementById('extTurbo').addEventListener('change', e => setTurbo(e.target.checked));
   const tsel = document.getElementById('extTiltSel');
@@ -2559,6 +2792,11 @@ function buildDOM() {
 
   <div class="ext-panel" id="extImport"><div class="ext-box" style="width:min(94vw,660px)">
     <h2>カスタムブロックを作成</h2>
+    <div class="ext-row" id="extBulkBar" style="display:none;margin-bottom:8px">
+      <span class="note" id="extBulkMsg" style="flex:1"></span>
+      <button class="ext-btn sub" id="extBulkSkip">この1つをスキップ</button>
+      <button class="ext-btn sub" id="extBulkStop">一括を中止</button>
+    </div>
     <div class="ext-row">
       <label><input type="radio" name="extKind" value="cube" checked> フルブロック（スキンを描く）</label>
       <label><input type="radio" name="extKind" value="model"> モデル（OBJ / FBX / JSON）</label>
@@ -2581,10 +2819,17 @@ function buildDOM() {
     <div id="extCubeSec" class="ext-row" style="margin-top:10px">
       <button class="ext-btn" id="extSkinOpen">スキンを描く・編集</button>
       <button class="ext-btn sub" id="extPngOpen">PNGを読み込む</button>
+      <button class="ext-btn sub" id="extPngBulk">PNGを複数選択（一括作成）</button>
       <input type="file" id="extPngFile" accept="image/png,image/jpeg" style="display:none">
+      <input type="file" id="extPngBulkFile" accept="image/png,image/jpeg" multiple style="display:none">
       <img id="extCubePrev" style="width:72px;height:72px;image-rendering:pixelated;background:rgba(0,0,0,.2);border-radius:6px">
     </div>
     <div id="extModelSec" style="display:none;margin-top:10px">
+      <div class="ext-row">
+        <button class="ext-btn sub" id="extModelBulk">モデルを複数選択（一括作成）</button>
+        <input type="file" id="extModelBulkFile" multiple accept=".obj,.fbx,.json,.bbmodel,.mtl,image/png,image/jpeg,image/gif,image/webp,image/bmp" style="display:none">
+        <span class="note">モデルごとに、同じ名前の .mtl と、選んだ画像を使います。</span>
+      </div>
       <div class="ext-row">
         <label>モデル <input type="file" id="extModelFile" multiple accept=".obj,.fbx,.json,.bbmodel,.mtl,image/png,image/jpeg,image/gif,image/webp,image/bmp"></label>
         <label>テクスチャ <input type="file" id="extModelTex" accept="image/png,image/jpeg"></label>
@@ -2636,6 +2881,16 @@ function buildDOM() {
     <div class="ext-row" style="margin-top:12px">
       <button class="ext-btn" id="extSave">保存して登録</button>
       <button class="ext-btn sub" id="extImpClose">キャンセル</button>
+    </div>
+  </div></div>
+
+  <div class="ext-panel" id="extConflict" style="z-index:60"><div class="ext-box" style="width:min(94vw,520px)">
+    <h2>同じIDのブロックがあります</h2>
+    <p class="note" id="extConflictMsg"></p>
+    <div class="ext-row" style="margin-top:12px">
+      <button class="ext-btn" id="extCfOver">上書きする</button>
+      <button class="ext-btn sub" id="extCfRen">名前を変えて追加（(1)などを付ける）</button>
+      <button class="ext-btn sub" id="extCfCancel">キャンセル（読み込まない）</button>
     </div>
   </div></div>
 
@@ -2873,6 +3128,30 @@ function wire() {
   });
   document.getElementById('extSave').addEventListener('click', saveDraft);
   document.getElementById('extImpClose').addEventListener('click', closeImport);
+  // 一括作成（PNG複数・モデル複数）
+  document.getElementById('extPngBulk').addEventListener('click', () => document.getElementById('extPngBulkFile').click());
+  document.getElementById('extPngBulkFile').addEventListener('change', async e => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (!files.length) return;
+    const items = [];
+    for (const f of files) items.push({ kind: 'cube', name: baseName(f.name), texData: await readAs(f, 'dataurl') });
+    startBulk(items);
+  });
+  document.getElementById('extModelBulk').addEventListener('click', () => document.getElementById('extModelBulkFile').click());
+  document.getElementById('extModelBulkFile').addEventListener('change', async e => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    const items = await modelItemsFrom(files);
+    if (items.length) startBulk(items);
+    else toast('モデル（.obj・.fbx・.json など）を選んでください');
+  });
+  document.getElementById('extBulkSkip').addEventListener('click', bulkSkip);
+  document.getElementById('extBulkStop').addEventListener('click', bulkStop);
+  // 読み込みの競合の選択
+  document.getElementById('extCfOver').addEventListener('click', () => resolveConflict('overwrite'));
+  document.getElementById('extCfRen').addEventListener('click', () => resolveConflict('rename'));
+  document.getElementById('extCfCancel').addEventListener('click', () => resolveConflict(null));
 
   wireSkinEditor();
 
@@ -2880,6 +3159,7 @@ function wire() {
     if (e.code === 'Escape' && panelOpen) {
       if (document.getElementById('extSkin').classList.contains('show')) closeSkinEditor();
       else if (panelOpen === 'extImport') closeImport();
+      else if (panelOpen === 'extConflict') resolveConflict(null);
       else closePanel();
     }
   });
