@@ -260,6 +260,70 @@ function attach(room) {
   for (const k of KEYS) lastSeen.set(k, getLocal(k));
   timers.push(setInterval(() => checkLive(room), POLL_MS));
   timers.push(setTimeout(() => joinCheck(room), JOIN_CHECK_MS));
+  try { room.on('need', (key, v) => onNeed(room, v)); } catch (e) { console.error(e); }
+}
+
+// ---------- 素材の受け取りの進み具合・取り直し ----------
+// 届いた素材の数と全体（かけら単位）、まだ足りない素材の鍵
+function blobProgress(room, diffs) {
+  let total = 0, ready = 0;
+  const missing = [], seen = new Set();
+  for (const k of Object.keys(diffs)) {
+    for (const key of refsOf(diffs[k])) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const meta = remoteMetaOf(room, key);
+      if (!meta) { total += 1; missing.push(key); continue; }
+      total += meta.n;
+      let have = 0;
+      for (let i = 0; i < meta.n; i++) {
+        const e = room.kv.get('wb:' + enc(key) + '#' + i);
+        if (e && !e.del && typeof e.v === 'string') have++;
+      }
+      ready += have;
+      if (!blobReady(room, key)) missing.push(key);
+    }
+  }
+  return { total, ready, missing };
+}
+// 足りない素材を、部屋の相手に送り直してもらう（少し間をあけて、何度でも頼む）
+let lastNeedAt = 0;
+function askResend(room, keys) {
+  const t = Date.now();
+  if (!keys.length || t - lastNeedAt < 10000) return;
+  lastNeedAt = t;
+  try { room.ephemeral('need:' + room.peerId, { keys: keys.slice(0, 40) }); } catch (e) { console.error(e); }
+}
+// 送り直しの依頼が来たら、この端末が持っている素材を、もう一度部屋へ送る（中身が同じでも送り直す）
+function onNeed(room, v) {
+  if (rm !== room || !v || !Array.isArray(v.keys) || !window.VoxelExt || !VoxelExt.blobGet) return;
+  for (const key of v.keys.slice(0, 40)) {
+    if (typeof key !== 'string' || !key) continue;
+    Promise.resolve(VoxelExt.blobGet(key)).then(text => {
+      if (rm !== room || typeof text !== 'string') return;
+      const n = Math.max(1, Math.ceil(text.length / PART));
+      for (let i = 0; i < n; i++) outQ.push(['wb:' + enc(key) + '#' + i, text.slice(i * PART, (i + 1) * PART)]);
+      outQ.push(['wb:' + enc(key) + '#n', { n, fp: fpOf(text) }]);
+      pump();
+    }, () => {});
+  }
+}
+// この端末に無い素材の鍵（統一の前に、送れない素材がないか確かめる）
+async function missingLocalBlobs() {
+  const out = [];
+  if (!window.VoxelExt || !VoxelExt.blobGet) return out;
+  const seen = new Set();
+  for (const k of KEYS) {
+    const text = getLocal(k);
+    if (!text) continue;
+    for (const key of refsOf(text)) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const v = await Promise.resolve(VoxelExt.blobGet(key)).catch(() => null);
+      if (typeof v !== 'string') out.push(key);
+    }
+  }
+  return out;
 }
 
 function startUp() {
@@ -270,5 +334,5 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else startUp();
 
 window.VoxelRTState = { KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length,
-  forgetSent: () => sentFp.clear() };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
+  forgetSent: () => sentFp.clear(), blobProgress, askResend, missingLocalBlobs };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
 })();

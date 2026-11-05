@@ -89,6 +89,24 @@ function sendAll(room, items) {
   });
 }
 
+// この端末に無い素材への参照だけを、中身から外す（外さないと、受け取る側が永久に待つため）
+function dropMissingRefs(text, missing) {
+  if (typeof text !== 'string') return text;
+  let o;
+  try { o = JSON.parse(text); } catch (e) { return text; }
+  const walk = v => {
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') {
+      if (typeof v.__blob === 'string' && missing.has(v.__blob)) return null;
+      const r = {};
+      for (const k of Object.keys(v)) r[k] = walk(v[k]);
+      return r;
+    }
+    return v;
+  };
+  return JSON.stringify(walk(o));
+}
+
 // ---------- 統一する（押した端末） ----------
 async function press() {
   const room = rm;
@@ -108,6 +126,10 @@ async function press() {
   }
   if (!window.confirm('この端末のワールドを、同じ部屋の全員に上書きします。' +
     '地形・道路・線路・カスタムブロックなど、全員の今の作業は置き換わります。よろしいですか？')) return;
+  // この端末に無い素材は、相手に届かない（そのままだと、相手の画面で受け取りが終わらなくなる）
+  const missList = window.VoxelRTState && VoxelRTState.missingLocalBlobs ? await VoxelRTState.missingLocalBlobs() : [];
+  if (missList.length && !window.confirm(`この端末にない素材が ${missList.length} 個あります。その素材は統一の中身から外して送ります（その部分は相手の画面に出ない場合があります）。このまま統一しますか？`)) return;
+  const missing = new Set(missList);
 
   pressing = true; updateUi();
   try {
@@ -123,7 +145,7 @@ async function press() {
     }
     const save = VoxelWorld.buildSave();
     const ws = {};
-    for (const k of KEYS) ws[k] = getLocal(k);
+    for (const k of KEYS) ws[k] = missing.size ? dropMissingRefs(getLocal(k), missing) : getLocal(k);
     const payload = JSON.stringify({
       format: 'vcrt-unify-1', seed: save.seed ?? null,
       edits: (save.base && save.base.edits) || [], sounds: save.sounds || [], ws
@@ -241,12 +263,13 @@ function check(room) {
     obsGen = gen.id;
   }
   const data = readyFor(room, gen);
-  if (!data) { setStatusText('統一されたワールドを受け取っています…（そろうまで少し待ってください）'); return; }
+  if (!data) { receiveProgress(room, gen); return; }
   if (!obsForced) {
     if (declined.has(gen.id)) return;
     if (!window.confirm('この部屋では、ほかの人がワールドを統一しました。この端末のワールドを、統一されたものに置き換えます。' +
-      'よろしいですか？（この端末だけの作業は置き換わります）')) { declined.add(gen.id); return; }
+      'よろしいですか？（この端末だけの作業は置き換わります）')) { declined.add(gen.id); hideRecv(); return; }
   }
+  showRecv(100, 'ワールドの素材がそろいました。読み込んでいます…');
   adopt(room, gen, e.ts, data);
 }
 function manualReceive() {
@@ -255,7 +278,7 @@ function manualReceive() {
   const e = kvEntry(room, GEN);
   if (!e || !e.v) return;
   const data = readyFor(room, e.v);
-  if (!data) { say('まだ受け取り中です。そろってからもう一度押してください'); return; }
+  if (!data) { receiveProgress(room, e.v); return; }
   if (!window.confirm('この端末のワールドを、統一されたものに置き換えます。この端末だけの作業は置き換わります。よろしいですか？')) return;
   adopt(room, e.v, e.ts, data);
 }
@@ -288,13 +311,79 @@ async function createWork() {
 // ---------- 画面 ----------
 function say(msg) { setStatusText(msg); }
 function setStatusText(msg) { if (statusEl) statusEl.textContent = msg; }
+
+// ---------- 受け取りの進み具合（画面の上の進捗バー） ----------
+let recvBar = null, recvFill = null, recvText = null;
+let receiving = false;                                  // 受け取り中は、案内文を画面更新で消さない
+const recvTrack = { lastPct: -1, lastChangeAt: 0 };     // 進みが止まっている時間を見るため
+function ensureRecvBar() {
+  if (recvBar) return;
+  recvBar = document.createElement('div');
+  recvBar.id = 'uniRecvBar';
+  recvBar.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:80;display:none;' +
+    'background:rgba(20,30,45,.96);color:#fff;border-radius:10px;padding:10px 14px;width:min(92vw,440px);box-sizing:border-box;' +
+    'font:14px/1.5 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.5)';
+  recvText = document.createElement('div');
+  const track = document.createElement('div');
+  track.style.cssText = 'height:12px;background:#33414f;border-radius:6px;margin-top:6px;overflow:hidden';
+  recvFill = document.createElement('div');
+  recvFill.style.cssText = 'height:100%;width:0%;background:#4caf50;transition:width .4s';
+  track.appendChild(recvFill);
+  recvBar.appendChild(recvText);
+  recvBar.appendChild(track);
+  document.body.appendChild(recvBar);
+}
+function showRecv(pct, text) {
+  ensureRecvBar();
+  receiving = true;
+  recvBar.style.display = 'block';
+  recvFill.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
+  recvText.textContent = text;
+}
+function hideRecv() {
+  receiving = false;
+  recvTrack.lastPct = -1; recvTrack.lastChangeAt = 0;
+  if (recvBar) recvBar.style.display = 'none';
+}
+// 受け取りの段階：統一データの通数、そのあとの素材の数（全体に対する割合）
+function receiveStatus(room, gen) {
+  let have = 0;
+  for (let i = 0; i < gen.n; i++) if (typeof kvGet(room, 'uni:' + gen.id + ':p' + i) === 'string') have++;
+  if (have < gen.n) return { pct: 30 * have / Math.max(1, gen.n), text: `統一データを受け取っています（${have} / ${gen.n} 通）`, missing: [] };
+  const text = readPayload(room, gen);
+  if (text === null) return { pct: 30, text: '統一データを確認しています…', missing: [] };
+  let data = null;
+  try { data = JSON.parse(text); } catch (e) { data = null; }
+  if (!data || !data.ws) return { pct: 30, text: '統一データを読み取れません（統一し直してもらってください）', missing: [] };
+  const diffs = {};
+  for (const k of KEYS) if (typeof data.ws[k] === 'string') diffs[k] = data.ws[k];
+  const p = VoxelRTState.blobProgress(room, diffs);
+  const pct = p.total ? 30 + 70 * p.ready / p.total : 100;
+  return { pct, text: `素材を受け取っています（${p.ready} / ${p.total}）`, missing: p.missing };
+}
+// 進みを見て、画面に出す。止まったら、足りない素材を送り直してもらう
+function receiveProgress(room, gen) {
+  const s = receiveStatus(room, gen);
+  const now = Date.now();
+  if (s.pct !== recvTrack.lastPct || !recvTrack.lastChangeAt) { recvTrack.lastPct = s.pct; recvTrack.lastChangeAt = now; }
+  const idle = now - recvTrack.lastChangeAt;
+  let text = s.text;
+  if (idle > 15000) {
+    text += '（進みが止まっています。送り直しを依頼しています）';
+    if (s.missing.length) VoxelRTState.askResend(room, s.missing);
+  }
+  if (idle > 120000) text += '。統一した端末がオンラインか確かめてください。それでも進まない場合は、その端末で「ワールド作業データを統一」をもう一度押してください';
+  showRecv(s.pct, text);
+  setStatusText(text);
+}
 function updateUi() {
   if (!card) return;
   idEl.textContent = rm ? '今の統一ID：' + rm.roomId : '統一IDに入ると、ここに表示されます';
   unifyBtn.disabled = !rm || pressing;
   recvBtn.style.display = busy() ? '' : 'none';
-  if (!rm) setStatusText('部屋に入ると使えます。押した端末のワールドを、同じ部屋の全員に上書きします（統一用パスワードが必要）');
-  else if (busy()) setStatusText('部屋に統一されたワールドがあります。「統一データを受け取る」を押すと、この端末のワールドが置き換わります');
+  if (!rm) { setStatusText('部屋に入ると使えます。押した端末のワールドを、同じ部屋の全員に上書きします（統一用パスワードが必要）'); hideRecv(); }
+  else if (busy()) { if (!receiving) setStatusText('部屋に統一されたワールドがあります。「統一データを受け取る」を押すと、この端末のワールドが置き換わります'); }
+  else hideRecv();
 }
 function buildCard() {
   const host = document.getElementById('rtCard');

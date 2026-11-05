@@ -3366,16 +3366,20 @@ function buildBagPanel() {
   const css = document.createElement('style');
   css.textContent = `
     #extBag .bag-box{background:#1b2530;color:#fff;border-radius:10px;padding:12px;width:min(96vw,860px);
-      max-height:94vh;overflow:auto;box-sizing:border-box}
-    #extBag .bag-wrap{display:flex;gap:12px;align-items:stretch}
-    #extBag .bag-left,#extBag .bag-right{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:6px}
-    #extBag .bag-cats{display:flex;flex-wrap:wrap;gap:4px}
+      height:min(92vh,780px);max-height:94vh;overflow:hidden;box-sizing:border-box;display:flex;flex-direction:column}
+    #extBag .bag-wrap{display:flex;gap:12px;align-items:stretch;flex:1;min-height:0}
+    #extBag .bag-left,#extBag .bag-right{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:6px;min-height:0}
+    #extBag .bag-right{overflow-y:auto;padding-right:2px}
+    #extBag .bag-cats{display:flex;flex-wrap:wrap;gap:4px;max-height:96px;overflow-y:auto;flex:0 0 auto}
     #extBag .bag-cat{padding:4px 7px;border-radius:5px;background:rgba(255,255,255,.08);font-size:12px;cursor:pointer;white-space:nowrap}
     #extBag .bag-cat.sel{background:#2e4a66}
-    #extBag .bag-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:5px;
-      max-height:52vh;min-height:200px;overflow:auto;padding:4px;background:rgba(0,0,0,.2);border-radius:8px;align-content:start}
-    #extBag .bag-item{background:rgba(255,255,255,.06);border:2px solid transparent;border-radius:6px;padding:3px;
-      text-align:center;font-size:10px;cursor:pointer;overflow:hidden}
+    /* アイテム一覧：パネルの高さいっぱいに広がり、一覧だけを上下にスクロール。アイコンは列幅に合わせて大きさを保つ */
+    #extBag .bag-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;
+      flex:1;min-height:160px;overflow-y:auto;overflow-x:hidden;padding:6px;background:rgba(0,0,0,.2);border-radius:8px;
+      align-content:start;grid-auto-rows:max-content;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+    #extBag .bag-item{background:rgba(255,255,255,.06);border:2px solid transparent;border-radius:8px;padding:5px;min-width:0;
+      text-align:center;font-size:12px;line-height:1.3;cursor:pointer;overflow:hidden}
+    #extBag .bag-item .bic{width:100%;height:auto;aspect-ratio:1/1;border-radius:6px;font-size:28px}
     #extBag .bag-item.pick{border-color:#ffd54a;background:#3a4e2a}
     #extBag .bag-skin{height:190px;border-radius:8px;background:rgba(0,0,0,.25);overflow:hidden}
     #extBag .bag-skin canvas{width:100%;height:100%;display:block}
@@ -3389,7 +3393,14 @@ function buildBagPanel() {
       background-size:cover;background-position:center}
     #extBag .bag-note{font-size:12px;color:#ffd54a;min-height:18px;margin:6px 0 0}
     #extBag.bag-picking .bcell,#extBag.bag-picking .slot-cell{outline:1px dashed rgba(255,213,74,.5)}
-    @media (max-width:560px){ #extBag .bag-box{padding:8px} #extBag .bag-wrap{gap:8px} #extBag .bag-list{min-height:150px} }
+    @media (max-width:560px){
+      #extBag .bag-box{padding:8px;height:min(94vh,760px)}
+      #extBag .bag-wrap{gap:8px;flex-direction:column}
+      #extBag .bag-left{flex:1 1 auto;min-height:0}
+      #extBag .bag-right{flex:0 0 auto;overflow:visible}
+      #extBag .bag-skin{height:110px}
+      #extBag .bag-list{grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:6px;min-height:150px}
+    }
     #bagPlus{width:46px;height:46px;box-sizing:border-box;border:2px dashed rgba(255,255,255,.45);border-radius:5px;
       background:rgba(0,0,0,.25);color:#fff;font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer;
       user-select:none;-webkit-user-select:none}
