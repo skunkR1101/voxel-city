@@ -17,7 +17,8 @@
 // 定数・状態
 // ============================================================
 const EXT_KEY = 'voxelcraft_ext_v1';
-const CUSTOM_BASE = 100, CUSTOM_MAX = 255;
+// ブロックIDは2バイト（ワールドのマスを Uint16 で保存）。カスタムは 100〜65535 を使える
+const CUSTOM_BASE = 100, CUSTOM_MAX = 65535;
 const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55, T_TRAFFIC = 56, T_CROWD = 57, T_SOUND = 58;
 const TOOLS = {
   50: { name: 'ステッキ', icon: '🪄', desc: 'タップで範囲の始点・終点を指定（3回目からは繰り返し）' },
@@ -98,8 +99,9 @@ function nameOf(id) {
   return 'ID ' + id;
 }
 function nextId() {
+  const used = new Set(ext.defs.map(d => d.id));
   for (let i = CUSTOM_BASE; i <= CUSTOM_MAX; i++) {
-    if (!ext.defs.some(d => d.id === i)) return i;
+    if (!used.has(i)) return i;
   }
   return -1;
 }

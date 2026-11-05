@@ -509,7 +509,7 @@ function generateChunkData(cx, cy, cz) {
     if (oy > mx + 22) return null;
   }
 
-  const d = new Uint8Array(4096);
+  const d = new Uint16Array(4096);
   for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) {
     const h = H[x + z * 16], wx = ox + x, wz = oz + z;
     for (let y = 0; y < 16; y++) {
@@ -558,7 +558,7 @@ function generateEntry(e) {
   let d = generateChunkData(e.cx, e.cy, e.cz);
   const ed = editsByChunk.get(e.key);
   if (ed && ed.size) {
-    if (!d) d = new Uint8Array(4096);
+    if (!d) d = new Uint16Array(4096);
     for (const [i, t] of ed) d[i] = t;
   }
   e.data = d;
@@ -602,7 +602,7 @@ function setBlock(x, y, z, t) {
 
   if (!e.data) {
     if (t === AIR) return;
-    e.data = new Uint8Array(4096);
+    e.data = new Uint16Array(4096);
   }
   e.data[li] = t;
   markDirty(e);
@@ -1055,7 +1055,7 @@ const FACES = [
 ];
 const STRIDE = [1, 18, 324];
 const AO_BRIGHT = [0.5, 0.66, 0.82, 1.0];
-const P = new Uint8Array(18 * 18 * 18); // パディング付きブロック配列
+const P = new Uint16Array(18 * 18 * 18); // パディング付きブロック配列
 
 function tileIndex(t, f) {
   switch (t) {
@@ -2456,6 +2456,7 @@ updateSunDir();
 setShader(settings.shader);
 requestAnimationFrame(frame);
 </script>
+
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
