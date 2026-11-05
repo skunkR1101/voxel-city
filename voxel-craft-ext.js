@@ -1239,12 +1239,23 @@ function isSolidAt(cell) {
   return b !== AIR && b !== WATER;
 }
 
+// スポイト：タップでブロックを登録。長押しで空気を登録（モバイルでも、インベントリを開かずに空気を登録できる）
+const DROP_LONG_MS = 450;
+let dropHold = null;                 // { kind, timer, long }
 window.startAct = function (kind) {
   const id = HOTBAR[selIdx];
   if (isTool(id)) {
     if (acts[kind]) return;
     acts[kind] = 'tool';
-    if (kind === 'break' && (id === T_FILL || id === T_COPY || id === T_PASTE)) {
+    if (kind === 'break' && id === T_DROPPER) {
+      // 押した時点では何もしない。離したときに「タップ」か「長押し」かを決める
+      dropHold = { kind, long: false, timer: setTimeout(() => {
+        if (dropHold) dropHold.long = true;
+        ext.dropper = AIR_ID;
+        toast('スポイトに空気を登録しました（長押し）');
+        renderInventoryIfOpen();
+      }, DROP_LONG_MS) };
+    } else if (kind === 'break' && (id === T_FILL || id === T_COPY || id === T_PASTE)) {
       if (id === T_FILL) fillSel();
       else if (id === T_COPY) copySel();
       else pasteHere();
@@ -1256,7 +1267,16 @@ window.startAct = function (kind) {
   return origStartAct(kind);
 };
 window.stopAct = function (kind) {
-  if (acts[kind] === 'tool') { acts[kind] = null; return; }
+  if (acts[kind] === 'tool') {
+    acts[kind] = null;
+    if (dropHold && dropHold.kind === kind) {
+      clearTimeout(dropHold.timer);
+      const long = dropHold.long;
+      dropHold = null;
+      if (!long) dropperTap();
+    }
+    return;
+  }
   return origStopAct(kind);
 };
 
@@ -1345,22 +1365,47 @@ function updateSelVisual(t) {
 // ============================================================
 // フィル・コピー・ペースト・元に戻す
 // ============================================================
+const redoStack = [];
 function pushUndo(changes) {
   if (!changes.length) return;
   undoStack.push(changes);
   if (undoStack.length > 10) undoStack.shift();
+  redoStack.length = 0;                       // 新しい操作をしたら、やり直しの履歴は消える
 }
-function undoLast() {
-  const ch = undoStack.pop();
-  if (!ch) { toast('元に戻す操作がありません'); return; }
+// 記録の通りに戻す。戻す直前の状態を、同じ形の記録にして返す（取り消しとやり直しで、互いに使える）
+function applyRecord(ch) {
+  const snap = [];
   for (let i = ch.length - 1; i >= 0; i--) {
     const c = ch[i];
-    if (c.tiltEnt) { if (window.VoxelDiag && VoxelDiag.dropTilt) VoxelDiag.dropTilt(c.tiltEnt); continue; }
+    if (c.tiltEnt) {
+      const e = c.tiltEnt;
+      snap.push({ tiltRedo: { id: e.id, c: e.c.slice(), q: e.q.clone(), st: e.st } });
+      if (window.VoxelDiag && VoxelDiag.dropTilt) VoxelDiag.dropTilt(e);
+      continue;
+    }
+    if (c.tiltRedo) {
+      const r = c.tiltRedo;
+      if (addTilt(r.id, r.c, r.q, r.st)) snap.push({ tiltEnt: tiltList[tiltList.length - 1] });
+      continue;
+    }
+    snap.push({ x: c.x, y: c.y, z: c.z, k: c.k, oldId: getBlock(c.x, c.y, c.z), oldSt: blockState.get(c.k) || null });
     setBlock(c.x, c.y, c.z, c.oldId);
     if (c.oldSt) blockState.set(c.k, c.oldSt);
     else blockState.delete(c.k);
   }
+  return snap.reverse();
+}
+function undoLast() {
+  const ch = undoStack.pop();
+  if (!ch) { toast('元に戻す操作がありません'); return; }
+  redoStack.push(applyRecord(ch));
   toast('元に戻しました');
+}
+function redoLast() {
+  const ch = redoStack.pop();
+  if (!ch) { toast('やり直す操作がありません'); return; }
+  undoStack.push(applyRecord(ch));
+  toast('やり直しました');
 }
 
 function fillSel() {
@@ -1501,11 +1546,28 @@ function transformedObjects() {
   return list;
 }
 
+// ペーストの基準：コピーの四隅のうち、プレイヤーに一番近い角を、照準の位置に合わせる。
+// （箱はプレイヤーから遠ざかる向きに伸びるので、手前の端がぴったり合わせられる）
+function pasteOriginFor(base) {
+  const c = ext.clip;
+  if (!c) return base;
+  const o = ext.pasteOpt;
+  let W = c.sx, H = c.sy, D = c.sz;
+  const rots = ((o.rot % 4) + 4) % 4;
+  for (let k = 0; k < rots; k++) { const t = W; W = D; D = t; }
+  const pitches = ((o.pitch % 4) + 4) % 4;
+  for (let k = 0; k < pitches; k++) { const t = H; H = D; D = t; }
+  const px = player.pos.x - (base[0] + 0.5);
+  const pz = player.pos.z - (base[2] + 0.5);
+  const offX = px > 0 ? W - 1 : 0;     // プレイヤーが+側にいれば、+側の端を基準にする
+  const offZ = pz > 0 ? D - 1 : 0;
+  return [base[0] - offX, base[1], base[2] - offZ];
+}
 function pasteHere() {
   if (!ext.clip) { toast('先にコピーしてください'); return; }
   const p = pickTarget();
   if (!p) { toast('ペースト先に向けて長押ししてください'); return; }
-  const a = placeCellFrom(p);
+  const a = pasteOriginFor(placeCellFrom(p));
   const { cells } = transformedCells();
   const changes = [];
   for (const cell of cells) {
@@ -1646,8 +1708,54 @@ function syncRotBar() {
   rotBarShown = true;
   d.style.display = 'block';
 }
+// ============================================================
+// ワールドエディットの画面ボタン（取り消し・やり直し・ペーストの回転・反転）
+//  ・取り消し・やり直し：ワールドエディットの道具を持っている間
+//  ・回転・反転：ペーストを持っている間
+//  ・位置と大きさは、コントローラー設定（voxel-craft-ui.js）から変えられる
+// ============================================================
+const WE_TOOLS = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT];
+const PASTE_TOOLS = [T_PASTE, T_PASTE_ROT];
+const edBtns = {};
+const ED_STYLE = 'position:fixed;z-index:6;width:58px;height:58px;box-sizing:border-box;border-radius:10px;' +
+  'background:rgba(20,30,45,.72);color:#fff;border:1px solid rgba(255,255,255,.45);font:13px system-ui,sans-serif;' +
+  'touch-action:none;user-select:none;-webkit-user-select:none;display:none;padding:0;cursor:pointer';
+function buildEditBar() {
+  const specs = [
+    ['edUndo', '取り消し', () => undoLast()],
+    ['edRedo', 'やり直し', () => redoLast()],
+    ['edRot', '回転', () => { ext.pasteOpt.rot = (ext.pasteOpt.rot + 1) % 4; pasteDirty = true; toast(`ペースト：回転 ${ext.pasteOpt.rot * 90}°`); }],
+    ['edPitch', '縦回転', () => { ext.pasteOpt.pitch = ((ext.pasteOpt.pitch || 0) + 1) % 4; pasteDirty = true; toast(`ペースト：縦回転 ${ext.pasteOpt.pitch * 90}°`); }],
+    ['edFlipX', '左右反転', () => { ext.pasteOpt.mx = !ext.pasteOpt.mx; pasteDirty = true; toast(`ペースト：左右反転 ${ext.pasteOpt.mx ? 'ON' : 'OFF'}`); }],
+    ['edFlipZ', '前後反転', () => { ext.pasteOpt.mz = !ext.pasteOpt.mz; pasteDirty = true; toast(`ペースト：前後反転 ${ext.pasteOpt.mz ? 'ON' : 'OFF'}`); }]
+  ];
+  for (const [id, label, fn] of specs) {
+    const b = document.createElement('button');
+    b.id = id;
+    b.type = 'button';
+    b.className = 'vcTb';
+    b.textContent = label;
+    b.style.cssText = ED_STYLE;
+    b.addEventListener('pointerdown', e => { e.stopPropagation(); e.preventDefault(); fn(); });
+    b.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+    document.body.appendChild(b);
+    edBtns[id] = b;
+  }
+}
+function syncEditBar() {
+  if (!edBtns.edUndo) { if (document.body) buildEditBar(); return; }
+  const id = HOTBAR[selIdx];
+  const live = started && !menuOpen && !paused && !panelOpen;
+  const we = live && WE_TOOLS.includes(id);
+  const pa = live && PASTE_TOOLS.includes(id);
+  edBtns.edUndo.style.display = we ? 'block' : 'none';
+  edBtns.edRedo.style.display = we ? 'block' : 'none';
+  for (const k of ['edRot', 'edPitch', 'edFlipX', 'edFlipZ']) edBtns[k].style.display = pa ? 'block' : 'none';
+}
+
 function updatePaste() {
   syncRotBar();
+  syncEditBar();
   const id = HOTBAR[selIdx];
   if (id !== T_PASTE || !ext.clip || menuOpen || paused || !started || panelOpen) {
     pasteGroup.visible = false;
@@ -1656,7 +1764,7 @@ function updatePaste() {
   if (pasteDirty) rebuildPaste();
   const p = pickTarget();
   if (!p) { pasteGroup.visible = false; return; }
-  const a = placeCellFrom(p);
+  const a = pasteOriginFor(placeCellFrom(p));
   pasteGroup.position.set(a[0], a[1], a[2]);
   pasteGroup.visible = true;
 }

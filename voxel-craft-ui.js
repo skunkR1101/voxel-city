@@ -11,10 +11,32 @@ const { pickTarget } = window.VoxelExt;
 const VoxelExt = window.VoxelExt;
 
 const LAYOUT_KEY = 'voxelcraft_touch_layout_v1';
-const DEF = {                       // 本体の初期配置（right / bottom の px）
-  btnJump: { r: 14, b: 70 }, btnDown: { r: 14, b: 140 }, btnUp: { r: 14, b: 210 }, btnView: { r: 14, b: 280 },
-  btnBreak: { r: 84, b: 70 }, btnPlace: { r: 84, b: 140 }, btnDash: { r: 84, b: 210 }
-};
+// 画面上の全てのボタンの登録（コントローラー設定で、位置と大きさを変えられる）
+//  ・def：初期の位置（ax/ay は右・左、下・上を基準にする px）。無いものは、表示されている位置をそのまま初期にする
+//  ・w：元の大きさ（px）。無いものは、表示されている大きさを使う
+//  ・g：全体の大きさの設定（ボタン全体の大きさ）の対象にする
+//  ・新しいボタンを作ったら、ここに1行足すと、設定で動かせる
+const REG = [
+  { id: 'btnJump', label: 'ジャンプ', w: 58, g: true, def: { ax: 'R', x: 14, ay: 'B', y: 70 } },
+  { id: 'btnDown', label: '下降（しゃがむ）', w: 58, g: true, def: { ax: 'R', x: 14, ay: 'B', y: 140 } },
+  { id: 'btnUp', label: '上昇', w: 58, g: true, def: { ax: 'R', x: 14, ay: 'B', y: 210 } },
+  { id: 'btnView', label: '視点', w: 58, g: true, def: { ax: 'R', x: 14, ay: 'B', y: 280 } },
+  { id: 'btnBreak', label: '破壊', w: 58, g: true, def: { ax: 'R', x: 84, ay: 'B', y: 70 } },
+  { id: 'btnPlace', label: '設置', w: 58, g: true, def: { ax: 'R', x: 84, ay: 'B', y: 140 } },
+  { id: 'btnDash', label: 'ダッシュ', w: 58, g: true, def: { ax: 'R', x: 84, ay: 'B', y: 210 } },
+  { id: 'gearBtn', label: '設定（⚙）' },
+  { id: 'extBtn', label: 'インベントリ' },
+  { id: 'rdMidBtn', label: '道路・線路：中間点' },
+  { id: 'rdExitBtn', label: '道路・線路：敷設を終了' },
+  { id: 'edUndo', label: '取り消し', w: 58, g: true, def: { ax: 'R', x: 14, ay: 'B', y: 350 } },
+  { id: 'edRedo', label: 'やり直し', w: 58, g: true, def: { ax: 'R', x: 84, ay: 'B', y: 350 } },
+  { id: 'edRot', label: 'ペースト：回転', w: 58, g: true, def: { ax: 'R', x: 14, ay: 'B', y: 420 } },
+  { id: 'edPitch', label: 'ペースト：縦回転', w: 58, g: true, def: { ax: 'R', x: 84, ay: 'B', y: 420 } },
+  { id: 'edFlipX', label: 'ペースト：左右反転', w: 58, g: true, def: { ax: 'R', x: 154, ay: 'B', y: 420 } },
+  { id: 'edFlipZ', label: 'ペースト：前後反転', w: 58, g: true, def: { ax: 'R', x: 224, ay: 'B', y: 420 } }
+];
+const regDefCache = new Map();     // 表示されていた位置（初めて見たときに覚える）
+const regNatCache = new Map();     // 元の大きさ（初めて表示されたときに覚える）
 const ERASE_R = 3.0;                // 道路・線路を削除する範囲（m）
 
 // ============================================================
@@ -44,10 +66,12 @@ scrollStyle.textContent = `
   .vcBox input[type=range] { width: 100%; margin-top: 8px; }
   #vcDoneBtn { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 90; display: none;
     background: #2e7d4f; color: #fff; border: none; border-radius: 8px; padding: 10px 18px; font-size: 15px; }
+  #vcBtnList label { display: block; margin-top: 8px; font-size: 13px; }
+  #vcBtnList input[type=range] { width: 100%; margin-top: 4px; }
   #vcLayoutToggle { position: fixed; left: 150px; top: 56px; z-index: 60; background: #2e6a9a; color: #fff; border: none;
     border-radius: 8px; padding: 8px 12px; font-size: 13px; opacity: .9; cursor: pointer; font-family: sans-serif; }
   body.touch .tb { touch-action: auto; }
-  body.vcEditing .tb { outline: 2px dashed #ffe066; touch-action: none !important; }
+  body.vcEditing .tb, body.vcEditing .vcTb { outline: 2px dashed #ffe066; touch-action: none !important; }
 `;
 document.head.appendChild(scrollStyle);
 
@@ -64,15 +88,64 @@ function loadLayout() {
   return { scale: defaultScale(), pos: {} };
 }
 function saveLayout() { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch (e) {} }
+// 保存された位置（古い形式の r / b も読める）。大きさの割合 s は、ボタンごとの設定
+function posOf(id, d) {
+  const s0 = layout.pos[id] || {};
+  let base = d;
+  if (s0.ax) base = { ax: s0.ax, x: s0.x, ay: s0.ay, y: s0.y };
+  else if (typeof s0.r === 'number') base = { ax: 'R', x: s0.r, ay: 'B', y: s0.b };
+  return { ax: base.ax, x: base.x, ay: base.ay, y: base.y, s: typeof s0.s === 'number' ? s0.s : 1 };
+}
+// 初めて見たときの位置（表示されていなければ、まだ覚えない）
+function defOf(el, e) {
+  if (e.def) return e.def;
+  if (regDefCache.has(e.id)) return regDefCache.get(e.id);
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const W = window.innerWidth, H = window.innerHeight;
+  const d = {
+    ax: r.left + r.width / 2 > W / 2 ? 'R' : 'L', x: 0,
+    ay: r.top + r.height / 2 > H / 2 ? 'B' : 'T', y: 0
+  };
+  d.x = d.ax === 'R' ? W - r.right : r.left;
+  d.y = d.ay === 'B' ? H - r.bottom : r.top;
+  regDefCache.set(e.id, d);
+  return d;
+}
+// 元の大きさ（表示されているとき、初めて測る）
+function natOf(el, e) {
+  if (regNatCache.has(e.id)) return regNatCache.get(e.id);
+  const w = e.w || el.offsetWidth;
+  const h = e.w ? e.w : (el.offsetHeight || w);
+  if (!w || !h) return null;
+  const n = { w, h };
+  regNatCache.set(e.id, n);
+  return n;
+}
 function applyLayout() {
-  for (const id of Object.keys(DEF)) {
-    const el = document.getElementById(id);
+  const W = window.innerWidth, H = window.innerHeight;
+  for (const e of REG) {
+    const el = document.getElementById(e.id);
     if (!el) continue;
-    const p = layout.pos[id] || DEF[id];
-    el.style.width = el.style.height = Math.round(58 * layout.scale) + 'px';
-    el.style.fontSize = Math.max(8, Math.round(11 * layout.scale)) + 'px';
-    el.style.right = p.r + 'px';
-    el.style.bottom = p.b + 'px';
+    const n = natOf(el, e), d = defOf(el, e);
+    if (!n || !d) continue;               // まだ表示されていない（次に見るときに設定する）
+    const p = posOf(e.id, d);
+    const k = (e.g ? layout.scale : 1) * p.s;
+    const w = n.w * k, h = n.h * k;
+    let x = p.ax === 'R' ? W - p.x - w : p.x;
+    let y = p.ay === 'B' ? H - p.y - h : p.y;
+    x = Math.min(Math.max(0, x), Math.max(0, W - w));
+    y = Math.min(Math.max(0, y), Math.max(0, H - h));
+    el.classList.add('vcTb');
+    el.style.position = 'fixed';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.left = Math.round(x) + 'px';
+    el.style.top = Math.round(y) + 'px';
+    el.style.width = n.w + 'px';
+    el.style.height = n.h + 'px';
+    el.style.transformOrigin = '0 0';
+    el.style.transform = Math.abs(k - 1) < 0.001 ? '' : `scale(${k.toFixed(3)})`;
   }
 }
 
@@ -88,8 +161,8 @@ function setEditMode(on) {
 }
 function onDown(e) {
   if (!editMode || !e.target.closest) return;
-  const el = e.target.closest('.tb');
-  if (!el) return;
+  const el = e.target.closest('.vcTb');
+  if (!el || !el.id) return;
   e.stopPropagation(); e.preventDefault();
   const rect = el.getBoundingClientRect();
   drag = { el, dx: e.clientX - rect.left, dy: e.clientY - rect.top };
@@ -97,17 +170,29 @@ function onDown(e) {
 function onMove(e) {
   if (!drag) return;
   e.preventDefault();
-  const w = drag.el.offsetWidth, h = drag.el.offsetHeight;
-  const x = Math.min(Math.max(0, e.clientX - drag.dx), window.innerWidth - w);
-  const y = Math.min(Math.max(0, e.clientY - drag.dy), window.innerHeight - h);
-  drag.el.style.right = (window.innerWidth - x - w) + 'px';
-  drag.el.style.bottom = (window.innerHeight - y - h) + 'px';
+  const r = drag.el.getBoundingClientRect();
+  const x = Math.min(Math.max(0, e.clientX - drag.dx), window.innerWidth - r.width);
+  const y = Math.min(Math.max(0, e.clientY - drag.dy), window.innerHeight - r.height);
+  drag.el.style.left = Math.round(x) + 'px';
+  drag.el.style.top = Math.round(y) + 'px';
 }
 function onUp() {
   if (!drag) return;
-  layout.pos[drag.el.id] = { r: Math.round(parseFloat(drag.el.style.right)), b: Math.round(parseFloat(drag.el.style.bottom)) };
+  // 動かした位置を、画面の右・左／下・上のどちらに近いかで覚える（画面の大きさが変わってもずれにくい）
+  const el = drag.el;
+  const r = el.getBoundingClientRect();
+  const W = window.innerWidth, H = window.innerHeight;
+  const ax = r.left + r.width / 2 > W / 2 ? 'R' : 'L';
+  const ay = r.top + r.height / 2 > H / 2 ? 'B' : 'T';
+  const old = layout.pos[el.id] || {};
+  layout.pos[el.id] = {
+    ax, x: Math.round(ax === 'R' ? W - r.right : r.left),
+    ay, y: Math.round(ay === 'B' ? H - r.bottom : r.top),
+    s: typeof old.s === 'number' ? old.s : 1
+  };
   saveLayout();
   drag = null;
+  applyLayout();
 }
 window.addEventListener('pointerdown', onDown, { capture: true, passive: false });
 window.addEventListener('pointermove', onMove, { capture: true, passive: false });
@@ -115,10 +200,10 @@ window.addEventListener('pointerup', onUp, { capture: true });
 window.addEventListener('pointercancel', onUp, { capture: true });
 // 配置モード中は、ボタンの本来の操作（破壊・ジャンプなど）を動かさない
 window.addEventListener('touchstart', e => {
-  if (editMode && e.target.closest && e.target.closest('.tb')) e.stopPropagation();
+  if (editMode && e.target.closest && e.target.closest('.vcTb')) e.stopPropagation();
 }, { capture: true, passive: false });
 window.addEventListener('mousedown', e => {
-  if (editMode && e.target.closest && e.target.closest('.tb')) e.stopPropagation();
+  if (editMode && e.target.closest && e.target.closest('.vcTb')) e.stopPropagation();
 }, { capture: true });
 
 // ============================================================
@@ -128,13 +213,15 @@ const layoutPanel = document.createElement('div');
 layoutPanel.id = 'vcLayoutPanel';
 layoutPanel.className = 'vcPanel';
 layoutPanel.innerHTML = `<div class="vcBox">
-  <h2>ボタンの大きさ・位置</h2>
-  <label>大きさ：<span id="vcSizeV"></span></label>
+  <h2>コントローラー設定（ボタンの位置・大きさ）</h2>
+  <label>ボタン全体の大きさ：<span id="vcSizeV"></span></label>
   <input type="range" id="vcSize" min="50" max="150" step="5">
   <button id="vcEditBtn" class="sub">配置を動かす：オフ</button>
   <button id="vcReset" class="sub">初期配置に戻す</button>
+  <h3 style="margin:14px 0 0;font-size:14px;color:#cfe3f5">ボタンごとの大きさ</h3>
+  <div id="vcBtnList"></div>
   <button id="vcLayoutClose">閉じる</button>
-  <p class="note">「配置を動かす」をオンにすると、ボタンを指でドラッグして動かせます。終わったら画面上の「完了」を押してください。ボタンが重なる場合は、大きさを小さくしてください。</p>
+  <p class="note">「配置を動かす」をオンにすると、ボタンを指でドラッグして動かせます。終わったら画面上の「完了」を押してください。ボタンが重なる場合は、ボタンごとの大きさを小さくしてください。ワールドエディットのボタン（取り消し・やり直し・回転・反転）は、その道具を持っているときだけ表示されます。</p>
 </div>`;
 document.body.appendChild(layoutPanel);
 
@@ -153,8 +240,31 @@ function openLayoutPanel() {
   const sz = document.getElementById('vcSize');
   sz.value = Math.round(layout.scale * 100);
   document.getElementById('vcSizeV').textContent = sz.value + '%';
+  buildBtnList();
   layoutPanel.classList.add('show');
 }
+// ボタンごとの大きさ（画面に今ある、登録されたボタンだけを並べる）
+function buildBtnList() {
+  const box = document.getElementById('vcBtnList');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const e of REG) {
+    if (!document.getElementById(e.id)) continue;
+    const pct = Math.round(((layout.pos[e.id] && typeof layout.pos[e.id].s === 'number') ? layout.pos[e.id].s : 1) * 100);
+    const row = document.createElement('label');
+    row.innerHTML = `${e.label}：<span>${pct}%</span><input type="range" min="50" max="150" step="5" value="${pct}" data-id="${e.id}">`;
+    box.appendChild(row);
+  }
+}
+document.getElementById('vcBtnList').addEventListener('input', ev => {
+  const id = ev.target && ev.target.dataset ? ev.target.dataset.id : null;
+  if (!id) return;
+  const v = Number(ev.target.value);
+  ev.target.parentNode.querySelector('span').textContent = v + '%';
+  layout.pos[id] = { ...(layout.pos[id] || {}), s: v / 100 };   // 位置はそのまま、大きさだけ変える
+  saveLayout();
+  applyLayout();
+});
 function closeLayoutPanel() { layoutPanel.classList.remove('show'); }
 
 toggleBtn.addEventListener('click', e => { e.stopPropagation(); layoutPanel.classList.contains('show') ? closeLayoutPanel() : openLayoutPanel(); });
@@ -222,6 +332,15 @@ function eraseNear(pc) {
 // ============================================================
 applyLayout();
 window.addEventListener('resize', () => { if (!drag) applyLayout(); });
+// 後から作られるボタン（インベントリ・ワールドエディット等）も、出来た時点で配置・大きさを反映する
+{
+  let tries = 0;
+  const iv = setInterval(() => {
+    tries++;
+    if (!drag) applyLayout();
+    if (tries >= 30) clearInterval(iv);
+  }, 1000);
+}
 window.VoxelUI = { openLayout: openLayoutPanel, closeLayout: closeLayoutPanel, setEditMode, resetLayout: () => { layout = { scale: defaultScale(), pos: {} }; saveLayout(); applyLayout(); } };
 // ============================================================
 // 5. ホットバー：スティックで移動中でも、押した瞬間に持ち替える
