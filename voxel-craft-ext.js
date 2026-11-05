@@ -1899,7 +1899,7 @@ function renderInventory() {
     </div>`;
   }).join('');
   const defHtml = (ext.curCat === '全て' || ext.curCat === '標準') ? DEFAULT_IDS.map(id => `<div class="ext-item">
-      <div style="height:72px;border-radius:6px;background:${BLOCK_INFO[id].color}"></div>
+      <div class="ext-swatch-lg" style="background:${BLOCK_INFO[id].color}"></div>
       <div>${esc(BLOCK_INFO[id].name)}</div>
       <div style="font-size:11px;color:#9fb3c8">標準ブロック</div>
       <div class="ext-row" style="justify-content:center;margin-top:4px">
@@ -2721,6 +2721,26 @@ function injectCSS() {
   .ext-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
   .ext-item{background:rgba(255,255,255,.06);border-radius:8px;padding:6px;text-align:center;font-size:12px}
   .ext-item img{width:72px;height:72px;image-rendering:pixelated;background:rgba(0,0,0,.2);border-radius:6px}
+  /* インベントリ：パネルの高さを画面に合わせて固定し、一覧だけを上下にスクロールさせる。
+     アイコンはマス目の幅に合わせて大きさを保つ（アイテムが増えても小さくならない） */
+  .ext-inv-box{height:min(88vh,780px);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;width:min(94vw,860px)}
+  .ext-inv-body{display:flex;gap:12px;flex:1;min-height:0;align-items:stretch}
+  .ext-inv-main{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
+  .ext-inv-box .ext-cats{width:180px;flex:0 0 180px;min-height:0;overflow-y:auto;padding-right:2px}
+  .ext-grid-wrap{flex:1;min-height:120px;overflow-y:auto;overflow-x:hidden;padding:2px 6px 6px 2px;margin-top:4px;
+    border-radius:8px;background:rgba(0,0,0,.12);-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+  #extGrid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+  #extGrid .ext-item{min-width:0;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px}
+  #extGrid .ext-item img{width:100%;max-width:120px;height:auto;aspect-ratio:1/1;border-radius:8px}
+  #extGrid .ext-item select{max-width:100%}
+  #extGrid .ext-item .ext-swatch-lg{width:100%;max-width:120px;aspect-ratio:1/1;border-radius:8px}
+  @media (max-width:640px){
+    .ext-inv-box{height:min(92vh,640px);width:94vw}
+    .ext-inv-body{flex-direction:column}
+    .ext-inv-box .ext-cats{width:auto;flex:0 0 auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;max-height:none}
+    .ext-inv-box .ext-cats .ext-cat{white-space:nowrap}
+    #extGrid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
+  }
   .ext-sw{width:24px;height:24px;border-radius:4px;border:2px solid rgba(255,255,255,.4);cursor:pointer;display:inline-block}
   .ext-canvas-box{background:#111;border-radius:8px;display:inline-block}
   .ext-box .note{font-size:12px;color:#9fb3c8;line-height:1.6;margin:6px 0}
@@ -2759,11 +2779,11 @@ function buildDOM() {
 
   const wrap = document.createElement('div');
   wrap.innerHTML = `
-  <div class="ext-panel" id="extInv"><div class="ext-box">
+  <div class="ext-panel" id="extInv"><div class="ext-box ext-inv-box">
     <h2>インベントリ</h2>
-    <div class="ext-row" style="align-items:flex-start">
+    <div class="ext-inv-body">
       <div class="ext-cats" id="extCats"></div>
-      <div style="flex:1;min-width:300px">
+      <div class="ext-inv-main">
         <div class="ext-row" style="margin-bottom:8px">
           <button class="ext-btn" id="extNew">＋ 新規ブロック</button>
           <button class="ext-btn sub" id="extColorOpen">🎨 カラー</button>
@@ -2771,7 +2791,7 @@ function buildDOM() {
         <div id="extToolsSec"></div>
         <h3>ブロック</h3>
         <p class="note">「使う」で、ホットバーの選択中のスロットに入ります。</p>
-        <div class="ext-grid" id="extGrid"></div>
+        <div class="ext-grid-wrap" id="extGridWrap"><div class="ext-grid" id="extGrid"></div></div>
       </div>
     </div>
     <div class="ext-row" style="margin-top:12px"><button class="ext-btn sub" id="extInvClose">閉じる</button></div>
