@@ -2062,7 +2062,8 @@ function renderInventory() {
     const thumb = thumbOf(d);
     const opts = ext.categories.map(c => `<option value="${esc(c)}" ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('');
     const info = d.kind === 'cube' ? 'フルブロック' : `モデル・${ORIENT_NAMES[d.orient || 'fixed']}`;
-    return `<div class="ext-item">
+    return `<div class="ext-item" style="position:relative">
+      <label style="position:absolute;top:4px;left:4px;z-index:1;background:rgba(8,16,28,.7);border-radius:6px;padding:2px 4px"><input type="checkbox" data-pick="${d.id}" ${invSel.has(d.id) ? 'checked' : ''}></label>
       <img src="${thumb}" alt="">
       <div>${esc(d.name)}${rt && !rt.ready ? '（読込中）' : ''}</div>
       <div style="font-size:11px;color:#9fb3c8">${info}${d.colorable ? '・カラー' : ''}</div>
@@ -2081,7 +2082,36 @@ function renderInventory() {
         <button class="ext-btn" data-use="${id}">使う</button>
       </div>
     </div>`).join('') : '';
-  gridEl.innerHTML = (defHtml + customHtml) || (ext.curCat === '道具' ? '' : '<p class="note">このカテゴリにブロックはありません。「＋ 新規ブロック」から作成できます。</p>');
+  // 選択中のブロックだけ残す（削除されたものを除く）
+  const liveIds = new Set(ext.defs.map(d => d.id));
+  for (const id of [...invSel]) if (!liveIds.has(id)) invSel.delete(id);
+  const n = invSel.size;
+  const catOpts = ext.categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  const bulkHtml = (ext.curCat === '道具' || ext.curCat === '標準') ? '' : `
+    <div class="ext-bulk" style="grid-column:1/-1;position:sticky;top:0;z-index:3;background:#14202e;padding:6px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+      <div class="ext-row" style="gap:4px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:12px">選択 ${n} 件</span>
+        <button class="ext-btn sub" data-bulk="range">1つ目〜2つ目を範囲選択</button>
+        <button class="ext-btn sub" data-bulk="all">表示中を全選択</button>
+        <button class="ext-btn sub" data-bulk="none">選択解除</button>
+      </div>
+      <div class="ext-row" style="gap:4px;flex-wrap:wrap;align-items:center;margin-top:4px">
+        <button class="ext-btn sub" data-bulk="dup" ${n ? '' : 'disabled'}>複製</button>
+        <button class="ext-btn danger" data-bulk="del" ${n ? '' : 'disabled'}>削除</button>
+        <select class="ext-input" id="extBulkCat">${catOpts}</select>
+        <button class="ext-btn sub" data-bulk="cat" ${n ? '' : 'disabled'}>カテゴリ移動</button>
+      </div>
+      <div class="ext-row" style="gap:4px;flex-wrap:wrap;align-items:center;margin-top:4px">
+        <select class="ext-input" id="extBulkLook">
+          <option value="">見え方：変えない</option><option value="cut">くり抜き</option><option value="blend">半透過</option><option value="glow">発光</option>
+        </select>
+        <select class="ext-input" id="extBulkColor">
+          <option value="">カラー：変えない</option><option value="on">カラーにする</option><option value="off">カラーをやめる</option>
+        </select>
+        <button class="ext-btn sub" data-bulk="set" ${n ? '' : 'disabled'}>設定を一括変更</button>
+      </div>
+    </div>`;
+  gridEl.innerHTML = bulkHtml + ((defHtml + customHtml) || (ext.curCat === '道具' ? '' : '<p class="note">このカテゴリにブロックはありません。「＋ 新規ブロック」から作成できます。</p>'));
 }
 function renderInventoryIfOpen() {
   if (panelOpen === 'extInv') renderInventory();
@@ -2108,32 +2138,95 @@ function deleteDef(id) {
   const def = defById(id);
   if (!def) return;
   if (!confirm(`「${def.name}」を削除しますか？\n配置済みのこのブロックも消えます。`)) return;
-  if (window.VoxelCustom && VoxelCustom.forget) VoxelCustom.forget(VoxelCustom.defHash(def));
+  removeDefs(new Set([id]));
+  toast('削除しました');
+}
+// 複数のブロックを、まとめて削除する（ワールドの配置は一度の走査で消す）
+function removeDefs(idSet) {
+  const defs = ext.defs.filter(d => idSet.has(d.id));
+  if (!defs.length) return 0;
+  if (window.VoxelCustom && VoxelCustom.forget) for (const d of defs) VoxelCustom.forget(VoxelCustom.defHash(d));
   for (const e of chunks.values()) {
     if (!e.data) continue;
     let changed = false;
     for (let i = 0; i < e.data.length; i++) {
-      if (e.data[i] === id) { e.data[i] = AIR; changed = true; }
+      if (idSet.has(e.data[i])) { e.data[i] = AIR; changed = true; }
     }
     const ed = editsByChunk.get(e.key);
-    if (ed) for (const [i, t] of [...ed]) if (t === id) ed.delete(i);
+    if (ed) for (const [i, t] of [...ed]) if (idSet.has(t)) ed.delete(i);
     if (changed) markDirty(e);
   }
   for (let i = tiltList.length - 1; i >= 0; i--) {
-    if (tiltList[i].id === id) removeTilt(tiltList[i]);
+    if (idSet.has(tiltList[i].id)) removeTilt(tiltList[i]);
   }
-  ext.defs = ext.defs.filter(d => d.id !== id);
-  defRT.delete(id);
-  delete BLOCK_INFO[id];
+  ext.defs = ext.defs.filter(d => !idSet.has(d.id));
+  for (const id of idSet) { defRT.delete(id); delete BLOCK_INFO[id]; }
   for (let i = 0; i < HOTBAR.length; i++) {
-    if (HOTBAR[i] === id) HOTBAR[i] = GRASS;
+    if (idSet.has(HOTBAR[i])) HOTBAR[i] = GRASS;
   }
-  if (ext.dropper === id) ext.dropper = AIR_ID;
+  if (idSet.has(ext.dropper)) ext.dropper = AIR_ID;
+  for (const id of idSet) invSel.delete(id);
   saveExt();
   renderInventory();
   refreshHotbarVisuals();
   selectSlot(selIdx);
-  toast('削除しました');
+  return defs.length;
+}
+
+// ── 一覧での複数選択（ブロックの編集メニュー）──
+// invSel は選んだ順に入る（最初の2つ＝「1つ目」「2つ目」）
+const invSel = new Set();
+// 複製：同じ中身を別のブロックとして作る（名前を変えるので、部屋の人にも別のブロックとして届く）
+async function duplicateDefs(defs) {
+  const made = [];
+  for (const d of defs) {
+    const id = nextId();
+    if (id < 0) { toast('カスタムブロックの上限に達したため、残りは複製できませんでした'); break; }
+    const nd = { ...d, id, aid: newAid(), name: `${d.name}（複製）`, rev: Date.now() };
+    if (d.model) nd.model = { ...d.model };
+    ext.defs.push(nd);
+    made.push(nd);
+  }
+  saveExt();
+  for (const nd of made) { try { await registerDef(nd); } catch (e) { console.error(e); } }
+  renderInventory();
+  return made.length;
+}
+// 一覧の表示順（いま見えているカテゴリの中の順）
+function visibleDefs() {
+  return ext.defs.filter(d => ext.curCat === '全て' || d.category === ext.curCat);
+}
+// 「1つ目」と「2つ目」の間にあるブロックを、表示の順で全部選ぶ
+function rangeSelect() {
+  const picked = [...invSel];
+  if (picked.length < 2) { toast('先に、1つ目と2つ目のブロックを選んでください'); return; }
+  const vis = visibleDefs().map(d => d.id);
+  const a = vis.indexOf(picked[0]), b = vis.indexOf(picked[1]);
+  if (a < 0 || b < 0) { toast('1つ目と2つ目が、いま表示中のカテゴリに無いため選べません'); return; }
+  for (let i = Math.min(a, b); i <= Math.max(a, b); i++) invSel.add(vis[i]);
+  renderInventory();
+}
+function selectedDefs() {
+  return [...invSel].map(id => defById(id)).filter(Boolean);
+}
+// 設定の一括変更：見え方・カラーの可否（空欄は変えない）。変えたブロックは、部屋の人にも届く
+async function bulkSetLook(look, color) {
+  const defs = selectedDefs();
+  for (const d of defs) {
+    if (look) { d.alpha = look; if (look === 'glow' && d.glowPower == null) d.glowPower = 1.5; }
+    if (color === 'on') d.colorable = true;
+    if (color === 'off') d.colorable = false;
+    d.rev = Date.now();
+    if (window.VoxelCustom) VoxelCustom.invalidate(d);
+  }
+  saveExt();
+  for (const d of defs) {
+    try { await registerDef(d); } catch (e) { console.error(e); }
+    if (window.VoxelFx) VoxelFx.apply(d);
+  }
+  for (const e of chunks.values()) markDirty(e);      // 置いてあるブロックの見た目も作り直す
+  renderInventory();
+  return defs.length;
 }
 
 // ============================================================
@@ -3165,7 +3258,7 @@ function wire() {
   document.getElementById('extCats').addEventListener('click', e => {
     const catEl = e.target.closest('.ext-cat');
     const act = e.target.dataset.act;
-    if (catEl && !act) { ext.curCat = catEl.dataset.c; renderInventory(); return; }
+    if (catEl && !act) { ext.curCat = catEl.dataset.c; invSel.clear(); renderInventory(); return; }
     if (act === 'addcat') {
       const name = prompt('新しいカテゴリ名');
       if (name && name.trim() && !ext.categories.includes(name.trim())) {
@@ -3209,16 +3302,55 @@ function wire() {
     renderInventory();
   });
 
-  document.getElementById('extGrid').addEventListener('click', e => {
-    const use = e.target.dataset.use, del = e.target.dataset.del;
+  document.getElementById('extGrid').addEventListener('click', async e => {
+    const use = e.target.dataset.use, del = e.target.dataset.del, bulk = e.target.dataset.bulk;
     if (use) useItem(Number(use));
     if (del) deleteDef(Number(del));
+    if (!bulk) return;
+    const defs = selectedDefs();
+    if (bulk === 'range') rangeSelect();
+    else if (bulk === 'all') { for (const d of visibleDefs()) invSel.add(d.id); renderInventory(); }
+    else if (bulk === 'none') { invSel.clear(); renderInventory(); }
+    else if (bulk === 'dup') {
+      if (!defs.length) return;
+      const k = await duplicateDefs(defs);
+      toast(`${k}件複製しました`);
+    }
+    else if (bulk === 'del') {
+      if (!defs.length) return;
+      if (!confirm(`選んだ${defs.length}件のブロックを削除しますか？\n配置済みのこれらのブロックも消えます。`)) return;
+      removeDefs(new Set(defs.map(d => d.id)));
+      toast('削除しました');
+    }
+    else if (bulk === 'cat') {
+      const target = document.getElementById('extBulkCat').value;
+      if (!defs.length || !target) return;
+      const now = Date.now();
+      for (const d of defs) { d.category = target; d.rev = now; }
+      saveExt();
+      renderInventory();
+      toast(`${defs.length}件を「${target}」に移動しました`);
+    }
+    else if (bulk === 'set') {
+      if (!defs.length) return;
+      const look = document.getElementById('extBulkLook').value;
+      const color = document.getElementById('extBulkColor').value;
+      if (!look && !color) { toast('変える項目を選んでください'); return; }
+      const k = await bulkSetLook(look, color);
+      toast(`${k}件の設定を変更しました`);
+    }
   });
   document.getElementById('extGrid').addEventListener('change', e => {
+    if (e.target.dataset.pick) {
+      const id = Number(e.target.dataset.pick);
+      if (e.target.checked) invSel.add(id); else invSel.delete(id);
+      renderInventory();
+      return;
+    }
     const id = e.target.dataset.cat;
     if (!id) return;
     const def = defById(Number(id));
-    if (def) { def.category = e.target.value; saveExt(); renderInventory(); }
+    if (def) { def.category = e.target.value; def.rev = Date.now(); saveExt(); renderInventory(); }
   });
 
   // インポート
@@ -3822,6 +3954,7 @@ async function applyRemoteExt(text) {
   }
   let changed = false;
   const added = [];
+  const updated = [];
   // 分類：足すだけ
   if (Array.isArray(s.categories)) {
     for (const c of s.categories) {
@@ -3846,6 +3979,15 @@ async function applyRemoteExt(text) {
       if (o.category && o.category !== have.category && ext.categories.includes(o.category)) {
         have.category = o.category; changed = true;
       }
+      // 同じブロック（aid）で、相手の方が新しい設定（一括変更など）になっていれば、設定だけ合わせる
+      if (o.aid && have.aid === o.aid && (o.rev || 0) > (have.rev || 0) && VoxelCustom.defHash(have) !== H) {
+        for (const k of ['name', 'kind', 'colorable', 'alpha', 'glowPower', 'orient', 'scale', 'modelRot', 'texData', 'model']) {
+          if (o[k] !== undefined) have[k] = o[k];
+        }
+        have.rev = o.rev;
+        VoxelCustom.invalidate(have);
+        updated.push(have); changed = true;
+      }
       continue;
     }
     if (VoxelCustom.isForgotten(H)) continue;          // この端末で消したものは戻さない
@@ -3859,7 +4001,11 @@ async function applyRemoteExt(text) {
   if (!changed) { lastRemoteExtText = text; return 'same'; }
   if (Array.isArray(s.colorHistory) && !(ext.colorHistory && ext.colorHistory.length)) ext.colorHistory = s.colorHistory.slice(0, 12);
   saveExt();                                           // この端末の形で保存（この端末の内容を書き換えるのは、足した分だけ）
-  for (const d of added) { try { await registerDef(d); } catch (e) { console.error(e); } }
+  for (const d of [...added, ...updated]) {
+    try { await registerDef(d); } catch (e) { console.error(e); }
+    if (window.VoxelFx) VoxelFx.apply(d);
+  }
+  if (updated.length) for (const e of chunks.values()) markDirty(e);
   renderInventory();
   lastRemoteExtText = text;
   return 'applied';
