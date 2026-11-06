@@ -2373,8 +2373,13 @@ function updateHUD(dt) {
     `描画距離 ${RD}チャンク ・ チャンク ${chunks.size} ・ メッシュ ${meshes} ・ ${Math.round(fpsSm)} FPS`;
 }
 
+// 描画は最大60回/秒（iPhoneのProMotion 120Hzで描くと、発熱と電池消費が大きいため）
+const FRAME_MIN_MS = 1000 / 60 - 2;
+let lastDrawAt = -1e9;
 function frame(now) {
   requestAnimationFrame(frame);
+  if (now - lastDrawAt < FRAME_MIN_MS) return;
+  lastDrawAt = now;
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
   if (dt > 0) fpsSm += ((1 / dt) - fpsSm) * 0.05;
@@ -2456,7 +2461,6 @@ updateSunDir();
 setShader(settings.shader);
 requestAnimationFrame(frame);
 </script>
-
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
