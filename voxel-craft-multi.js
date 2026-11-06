@@ -1778,6 +1778,8 @@ window.VoxelMulti = {
   setBlockEncoder: fn => { blockEncoder = fn; },
   setBlockResolver: fn => { blockResolver = fn; },
   applyBlock: (x, y, z, t) => applyCell(x, y, z, t, stateStr(x, y, z, t)),
+  // 向き・色だけが変わったマス（ブロックの種類は同じ）を、次の送信で相手へ送る
+  touchCell: (x, y, z) => { if (connectedNow()) pendingCells.set(x + ',' + y + ',' + z, { x, y, z }); },
   setStateGetter: fn => { stateGetter = fn; },
   blockStats: () => ({ ...blockStats }),
   // 接頭語（例 "road"）の変更を受け取る。値は rec.v、消えたときは rec.del が true

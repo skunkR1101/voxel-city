@@ -59,6 +59,33 @@ const ext = {
 
 const defRT = new Map();
 const blockState = new Map();   // "x,y,z" -> { color, rot, qb }
+// ブロックの向き・色（カスタムブロックの状態）は、ワールドの保存と一緒に残す（再読み込みで向きが戻らないように）
+const BSTATE_KEY = 'voxelcraft_bstate_v1';
+let bstateSaved = null;
+function loadBstate() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(BSTATE_KEY) || '[]');
+    for (const [k, s] of arr) if (typeof k === 'string' && s) blockState.set(k, s);
+  } catch (e) { /* 読めないときは、向きだけ初期値にする */ }
+}
+function saveBstate() {
+  const arr = [];
+  for (const [k, s] of blockState) if (s) arr.push([k, { color: s.color ?? null, rot: s.rot ?? 0, qb: s.qb ?? null }]);
+  const json = arr.length ? JSON.stringify(arr) : '[]';
+  if (json === bstateSaved) return;
+  try { localStorage.setItem(BSTATE_KEY, json); bstateSaved = json; }
+  catch (e) { if (typeof toast === 'function') toast('ブロックの向きを保存できませんでした（保存領域がいっぱいです）'); }
+}
+loadBstate();
+setInterval(saveBstate, 1500);
+// 向き・色を変えたマスを、部屋へも送る（相手の画面でも同じ向きになる）
+function touchState(x, y, z) {
+  if (window.VoxelMulti && VoxelMulti.touchCell) VoxelMulti.touchCell(x, y, z);
+}
+// 別機能（斜めグリッドなど）が置き場所を決めるとき、プレビューの位置を受け取る関数
+let placeHook = null;
+function setPlaceHook(fn) { placeHook = fn; }
+window.addEventListener('voxelworld:fresh', () => { blockState.clear(); saveBstate(); });
 const thumbCache = new Map();
 const wand = { stage: 0, p1: null, p2: null };
 const undoStack = [];
@@ -1063,8 +1090,27 @@ function placeCellFrom(p) {
   return [Math.floor(q.x), Math.floor(q.y), Math.floor(q.z)];
 }
 
+// 傾いたブロックに当てたときは、そのブロックの角度と格子に吸着して置く（どの角度でも・設定に関係なく）
+function snapToTilt(p, n) {
+  const T = p.ent.q.clone();
+  const ref = new THREE.Vector3(p.ent.c[0], p.ent.c[1], p.ent.c[2]);
+  const c = p.point.clone().addScaledVector(n, 0.5);
+  const axes = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)].map(a => a.applyQuaternion(T));
+  const alignN = axes.map(a => Math.abs(a.dot(n)));
+  if (Math.max(...alignN) > 0.9) {       // 面がきれいな向き（箱の面）のときだけ、格子に揃える
+    const d = c.clone().sub(ref);
+    const out = new THREE.Vector3();
+    axes.forEach((a, i) => {
+      const s = d.dot(a);
+      out.addScaledVector(a, alignN[i] > 0.5 ? s : Math.round(s));   // 面に垂直な向きは高さをそのまま、横は1マス単位
+    });
+    c.copy(out.add(ref));
+  }
+  return { c: [c.x, c.y, c.z], q: T, snapped: true };
+}
 function tiltPlacement(p) {
   const n = p.normal.clone().normalize();
+  if (p.kind === 'tilt' && p.ent) return snapToTilt(p, n);
   const ang = THREE.MathUtils.degToRad(ext.tilt);
   const up = new THREE.Vector3(0, 1, 0);
   let axis;
@@ -1111,6 +1157,14 @@ function snapC(v, g) { return Math.round((v - 0.5) / g) * g + 0.5; }
 function tiltMode() { return ext.grid !== 1 || ext.tilt !== 0; }
 // 傾き配置の向き：カスタムモデルの「4方向」「固定（傾けないとき）」は、配置方式の向きを守る
 function tiltOrientFor(def, p, tp) {
+  if (tp.snapped) {
+    // 吸着したとき：相手の角度を土台に、モデルは配置方式の正面の向きを足す
+    if (def && def.kind === 'model') {
+      const o = modelOrient(def, p);
+      return { q: tp.q.clone().multiply(modelQuat({ rot: o.rot, qb: null })), rot: o.rot };
+    }
+    return { q: tp.q.clone(), rot: ext.rot };
+  }
   if (def && def.kind === 'model' && def.orient === 'four') {
     const o = modelOrient(def, p);
     const qy = modelQuat({ rot: o.rot, qb: null });
@@ -1204,7 +1258,7 @@ window.doPlace = function () {
   if (rt && !rt.ready) return;
   const isModel = !!(rt && rt.def.kind === 'model');
 
-  if (!tiltMode()) {
+  if (!tiltMode() && p.kind !== 'tilt') {
     const cell = placeCellFrom(p);
     const cur = getBlock(cell[0], cell[1], cell[2]);
     if (cur !== AIR && cur !== WATER) return;
@@ -1814,8 +1868,19 @@ function updateGhost() {
   if (!ghost) return;
   const p = pickTarget();
   if (!p) { ghost.visible = false; return; }
+  // 別の機能（斜めグリッド）が置き場所を決めるとき、そこに合わせてプレビューする
+  const plan = placeHook ? placeHook(p, id) : null;
+  if (plan) {
+    ghost.position.copy(plan.pos);
+    ghost.quaternion.copy(plan.q);
+    ghost.visible = true;
+    const hid = id >= CUSTOM_BASE ? defRT.get(id) : null;
+    const hcol = !plan.valid ? 0xff5555 : (hid && hid.def.colorable ? new THREE.Color(ext.curColor).getHex() : 0xffffff);
+    ghost.traverse(o => { if (o.isMesh && o.material && o.material.color) o.material.color.setHex(hcol); });
+    return;
+  }
   let valid;
-  if (!tiltMode()) {
+  if (!tiltMode() && p.kind !== 'tilt') {
     const cell = placeCellFrom(p);
     const cur = getBlock(cell[0], cell[1], cell[2]);
     valid = (cur === AIR || cur === WATER) && !overlapsPlayer(cell[0], cell[1], cell[2]);
@@ -2116,6 +2181,7 @@ function recolorTarget() {
   const k = keyOf(t.h.x, t.h.y, t.h.z);
   const prev = blockState.get(k) || {};
   blockState.set(k, { ...prev, color: ext.curColor, rot: prev.rot || 0 });
+  touchState(t.h.x, t.h.y, t.h.z);
   pushHistory(ext.curColor);
   remeshAt(t.h.x, t.h.y, t.h.z);
 }
@@ -2126,6 +2192,7 @@ function resetTarget() {
   const k = keyOf(t.h.x, t.h.y, t.h.z);
   const prev = blockState.get(k) || {};
   blockState.set(k, { ...prev, color: null, rot: prev.rot || 0 });
+  touchState(t.h.x, t.h.y, t.h.z);
   remeshAt(t.h.x, t.h.y, t.h.z);
   toast('色をリセットしました');
 }
@@ -2136,6 +2203,7 @@ function rotateTarget() {
     const k = keyOf(t.h.x, t.h.y, t.h.z);
     const prev = blockState.get(k) || { color: null, rot: 0 };
     blockState.set(k, { ...prev, rot: ((prev.rot || 0) + 1) % 4 });
+    touchState(t.h.x, t.h.y, t.h.z);
     remeshAt(t.h.x, t.h.y, t.h.z);
   }
 }
@@ -3793,7 +3861,7 @@ async function applyRemoteExt(text) {
 }
 window.VoxelExt = {
   T_TRAFFIC, T_CROWD, T_SOUND, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
-  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp,
+  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp, setPlaceHook,
   applyRemoteExt
 };
 

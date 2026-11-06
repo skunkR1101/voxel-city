@@ -218,7 +218,10 @@ function reconcileDefs() {
     if (!def) continue;
     const p = key.slice(2).split(',').map(Number);
     if (p.length !== 3 || p.some(n => !Number.isInteger(n)) || p[1] <= -64) continue;
-    if (getBlock(p[0], p[1], p[2]) === def.id) continue;
+    // 置き場所がすでに同じブロックでも、向き・色が記録と違えば直す（再読み込みで向きが戻った場合など）
+    const norm = s => (s ? { color: s.color ?? null, rot: s.rot ?? 0, qb: s.qb ?? null } : null);
+    const same = getBlock(p[0], p[1], p[2]) === def.id;
+    if (same && JSON.stringify(norm(stateOf(p[0], p[1], p[2]))) === JSON.stringify(norm(val.v.s || null))) continue;
     setState(p[0], p[1], p[2], val.v.s || null);
     VoxelMulti.applyBlock(p[0], p[1], p[2], def.id);
   }

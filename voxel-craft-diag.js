@@ -102,14 +102,22 @@ function sendRec(r) {
 // ============================================================
 // 4. 置く・壊す
 // ============================================================
-function placeDiag(id) {
+// 置く角度：斜めのブロックに当てたら、そのブロックの角度に吸着する。それ以外は設定の角度
+function angleFor(p) {
+  if (p && p.kind === 'tilt' && p.ent && p.ent.diag) {
+    const r = recs.get(p.ent.diag);
+    if (r) return r.a;
+  }
+  return deg;
+}
+function placeDiag(id, a) {
   const p = pickTarget();
   if (!p) return;
   const q = p.point.clone().addScaledVector(p.normal, 0.5);
-  const c = cellOf(q, deg);
-  const key = keyFor(deg, c);
+  const c = cellOf(q, a);
+  const key = keyFor(a, c);
   if (recs.has(key)) { toast('ここにはもうブロックがあります'); return; }
-  const cc = centerOf(c, deg);
+  const cc = centerOf(c, a);
   if (getBlock(Math.floor(cc.x), Math.floor(cc.y), Math.floor(cc.z)) !== AIR &&
       getBlock(Math.floor(cc.x), Math.floor(cc.y), Math.floor(cc.z)) !== WATER) {
     toast('通常のブロックがあるため置けません'); return;
@@ -121,7 +129,7 @@ function placeDiag(id) {
   const rt = id >= CUSTOM_BASE ? defRT.get(id) : null;
   if (id >= CUSTOM_BASE && (!rt || !rt.ready)) return;
   const r = {
-    key, id, a: deg, i: c.i, j: c.j, k: c.k, ts: (window.VoxelNet ? VoxelNet.nowTs() : Date.now()),
+    key, id, a, i: c.i, j: c.j, k: c.k, ts: (window.VoxelNet ? VoxelNet.nowTs() : Date.now()),
     st: rt ? { color: rt.def.colorable ? ext.curColor : null, rot: ext.rot } : null,
     h: rt ? VoxelCustom.publishDef(rt.def) : null
   };
@@ -141,17 +149,46 @@ function removeDiag(r) {
 }
 
 const prevPlace = window.doPlace;
+// 斜めグリッドで置くか（斜めのブロックに当てた・設定の角度が0以外）
+function diagPlan(p) {
+  if (p && p.kind === 'tilt' && p.ent && p.ent.diag) return angleFor(p);
+  if (deg) return deg;
+  return null;
+}
 window.doPlace = function () {
-  if (!deg) {
-    const before = tiltList.length;
-    const res = prevPlace();
-    for (let i = before; i < tiltList.length; i++) tlAdopt(tiltList[i]);
-    return res;
-  }
   const id = HOTBAR[selIdx];
-  if (isTool(id)) return prevPlace();
-  placeDiag(id);
+  const p = isTool(id) ? null : pickTarget();
+  const a = p ? diagPlan(p) : null;
+  if (a !== null) { placeDiag(id, a); return; }
+  const before = tiltList.length;
+  const res = prevPlace();
+  for (let i = before; i < tiltList.length; i++) tlAdopt(tiltList[i]);
+  return res;
 };
+
+// 置く前のプレビュー（斜めの角度・格子に合わせて表示する）
+VoxelExt.setPlaceHook((p, id) => {
+  if (isTool(id)) return null;
+  const a = diagPlan(p);
+  if (a === null) return null;
+  const q = p.point.clone().addScaledVector(p.normal, 0.5);
+  const c = cellOf(q, a);
+  const cc = centerOf(c, a);
+  const F = frame(a);
+  const rt = id >= CUSTOM_BASE ? defRT.get(id) : null;
+  const isModel = !!(rt && rt.def.kind === 'model');
+  const off = isModel ? new THREE.Vector3(0, -0.5, 0).applyQuaternion(F.q) : new THREE.Vector3();
+  const pos = cc.clone().add(off);
+  const pp = player.pos;
+  const blocked = recs.has(keyFor(a, c)) || isSolidAt3(cc) ||
+    (Math.abs(cc.x - pp.x) < 0.9 && Math.abs(cc.z - pp.z) < 0.9 && cc.y + 0.5 > pp.y && cc.y - 0.5 < pp.y + 1.8);
+  return { pos, q: F.q, valid: !blocked };
+});
+function isSolidAt3(v) {
+  const x = Math.floor(v.x), y = Math.floor(v.y), z = Math.floor(v.z);
+  const b = getBlock(x, y, z);
+  return b !== AIR && b !== WATER;
+}
 const prevBreak = window.doBreak;
 window.doBreak = function () {
   let p = null;

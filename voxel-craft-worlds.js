@@ -14,7 +14,7 @@ const OPEN_KEY = 'vcw_open';             // 再読み込み後に、すぐ開始
 const WORLD_KEYS = [
   'voxelcraft_road_v1', 'voxelcraft_dia_v1', 'voxelcraft_station_v1', 'voxelcraft_train_v1',
   'voxelcraft_traffic_v1', 'voxelcraft_crowd_v1', 'voxelcraft_ext_v1', 'voxelcraft_bag_v1',
-  'voxelcraft_defdel_v1', 'voxelcraft_tilt_v1'
+  'voxelcraft_defdel_v1', 'voxelcraft_tilt_v1', 'voxelcraft_bstate_v1'
 ];
 
 // ============================================================

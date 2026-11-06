@@ -15,7 +15,7 @@ const L = window.VoxelRTLogic;
 const KEYS = [
   'voxelcraft_road_v1', 'voxelcraft_dia_v1', 'voxelcraft_station_v1', 'voxelcraft_train_v1',
   'voxelcraft_traffic_v1', 'voxelcraft_crowd_v1', 'voxelcraft_ext_v1', 'voxelcraft_bag_v1',
-  'voxelcraft_defdel_v1', 'voxelcraft_tilt_v1'
+  'voxelcraft_defdel_v1', 'voxelcraft_tilt_v1', 'voxelcraft_bstate_v1'
 ];
 const POLL_MS = 2000;
 const JOIN_CHECK_MS = 4000;
