@@ -328,6 +328,8 @@ VoxelMulti.onOp('catl', rec => {
 });
 
 async function adoptDef(H, p) {
+  // 起動時の中身の読み込みが終わるまで待つ（読み込み前の内容で照合すると、同じブロックを増やしてしまうため）
+  if (window.VoxelExt && VoxelExt.hydrated && VoxelExt.hydrated()) await VoxelExt.hydrated().catch(() => {});
   const have = defByHash(H) || defByContent(p);   // 同じ中身が既にあれば、新しく増やさない
   if (have) { hashCache.set(have, H); return have.id; }
   const id = nextId();

@@ -3786,7 +3786,9 @@ function init() {
   if (ext.turbo) setTurbo(true);
   window.addEventListener('resize', applyRenderScale);
   setInterval(enforceTurbo, 300);
-  hydrateDefs().then(() => {
+  hydrateReady = hydrateDefs().then(() => {
+    // 中身を戻したあとは、しるしを作り直す（戻す前に作った古いしるしで照合すると、同じブロックを別物と判定して増えるため）
+    if (window.VoxelCustom) for (const def of ext.defs) VoxelCustom.invalidate(def);
     for (const def of ext.defs) registerDef(def);
     refreshHotbarVisuals();
     renderInventory();
@@ -3806,9 +3808,11 @@ init();
 //  ・分類は足すだけ。ブロックの分類が変わったときだけ、その分類へ動かす
 //  戻り値：'same'（変わらない）／'applied'（足した・動かした）／'wait'（中身の受け取りがまだ）
 let lastRemoteExtText = null;      // 最後に処理した相手の内容（同じものを何度も処理しない）
+let hydrateReady = null;   // 起動時に中身を戻す処理（終わるまで、部屋の内容との照合を待つ）
 async function applyRemoteExt(text) {
   if (typeof text !== 'string' || text === localStorage.getItem(EXT_KEY) || text === lastRemoteExtText) return 'same';
   if (!window.VoxelCustom) return 'same';
+  if (hydrateReady) await hydrateReady.catch(() => {});
   let s;
   try { s = JSON.parse(text); } catch (e) { return 'same'; }
   const rdefs = Array.isArray(s.defs) ? s.defs : [];
@@ -3835,7 +3839,8 @@ async function applyRemoteExt(text) {
       o.model = m;
     }
     const H = VoxelCustom.defHash(o);
-    const have = ext.defs.find(x => VoxelCustom.defHash(x) === H);
+    // 同じブロックかどうかは、まず固定ID（aid）で判定する。中身のしるしは見た目の細かな違いで変わることがあるため、二次的に使う
+    const have = (o.aid && ext.defs.find(x => x.aid === o.aid)) || ext.defs.find(x => VoxelCustom.defHash(x) === H);
     if (have) {
       // 同じ中身：分類だけ、相手が動かしていれば合わせる（この端末に無い分類へは動かさない）
       if (o.category && o.category !== have.category && ext.categories.includes(o.category)) {
@@ -3862,7 +3867,7 @@ async function applyRemoteExt(text) {
 window.VoxelExt = {
   T_TRAFFIC, T_CROWD, T_SOUND, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
   keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp, setPlaceHook,
-  applyRemoteExt
+  applyRemoteExt, hydrated: () => hydrateReady
 };
 
 })();
