@@ -3927,6 +3927,9 @@ function init() {
   }).catch(e => console.error(e));
   requestAnimationFrame(extLoop);
 }
+// 起動時に中身を戻す処理（終わるまで、部屋の内容との照合を待つ）
+// ※ init() より前に宣言する（後ろだと init() 内の代入で例外になり、window.VoxelExt が作られない）
+let hydrateReady = null;
 init();
 
 // ── 他の機能ファイル（通信・カスタム・斜め配置・見え方）が使う内部の名前を公開する ──
@@ -3940,7 +3943,6 @@ init();
 //  ・分類は足すだけ。ブロックの分類が変わったときだけ、その分類へ動かす
 //  戻り値：'same'（変わらない）／'applied'（足した・動かした）／'wait'（中身の受け取りがまだ）
 let lastRemoteExtText = null;      // 最後に処理した相手の内容（同じものを何度も処理しない）
-let hydrateReady = null;   // 起動時に中身を戻す処理（終わるまで、部屋の内容との照合を待つ）
 async function applyRemoteExt(text) {
   if (typeof text !== 'string' || text === localStorage.getItem(EXT_KEY) || text === lastRemoteExtText) return 'same';
   if (!window.VoxelCustom) return 'same';
