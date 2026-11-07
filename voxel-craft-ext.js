@@ -277,8 +277,11 @@ function saveExt() {
 }
 async function resolveRef(v) {
   if (!isRef(v)) return v;
-  const raw = await blobGet(v.__blob);
-  if (v.json) { try { return JSON.parse(raw || '{}'); } catch (e) { return {}; } }
+  // 取り出せなかったときは参照のまま残す（空や未定義にして保存し直すと、中身が永久に消えるため）
+  let raw;
+  try { raw = await blobGet(v.__blob); } catch (e) { return v; }
+  if (raw === undefined || raw === null) return v;
+  if (v.json) { try { return JSON.parse(raw); } catch (e) { return v; } }
   return raw;
 }
 // 書き出し用：大きい中身も含めた、完全な設定の文字列
@@ -312,14 +315,17 @@ async function importExtJson(json) {
 }
 // 起動時：参照になっている中身を IndexedDB から戻す
 async function hydrateDefs() {
+  // 1つの定義で失敗しても、ほかの定義は必ず戻す（途中で止まると、全部が登録されず見えなくなるため）
   for (const d of ext.defs) {
-    if (isRef(d.texData)) d.texData = await resolveRef(d.texData);
-    if (d.model) {
-      const m = d.model;
-      if (isRef(m.data)) m.data = await resolveRef(m.data);
-      if (isRef(m.mtl)) m.mtl = await resolveRef(m.mtl);
-      if (isRef(m.images)) m.images = await resolveRef(m.images);
-    }
+    try {
+      if (isRef(d.texData)) d.texData = await resolveRef(d.texData);
+      if (d.model) {
+        const m = d.model;
+        if (isRef(m.data)) m.data = await resolveRef(m.data);
+        if (isRef(m.mtl)) m.mtl = await resolveRef(m.mtl);
+        if (isRef(m.images)) m.images = await resolveRef(m.images);
+      }
+    } catch (e) { console.error('定義の中身を戻せませんでした', e); }
   }
 }
 
@@ -565,13 +571,16 @@ async function registerDef(def) {
   BLOCK_INFO[def.id] = { name: def.name, color: '#8c8c8c' };
 
   if (def.kind === 'cube') {
-    rt.tex = await texFromUrl(def.texData || blankTexUrl());
+    // 絵が読めないとき（参照のまま・読み込み失敗）は、白ではなく空の絵で登録する。
+    // 登録しないと、このブロックを使った傾きブロックや線路・道路が消えてしまうため
+    const src = typeof def.texData === 'string' && def.texData ? def.texData : null;
+    rt.tex = (src && await texFromUrl(src)) || await texFromUrl(blankTexUrl());
     rt.material = new THREE.MeshLambertMaterial({
       map: rt.tex, vertexColors: true, alphaTest: 0.3
     });
   } else if (def.model) {
     try {
-      const r = await loadModelObject(def.model.format, def.model.data, def.texData,
+      const r = await loadModelObject(def.model.format, def.model.data, typeof def.texData === 'string' ? def.texData : null,
         typeof def.scale === 'number' ? def.scale : null, def.modelRot || 0, def.model);
       rt.template = r.root;
     } catch (err) {
