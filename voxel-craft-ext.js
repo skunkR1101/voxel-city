@@ -948,10 +948,10 @@ function applyDarkness(bufs, ox, oy, oz) {
     const perVertex = buf.solid === true;
     if (perVertex) { buf.d = new Array(p.length / 3); buf.w = new Array(p.length / 3); }
     for (let v = 0; v < p.length; v += 3) {
-      // 面の外側（光が来る側）のマスの明るさを使う
-      const cx = Math.floor(p[v] + (hasN ? nrm[v] * 0.5 : 0)) - ox;
-      const cy = Math.floor(p[v + 1] + (hasN ? nrm[v + 1] * 0.5 : 0)) - oy;
-      const cz = Math.floor(p[v + 2] + (hasN ? nrm[v + 2] * 0.5 : 0)) - oz;
+      // 面の外側（光が来る側）のマスの明るさを使う。頂点の座標はチャンク内の座標（0〜16）なので、そのまま使う
+      const cx = Math.floor(p[v] + (hasN ? nrm[v] * 0.5 : 0));
+      const cy = Math.floor(p[v + 1] + (hasN ? nrm[v + 1] * 0.5 : 0));
+      const cz = Math.floor(p[v + 2] + (hasN ? nrm[v + 2] * 0.5 : 0));
       const inside = cx >= -M && cx < CS + M && cy >= -M && cy < CS + M && cz >= -M && cz < CS + M;
       const fi = inside ? ix(cx, cy, cz) : -1;
       const m = inside ? lightMultOf(lv[fi]) : 1;
