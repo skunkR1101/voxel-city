@@ -640,6 +640,25 @@ function modelCenterFor(cell, q) {
 // リアルなモデルのブロックは、1つずつ描かず「チャンクごとに1回でまとめて描く」（インスタンス描画）
 // 見た目（形・色・向き・影）は今までと同じ。描く回数が減るので、数が多くても軽くなる
 // ============================================================
+// 影の形：テクスチャの透けている部分（格子・柵・草など）は、影にも残さない。
+// 何も指定しないと、透けている部分まで含めた四角い影になるため（細かいモデルが四角く影を落とす原因）
+const shadowMatCache = new WeakMap();
+function shadowMatFor(map) {
+  let m = shadowMatCache.get(map);
+  if (!m) {
+    m = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: map, alphaTest: 0.5 });
+    shadowMatCache.set(map, m);
+  }
+  return m;
+}
+// モデルの各部品に、その形の影を割り当てる（テクスチャが無い部品は、そのままの形）
+function fitModelShadow(obj) {
+  obj.traverse(o => {
+    if (!o.isMesh) return;
+    const mt = Array.isArray(o.material) ? o.material[0] : o.material;
+    o.customDepthMaterial = (mt && mt.map) ? shadowMatFor(mt.map) : undefined;
+  });
+}
 // 向きが変わらない部品の位置（モデルの中での位置・傾き）を、根元からの行列で持つ
 function relMatrixTo(obj, root) {
   const chain = [];
@@ -682,6 +701,7 @@ function makeModelBatch(id, list) {
     im.frustumCulled = false;                               // 範囲の管理は、チャンクの読み込みで行う
     im.castShadow = shaderOn;
     im.receiveShadow = shaderOn;
+    im.customDepthMaterial = p.mat.map ? shadowMatFor(p.mat.map) : undefined;   // 影の形（透けた部分は影にしない）
     im.userData.sharedGeo = true;                           // 形は元のモデルと共有（破棄しない）
     return im;
   });
@@ -718,6 +738,7 @@ function makeModelInstance(id, wx, wy, wz) {
   inst.traverse(o => {
     if (o.isMesh) { o.castShadow = shaderOn; o.receiveShadow = shaderOn; }
   });
+  fitModelShadow(inst);
   if (rt.def.colorable && st.color) {
     inst.traverse(o => {
       if (o.isMesh && o.material) {
@@ -1200,6 +1221,7 @@ function makeTiltObject(id, st) {
         o.traverse(c => { if (c.isMesh) { c.material = c.material.clone(); c.material.color.set(st.color); } });
       }
       o.traverse(c => { if (c.isMesh) { c.castShadow = shaderOn; c.receiveShadow = shaderOn; } });
+      fitModelShadow(o);
       return { obj: o, isModel: true };
     }
     if (!rt.tex) return null;
