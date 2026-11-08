@@ -48,6 +48,7 @@ const ext = {
   colorHistory: [],
   curColor: '#ffffff',
   colorOff: false,          // カラーの指定を解除中（置くとき色を付けない）
+  lightMin: 0,              // 光の届かない所の明るさ（0〜100%。0で真っ暗）
   waterDim: 0,              // 水の暗さ（0〜100）
   waterTint: '#ffffff',     // 水の色味（シェーダー時・通常時の両方）
   rot: 0,
@@ -165,6 +166,7 @@ function loadExt() {
     ext.shaderBefore = typeof s.shaderBefore === 'boolean' ? s.shaderBefore : null;
     if (Array.isArray(s.categories) && s.categories.length) ext.categories = s.categories;
     if (Array.isArray(s.colorHistory)) ext.colorHistory = s.colorHistory.slice(0, 12);
+    if (s.light && typeof s.light.min === 'number') ext.lightMin = clamp(s.light.min, 0, 100);
     if (s.water && typeof s.water === 'object') {
       if (typeof s.water.dim === 'number') ext.waterDim = clamp(s.water.dim, 0, 100);
       if (typeof s.water.tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.water.tint)) ext.waterTint = s.water.tint;
@@ -274,7 +276,7 @@ function saveExt() {
       turbo: ext.turbo, shaderBefore: ext.shaderBefore,
       categories: ext.categories, colorHistory: ext.colorHistory, defs: L.defs,
       tilt: ext.tilt, grid: ext.grid,
-      water: { dim: ext.waterDim, tint: ext.waterTint }
+      water: { dim: ext.waterDim, tint: ext.waterTint }, light: { min: ext.lightMin }
     }));
     cleanBlobs(L.live);
     return true;
@@ -309,7 +311,7 @@ async function fullExtJson() {
   }
   return JSON.stringify({ turbo: ext.turbo, shaderBefore: ext.shaderBefore, categories: ext.categories,
     colorHistory: ext.colorHistory, defs, tilt: ext.tilt, grid: ext.grid,
-    water: { dim: ext.waterDim, tint: ext.waterTint } });
+    water: { dim: ext.waterDim, tint: ext.waterTint }, light: { min: ext.lightMin } });
 }
 // 読み込み用：書き出したファイルの設定を、この端末の形で保存する
 async function importExtJson(json) {
@@ -319,7 +321,7 @@ async function importExtJson(json) {
   localStorage.setItem(EXT_KEY, JSON.stringify({
     turbo: !!s.turbo, shaderBefore: typeof s.shaderBefore === 'boolean' ? s.shaderBefore : null,
     categories: s.categories, colorHistory: s.colorHistory, defs: L.defs, tilt: s.tilt, grid: s.grid,
-    water: s.water
+    water: s.water, light: s.light
   }));
   cleanBlobs(L.live);
 }
@@ -797,6 +799,13 @@ function glowColorOf(rt) {
   rt.glowCol = col;
   return col;
 }
+// 発光の色の濃さを反映した色（濃さ0で灰色、1で元の色、2でより鮮やか）。明るさの減り方は変えない
+function glowTintOf(rt) {
+  const base = glowColorOf(rt);
+  const s = glowDeepOf(rt.def.glowDeep ?? 1);
+  const lum = 0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2];
+  return base.map(c => clamp(lum + (c - lum) * s, 0, 1.2));
+}
 // このチャンクと周りの隣（±1チャンク）にある発光ブロック。光は隣のチャンクまで届くので、隣も見る
 function isGlowId(id) {
   if (id < CUSTOM_BASE) return false;
@@ -820,7 +829,7 @@ function glowSourcesOf(dd, e) {
       if (t < CUSTOM_BASE) continue;
       const rt = defRT.get(t);
       if (!rt || !rt.ready || !rt.def || rt.def.alpha !== 'glow') continue;
-      const col = glowColorOf(rt);
+      const col = glowTintOf(rt);
       const power = rt.def.glowPower || 1.5;
       out.push({
         x: dx * CS + (li & 15) + 0.5, y: dy * CS + ((li >> 4) & 15) + 0.5, z: dz * CS + ((li >> 8) & 15) + 0.5,
@@ -862,11 +871,108 @@ function applyGlowLight(bufs, srcs) {
     }
   }
 }
+// ── 暗がりの光（本家のように、光の届かない所は暗くなる）──
+// 空から届く光（15）が、不透明なブロックを避けて1マスごとに弱まりながら広がる。
+// 真下へは減らずに届く（空の光の性質）。チャンクの外側も少しだけ計算して、境目の暗さを防ぐ。
+const LIGHT_M = 8;                 // 計算に使うチャンク外側の余白（ブロック数）
+const LIGHT_S = CS + LIGHT_M * 2;  // 計算範囲の一辺
+const LIGHT_SKY_TOP = 160;         // これより上は空（ブロックは無い）
+const colTopCache = new Map();     // "x,z" -> その列で一番上の不透明ブロックの高さ
+const lightQ = new Int32Array(LIGHT_S * LIGHT_S * LIGHT_S * 16);
+function lightOpaque(t) {
+  if (t === AIR || t === WATER || t === LEAVES) return false;
+  if (t >= CUSTOM_BASE) {
+    const rt = defRT.get(t);
+    if (!rt || !rt.def) return true;                  // 読み込み中は、いったん不透明として扱う
+    if (rt.def.kind === 'model') return false;
+    if (rt.def.alpha === 'cut' || rt.def.alpha === 'blend' || rt.def.alpha === 'glow') return false;
+    return true;
+  }
+  return true;
+}
+function colTopOf(x, z) {
+  const k = x + ',' + z;
+  let v = colTopCache.get(k);
+  if (v !== undefined) return v;
+  v = BOTTOM - 1;
+  for (let y = LIGHT_SKY_TOP; y >= BOTTOM; y--) if (lightOpaque(getBlock(x, y, z))) { v = y; break; }
+  colTopCache.set(k, v);
+  return v;
+}
+// 光の明るさ（0〜15）を、表示する明るさ（0〜1）へ。「暗がりの最低の明るさ」の設定で、真っ暗にもできる
+function lightMultOf(lv) {
+  const minL = clamp(ext.lightMin, 0, 100) / 100;
+  return minL + (1 - minL) * Math.pow(lv / 15, 1.4);
+}
+// チャンクの頂点の色に、そこに届く光を掛ける（暗い所は暗く）
+function applyDarkness(bufs, ox, oy, oz) {
+  const S = LIGHT_S, M = LIGHT_M, n = S * S * S;
+  const lv = new Uint8Array(n), opq = new Uint8Array(n);
+  const ix = (x, y, z) => (x + M) + (y + M) * S + (z + M) * S * S;
+  let qh = 0, qt = 0;
+  for (let z = -M; z < CS + M; z++) for (let x = -M; x < CS + M; x++) {
+    const wx = ox + x, wz = oz + z;
+    const top = colTopOf(wx, wz);
+    for (let y = -M; y < CS + M; y++) {
+      const i = ix(x, y, z);
+      if (lightOpaque(getBlock(wx, oy + y, wz))) { opq[i] = 1; continue; }
+      if (oy + y > top) { lv[i] = 15; lightQ[qt++] = i; }
+    }
+  }
+  // 広がり（幅優先）
+  while (qh < qt) {
+    const i = lightQ[qh++];
+    const l = lv[i];
+    if (l <= 1) continue;
+    const xi = i % S, yi = Math.floor(i / S) % S, zi = Math.floor(i / (S * S));
+    const spread = (nx, ny, nz, lvNext) => {
+      if (nx < 0 || ny < 0 || nz < 0 || nx >= S || ny >= S || nz >= S) return;
+      const j = nx + ny * S + nz * S * S;
+      if (opq[j] || lv[j] >= lvNext) return;
+      lv[j] = lvNext;
+      lightQ[qt++] = j;
+    };
+    spread(xi + 1, yi, zi, l - 1);
+    spread(xi - 1, yi, zi, l - 1);
+    spread(xi, yi, zi + 1, l - 1);
+    spread(xi, yi, zi - 1, l - 1);
+    spread(xi, yi + 1, zi, l - 1);
+    spread(xi, yi - 1, zi, l === 15 ? 15 : l - 1);     // 真下への空の光は弱まらない
+  }
+  for (const buf of bufs) {
+    const p = buf.p, c = buf.c, nrm = buf.n;
+    const hasN = !!nrm && nrm.length === p.length;
+    for (let v = 0; v < p.length; v += 3) {
+      // 面の外側（光が来る側）のマスの明るさを使う
+      const cx = Math.floor(p[v] + (hasN ? nrm[v] * 0.5 : 0)) - ox;
+      const cy = Math.floor(p[v + 1] + (hasN ? nrm[v + 1] * 0.5 : 0)) - oy;
+      const cz = Math.floor(p[v + 2] + (hasN ? nrm[v + 2] * 0.5 : 0)) - oz;
+      const inside = cx >= -M && cx < CS + M && cy >= -M && cy < CS + M && cz >= -M && cz < CS + M;
+      const m = inside ? lightMultOf(lv[ix(cx, cy, cz)]) : 1;
+      if (m >= 1) continue;
+      c[v] *= m; c[v + 1] *= m; c[v + 2] *= m;
+    }
+  }
+}
+// 光が変わるかもしれないチャンク（余白の範囲に入るチャンク）だけ作り直す
+function markLightNeighbors(x, y, z) {
+  const cx = Math.floor(x / CS), cy = Math.floor(y / CS), cz = Math.floor(z / CS);
+  const lx = x - cx * CS, ly = y - cy * CS, lz = z - cz * CS;
+  const rng = l => ({ lo: l < LIGHT_M ? -1 : 0, hi: l >= CS - LIGHT_M ? 1 : 0 });
+  const rx = rng(lx), ry = rng(ly), rz = rng(lz);
+  for (let dz = rz.lo; dz <= rz.hi; dz++) for (let dy = ry.lo; dy <= ry.hi; dy++) for (let dx = rx.lo; dx <= rx.hi; dx++) {
+    markDirtyKey(cx + dx, cy + dy, cz + dz);
+  }
+}
 // 発光ブロックを置いた・消したときは、光が届く範囲のチャンクを作り直す
 const origSetBlockForGlow = window.setBlock;
 window.setBlock = function (x, y, z, t) {
   const old = getBlock(x, y, z);
   const r = origSetBlockForGlow.apply(this, arguments);
+  if (old !== t) {
+    colTopCache.delete(x + ',' + z);            // 空からの光の列を、作り直す
+    markLightNeighbors(x, y, z);                // 暗がりの光が届く範囲（隣のチャンクまで）を作り直す
+  }
   if (isGlowId(t) || isGlowId(old)) {
     const cx = Math.floor(x / CS), cy = Math.floor(y / CS), cz = Math.floor(z / CS);
     for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -915,6 +1021,30 @@ function buildWaterSettings() {
     </div>
     <div style="font-size:11px;color:#9fb3c8;margin-top:4px">夜の水は、暗さの設定とは別に自動で暗くなります。</div>`;
   close.parentNode.insertBefore(sec, close);
+  // 明るさ（光の届かない所の明るさ）
+  const lsec = document.createElement('div');
+  lsec.id = 'extLightSec';
+  lsec.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #3a4a60;border-radius:8px';
+  lsec.innerHTML = `
+    <div style="font-weight:bold;margin-bottom:6px">光の届かない所の明るさ</div>
+    <label>明るさ：<span id="extLightMinV"></span>
+      <input type="range" id="extLightMin" min="0" max="100" step="5" style="width:100%"></label>
+    <div style="font-size:11px;color:#9fb3c8;margin-top:4px">0%で真っ暗（本家の洞窟のように）。上げると、暗い所も少し見えます。</div>`;
+  close.parentNode.insertBefore(lsec, close);
+  const lightUi = () => {
+    document.getElementById('extLightMin').value = ext.lightMin;
+    document.getElementById('extLightMinV').textContent = ext.lightMin + '%';
+  };
+  const lightApply = () => { for (const e of chunks.values()) markDirty(e); saveExt(); };
+  lightUi();
+  document.getElementById('extLightMin').addEventListener('input', e => {
+    document.getElementById('extLightMinV').textContent = e.target.value + '%';
+  });
+  document.getElementById('extLightMin').addEventListener('change', e => {
+    ext.lightMin = +e.target.value;   // 指を離したときだけ、全体を作り直す（動かしている間は軽いまま）
+    document.getElementById('extLightMinV').textContent = ext.lightMin + '%';
+    lightApply();
+  });
   const syncUi = () => {
     document.getElementById('extWaterDim').value = ext.waterDim;
     document.getElementById('extWaterDimV').textContent = ext.waterDim + '%';
@@ -1069,6 +1199,7 @@ window.buildMesh = function (e) {
   for (const [id, list] of MB) {
     for (const o of makeModelBatch(id, list)) { scene.add(o); extra.push(o); }
   }
+  applyDarkness([SB, WB, PB, ...CB.values()], ox, oy, oz);      // 光の届かない所は暗く（発光は後から足す）
   applyGlowLight([SB, WB, PB, ...CB.values()], glowSourcesOf(d, e));
   if (SB.p.length) {
     const m = new THREE.Mesh(makeGeom(SB), solidMat);
@@ -2677,14 +2808,18 @@ function closeSkinEditor() {
 // ============================================================
 let draft = null;
 function glowOf(v) { return Math.min(5, Math.max(0.2, Number(v) || 1.5)); }
+// 発光の色の濃さ（0＝白っぽい、1＝ブロックの色そのまま、2＝より濃い）。明るさとは別の設定
+function glowDeepOf(v) { return Math.min(2, Math.max(0, Number(v) ?? 1)); }
 function syncGlowUI() {
   const w = document.getElementById('extGlowWrap');
   if (w) w.style.display = (draft && draft.look === 'glow') ? 'inline-block' : 'none';
+  const w2 = document.getElementById('extGlowDeepWrap');
+  if (w2) w2.style.display = (draft && draft.look === 'glow') ? 'inline-block' : 'none';
 }
 function newDraft() {
   return {
     kind: 'cube', name: '', category: ext.categories[0] || '未分類', colorable: false,
-    look: 'cut', glow: 1.5,
+    look: 'cut', glow: 1.5, glowDeep: 1,
     texData: null, model: null, modelTex: null, template: null,
     orient: 'fixed',
     scaleMode: 'auto', customScale: 1, resolvedScale: null, modelRot: 0,
@@ -2712,6 +2847,7 @@ function fillImportForm() {
   document.getElementById('extColorable').checked = d.colorable;
   document.getElementById('extLook').value = d.look || 'cut';
   document.getElementById('extGlow').value = String(glowOf(d.glow));
+  document.getElementById('extGlowDeep').value = String(glowDeepOf(d.glowDeep ?? 1));
   syncGlowUI();
   document.getElementById('extCubeSec').style.display = d.kind === 'cube' ? 'flex' : 'none';
   document.getElementById('extModelSec').style.display = d.kind === 'model' ? 'block' : 'none';
@@ -2766,7 +2902,8 @@ async function saveDraft() {
     scale: draft.kind === 'model' ? (draft.resolvedScale ?? 1) : undefined,
     sounds: draft.sounds,
     alpha: draft.look || 'cut',
-    glowPower: draft.look === 'glow' ? glowOf(draft.glow) : undefined
+    glowPower: draft.look === 'glow' ? glowOf(draft.glow) : undefined,
+    glowDeep: draft.look === 'glow' ? glowDeepOf(draft.glowDeep) : undefined
   };
   ext.defs.push(def);
   if (!saveExt()) { ext.defs.pop(); return; }
@@ -2801,7 +2938,7 @@ function closeImport() {
 let bulk = null;                                     // { items, i, done, keep }
 function baseName(n) { return String(n).replace(/\.[^.]+$/, ''); }
 function pickKeep(d) {
-  return { category: d.category, colorable: d.colorable, look: d.look, glow: d.glow, orient: d.orient,
+  return { category: d.category, colorable: d.colorable, look: d.look, glow: d.glow, glowDeep: d.glowDeep, orient: d.orient,
     modelRot: d.modelRot, scaleMode: d.scaleMode, customScale: d.customScale, sounds: d.sounds };
 }
 async function modelItemsFrom(files) {
@@ -2939,7 +3076,7 @@ function resolveConflict(v) {
   closePanel();
   if (r) r(v);
 }
-const DEF_FIELDS = ['name', 'kind', 'colorable', 'texData', 'model', 'orient', 'modelRot', 'scale', 'alpha', 'glowPower'];
+const DEF_FIELDS = ['name', 'kind', 'colorable', 'texData', 'model', 'orient', 'modelRot', 'scale', 'alpha', 'glowPower', 'glowDeep'];
 async function importAssets(file) {
   let s;
   try { s = JSON.parse(await readAs(file, 'text')); } catch (e) { toast('ファイルを読めませんでした'); return; }
@@ -3267,6 +3404,9 @@ function buildDOM() {
       <label id="extGlowWrap" style="display:none">明るさ
         <input class="ext-input" id="extGlow" type="number" min="0.2" max="5" step="0.1" value="1.5" style="width:70px">
       </label>
+      <label id="extGlowDeepWrap" style="display:none">色の濃さ
+        <input class="ext-input" id="extGlowDeep" type="number" min="0" max="2" step="0.1" value="1" style="width:70px">
+      </label>
     </div>
     <div id="extCubeSec" class="ext-row" style="margin-top:10px">
       <button class="ext-btn" id="extSkinOpen">スキンを描く・編集</button>
@@ -3529,6 +3669,7 @@ function wire() {
   document.getElementById('extColorable').addEventListener('change', e => { draft.colorable = e.target.checked; });
   document.getElementById('extLook').addEventListener('change', e => { draft.look = e.target.value; syncGlowUI(); });
   document.getElementById('extGlow').addEventListener('change', e => { draft.glow = glowOf(e.target.value); e.target.value = String(draft.glow); });
+  document.getElementById('extGlowDeep').addEventListener('change', e => { draft.glowDeep = glowDeepOf(e.target.value); e.target.value = String(draft.glowDeep); });
   document.getElementById('extOrient').addEventListener('change', e => { draft.orient = e.target.value; });
   document.getElementById('extModelRot').addEventListener('change', async e => {
     draft.modelRot = Number(e.target.value) || 0;
@@ -4151,7 +4292,7 @@ async function applyRemoteExt(text) {
       }
       // 同じブロック（aid）で、相手の方が新しい設定（一括変更など）になっていれば、設定だけ合わせる
       if (o.aid && have.aid === o.aid && (o.rev || 0) > (have.rev || 0) && VoxelCustom.defHash(have) !== H) {
-        for (const k of ['name', 'kind', 'colorable', 'alpha', 'glowPower', 'orient', 'scale', 'modelRot', 'texData', 'model']) {
+        for (const k of ['name', 'kind', 'colorable', 'alpha', 'glowPower', 'glowDeep', 'orient', 'scale', 'modelRot', 'texData', 'model']) {
           if (o[k] !== undefined) have[k] = o[k];
         }
         have.rev = o.rev;
