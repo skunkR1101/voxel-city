@@ -907,7 +907,7 @@ function lightMultOf(lv) {
 // チャンクの頂点の色に、そこに届く光を掛ける（暗い所は暗く）
 function applyDarkness(bufs, ox, oy, oz) {
   const S = LIGHT_S, M = LIGHT_M, n = S * S * S;
-  const lv = new Uint8Array(n), opq = new Uint8Array(n);
+  const lv = new Uint8Array(n), opq = new Uint8Array(n), wat = new Uint8Array(n);
   const ix = (x, y, z) => (x + M) + (y + M) * S + (z + M) * S * S;
   let qh = 0, qt = 0;
   for (let z = -M; z < CS + M; z++) for (let x = -M; x < CS + M; x++) {
@@ -915,7 +915,9 @@ function applyDarkness(bufs, ox, oy, oz) {
     const top = colTopOf(wx, wz);
     for (let y = -M; y < CS + M; y++) {
       const i = ix(x, y, z);
-      if (lightOpaque(getBlock(wx, oy + y, wz))) { opq[i] = 1; continue; }
+      const bt = getBlock(wx, oy + y, wz);
+      if (bt === WATER) wat[i] = 1;
+      if (lightOpaque(bt)) { opq[i] = 1; continue; }
       if (oy + y > top) { lv[i] = 15; lightQ[qt++] = i; }
     }
   }
@@ -942,18 +944,57 @@ function applyDarkness(bufs, ox, oy, oz) {
   for (const buf of bufs) {
     const p = buf.p, c = buf.c, nrm = buf.n;
     const hasN = !!nrm && nrm.length === p.length;
+    // 固いブロック（SB）は、光の届き具合（aDark）と、水に触れているか（aWet）を頂点ごとに持つ
+    const perVertex = buf.solid === true;
+    if (perVertex) { buf.d = new Array(p.length / 3); buf.w = new Array(p.length / 3); }
     for (let v = 0; v < p.length; v += 3) {
       // 面の外側（光が来る側）のマスの明るさを使う
       const cx = Math.floor(p[v] + (hasN ? nrm[v] * 0.5 : 0)) - ox;
       const cy = Math.floor(p[v + 1] + (hasN ? nrm[v + 1] * 0.5 : 0)) - oy;
       const cz = Math.floor(p[v + 2] + (hasN ? nrm[v + 2] * 0.5 : 0)) - oz;
       const inside = cx >= -M && cx < CS + M && cy >= -M && cy < CS + M && cz >= -M && cz < CS + M;
-      const m = inside ? lightMultOf(lv[ix(cx, cy, cz)]) : 1;
+      const fi = inside ? ix(cx, cy, cz) : -1;
+      const m = inside ? lightMultOf(lv[fi]) : 1;
+      if (perVertex) {
+        buf.d[v / 3] = m;
+        buf.w[v / 3] = inside && wat[fi] ? 1 : 0;
+      }
       if (m >= 1) continue;
       c[v] *= m; c[v + 1] *= m; c[v + 2] *= m;
     }
   }
 }
+// ── 固いブロックの見た目（シェーダーON時）──
+// ・洞窟の中でも、太陽の光が当たっている所（入口から差す光）は、暗くせずに明るいまま残す。
+//   → 画面の「光の差し込み」が、洞窟の入口の光から筋を作れるようになる
+// ・水の下にある面（水底など）には、ゆらゆら動く水の模様（コースティクス）を重ねる
+// 元の描画は変えず、置き換えが効かなかった場合は今までどおり（安全に戻る）
+solidMat.onBeforeCompile = shader => {
+  shader.uniforms.uTime = { value: 0 };
+  shader.uniforms.uOn = { value: 0 };
+  solidMat.userData.uniforms = shader.uniforms;
+  shader.vertexShader = shader.vertexShader
+    .replace('void main() {', 'attribute float aDark;\nattribute float aWet;\nvarying float vDark;\nvarying float vWet;\nvarying vec3 vWorldPos;\nvoid main() {')
+    .replace('#include <project_vertex>', '#include <project_vertex>\n  vDark = aDark;\n  vWet = aWet;\n  vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+  shader.fragmentShader = shader.fragmentShader
+    .replace('void main() {', 'varying float vDark;\nvarying float vWet;\nvarying vec3 vWorldPos;\nuniform float uTime;\nuniform float uOn;\n' +
+      'float caustic(vec2 p, float t) {\n' +
+      '  float a = sin(p.x * 2.6 + t * 1.1) * cos(p.y * 2.3 - t * 0.8);\n' +
+      '  float b = sin((p.x + p.y) * 3.7 - t * 1.6);\n' +
+      '  return pow(clamp(0.5 + 0.25 * (a + b), 0.0, 1.0), 5.0);\n' +
+      '}\nvoid main() {')
+    .replace('vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + totalEmissiveRadiance;',
+      'vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + totalEmissiveRadiance;\n' +
+      '  outgoingLight += reflectedLight.directDiffuse * (1.0 - vDark);\n' +
+      '  outgoingLight += vWet * uOn * caustic(vWorldPos.xz, uTime) * vec3(0.5, 0.8, 1.0) * 0.45;');
+};
+// 水の模様を動かす（毎フレーム、時間と、シェーダーのON/OFFだけ更新する）
+(function tickSolidLook() {
+  const u = solidMat.userData.uniforms;
+  if (u) { u.uTime.value = performance.now() / 1000; u.uOn.value = shaderOn ? 1 : 0; }
+  requestAnimationFrame(tickSolidLook);
+})();
+
 // 光が変わるかもしれないチャンク（余白の範囲に入るチャンク）だけ作り直す
 function markLightNeighbors(x, y, z) {
   const cx = Math.floor(x / CS), cy = Math.floor(y / CS), cz = Math.floor(z / CS);
@@ -1122,7 +1163,7 @@ window.buildMesh = function (e) {
     return out;
   };
 
-  const SB = { p: [], n: [], uv: [], c: [], i: [] };
+  const SB = { p: [], n: [], uv: [], c: [], i: [], solid: true };
   const WB = { p: [], n: [], uv: [], c: [], i: [] };
   const PB = { p: [], n: [], uv: [], c: [], i: [] };
   const CB = new Map();

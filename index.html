@@ -1159,6 +1159,9 @@ function makeGeom(buf) {
   g.setAttribute('normal', new THREE.Float32BufferAttribute(buf.n, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(buf.uv, 2));
   g.setAttribute('color', new THREE.Float32BufferAttribute(buf.c, 3));
+  // 追加情報（任意）：光の届き具合（aDark）・水に触れているか（aWet）
+  if (buf.d) g.setAttribute('aDark', new THREE.Float32BufferAttribute(buf.d, 1));
+  if (buf.w) g.setAttribute('aWet', new THREE.Float32BufferAttribute(buf.w, 1));
   g.setIndex(buf.i);
   return g;
 }
@@ -2480,7 +2483,6 @@ updateSunDir();
 setShader(settings.shader);
 requestAnimationFrame(frame);
 </script>
-
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
