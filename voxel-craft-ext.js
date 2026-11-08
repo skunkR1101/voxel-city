@@ -47,6 +47,9 @@ const ext = {
   categories: ['未分類'],
   colorHistory: [],
   curColor: '#ffffff',
+  colorOff: false,          // カラーの指定を解除中（置くとき色を付けない）
+  waterDim: 0,              // 水の暗さ（0〜100）
+  waterTint: '#ffffff',     // 水の色味（シェーダー時・通常時の両方）
   rot: 0,
   curCat: '全て',
   invOpen: false,
@@ -162,6 +165,10 @@ function loadExt() {
     ext.shaderBefore = typeof s.shaderBefore === 'boolean' ? s.shaderBefore : null;
     if (Array.isArray(s.categories) && s.categories.length) ext.categories = s.categories;
     if (Array.isArray(s.colorHistory)) ext.colorHistory = s.colorHistory.slice(0, 12);
+    if (s.water && typeof s.water === 'object') {
+      if (typeof s.water.dim === 'number') ext.waterDim = clamp(s.water.dim, 0, 100);
+      if (typeof s.water.tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.water.tint)) ext.waterTint = s.water.tint;
+    }
     if (Array.isArray(s.defs)) ext.defs = s.defs;
     if (typeof s.tilt === 'number') ext.tilt = clamp(s.tilt, 0, 90);
     if (typeof s.grid === 'number') ext.grid = [1, 0.5, 0.25, 0].includes(s.grid) ? s.grid : 1;
@@ -266,7 +273,8 @@ function saveExt() {
     localStorage.setItem(EXT_KEY, JSON.stringify({
       turbo: ext.turbo, shaderBefore: ext.shaderBefore,
       categories: ext.categories, colorHistory: ext.colorHistory, defs: L.defs,
-      tilt: ext.tilt, grid: ext.grid
+      tilt: ext.tilt, grid: ext.grid,
+      water: { dim: ext.waterDim, tint: ext.waterTint }
     }));
     cleanBlobs(L.live);
     return true;
@@ -300,7 +308,8 @@ async function fullExtJson() {
     defs.push(o);
   }
   return JSON.stringify({ turbo: ext.turbo, shaderBefore: ext.shaderBefore, categories: ext.categories,
-    colorHistory: ext.colorHistory, defs, tilt: ext.tilt, grid: ext.grid });
+    colorHistory: ext.colorHistory, defs, tilt: ext.tilt, grid: ext.grid,
+    water: { dim: ext.waterDim, tint: ext.waterTint } });
 }
 // 読み込み用：書き出したファイルの設定を、この端末の形で保存する
 async function importExtJson(json) {
@@ -309,7 +318,8 @@ async function importExtJson(json) {
   await Promise.all(L.pending);
   localStorage.setItem(EXT_KEY, JSON.stringify({
     turbo: !!s.turbo, shaderBefore: typeof s.shaderBefore === 'boolean' ? s.shaderBefore : null,
-    categories: s.categories, colorHistory: s.colorHistory, defs: L.defs, tilt: s.tilt, grid: s.grid
+    categories: s.categories, colorHistory: s.colorHistory, defs: L.defs, tilt: s.tilt, grid: s.grid,
+    water: s.water
   }));
   cleanBlobs(L.live);
 }
@@ -866,6 +876,77 @@ window.setBlock = function (x, y, z, t) {
   return r;
 };
 
+// ── 水のカラー ──
+// 置くとき、いまのカラー（解除中でなければその色）を水に付ける。水はカラーの変更も対応
+function colorForNew() { return ext.colorOff ? null : ext.curColor; }
+let placingNow = false;
+const prevDoPlaceWater = window.doPlace;
+window.doPlace = function () {
+  placingNow = true;
+  try { return prevDoPlaceWater.apply(this, arguments); } finally { placingNow = false; }
+};
+const origSetBlockForWater = window.setBlock;
+window.setBlock = function (x, y, z, t) {
+  const old = getBlock(x, y, z);
+  const r = origSetBlockForWater.apply(this, arguments);
+  const k = keyOf(x, y, z);
+  if (t === WATER && placingNow) {
+    blockState.set(k, { color: colorForNew(), rot: 0 });
+    touchState(x, y, z);
+  } else if (old === WATER && t !== WATER && blockState.has(k)) {
+    blockState.delete(k);
+  }
+  return r;
+};
+// 設定画面に「水の見た目」を追加する（暗さのスライダー・色味・初期値に戻す）
+function buildWaterSettings() {
+  const close = document.getElementById('settingsClose');
+  if (!close || document.getElementById('extWaterSec')) return;
+  const sec = document.createElement('div');
+  sec.id = 'extWaterSec';
+  sec.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #3a4a60;border-radius:8px';
+  sec.innerHTML = `
+    <div style="font-weight:bold;margin-bottom:6px">水の見た目</div>
+    <label>水の暗さ：<span id="extWaterDimV"></span>
+      <input type="range" id="extWaterDim" min="0" max="100" step="5" style="width:100%"></label>
+    <div style="margin-top:6px">水の色味：
+      <input type="color" id="extWaterTint">
+      <button class="ext-btn sub" id="extWaterReset" type="button">初期値に戻す</button>
+    </div>
+    <div style="font-size:11px;color:#9fb3c8;margin-top:4px">夜の水は、暗さの設定とは別に自動で暗くなります。</div>`;
+  close.parentNode.insertBefore(sec, close);
+  const syncUi = () => {
+    document.getElementById('extWaterDim').value = ext.waterDim;
+    document.getElementById('extWaterDimV').textContent = ext.waterDim + '%';
+    document.getElementById('extWaterTint').value = ext.waterTint;
+  };
+  syncUi();
+  document.getElementById('extWaterDim').addEventListener('input', e => {
+    ext.waterDim = +e.target.value;
+    document.getElementById('extWaterDimV').textContent = ext.waterDim + '%';
+    applyWaterLook(); saveExt();
+  });
+  document.getElementById('extWaterTint').addEventListener('input', e => {
+    ext.waterTint = e.target.value;
+    applyWaterLook(); saveExt();
+  });
+  document.getElementById('extWaterReset').addEventListener('click', () => {
+    ext.waterDim = 0; ext.waterTint = '#ffffff';
+    syncUi(); applyWaterLook(); saveExt();
+  });
+}
+// 水の見た目（暗さ・色味）を、シェーダー用と通常用の両方に反映する
+function applyWaterLook() {
+  const dim = clamp(ext.waterDim, 0, 100) / 100;
+  if (typeof waterShaderMat !== 'undefined') {
+    waterShaderMat.uniforms.waterDim.value = dim;
+    waterShaderMat.uniforms.waterTint.value.set(ext.waterTint);
+  }
+  if (typeof waterMat !== 'undefined') {
+    waterMat.color.set(ext.waterTint).multiplyScalar(1 - dim * 0.8);
+  }
+}
+
 window.buildMesh = function (e) {
   if (!e.gen) generateEntry(e);
   e.dirty = false;
@@ -883,6 +964,33 @@ window.buildMesh = function (e) {
     else t = getBlock(ox + lx, oy + ly, oz + lz);
     P[px + py * 18 + pz * 324] = t;
   }
+
+  // 簡易な影（頂点AO）の判定。細かいモデルのブロックは「透ける」扱いにして、
+  // 全ブロックと同じ四角い影が付かないようにする（フルブロックのカスタムは今までどおり不透明）
+  const opqAO = t => {
+    if (t === AIR || t === WATER) return 0;
+    if (t >= CUSTOM_BASE) {
+      const rt = defRT.get(t);
+      if (rt && rt.def && rt.def.kind === 'model') return 0;
+    }
+    return 1;
+  };
+  const computeAOExt = (pi, f) => {
+    const nd = FACES[f];
+    const k = nd.axis, A = (k + 1) % 3, B = (k + 2) % 3;
+    const base = pi + nd.off;
+    const out = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+      const c = nd.corners[i];
+      const sA = c[A] ? 1 : -1, sB = c[B] ? 1 : -1;
+      const s1 = opqAO(P[base + sA * STRIDE[A]]);
+      const s2 = opqAO(P[base + sB * STRIDE[B]]);
+      const cc = opqAO(P[base + sA * STRIDE[A] + sB * STRIDE[B]]);
+      const lvl = (s1 && s2) ? 0 : 3 - (s1 + s2 + cc);
+      out[i] = AO_BRIGHT[lvl];
+    }
+    return out;
+  };
 
   const SB = { p: [], n: [], uv: [], c: [], i: [] };
   const WB = { p: [], n: [], uv: [], c: [], i: [] };
@@ -934,7 +1042,7 @@ window.buildMesh = function (e) {
       for (let f = 0; f < 6; f++) {
         const nt = P[pi + FACES[f].off];
         if (nt !== AIR && nt !== WATER && nt < CUSTOM_BASE) continue;
-        emitCubeFace(buf, x, y, z, f, computeAO(pi, f), tint);
+        emitCubeFace(buf, x, y, z, f, computeAOExt(pi, f), tint);
       }
       continue;
     }
@@ -944,9 +1052,16 @@ window.buildMesh = function (e) {
       if (t === WATER) {
         if (nt !== AIR) continue;
         emitQuad(WB, x, y, z, f, tileIndex(t, f), [1, 1, 1, 1]);
+        // 水のカラー指定（色があれば、この面の4頂点に色を付ける）
+        const wst = blockState.get(keyOf(wx, wy, wz));
+        if (wst && wst.color) {
+          const tc = hexToRgb(wst.color);
+          const base = WB.c.length - 12;
+          for (let i = 0; i < 4; i++) { WB.c[base + i * 3] = tc[0]; WB.c[base + i * 3 + 1] = tc[1]; WB.c[base + i * 3 + 2] = tc[2]; }
+        }
       } else {
         if (nt !== AIR && nt !== WATER && nt < CUSTOM_BASE) continue;
-        emitQuad(SB, x, y, z, f, tileIndex(t, f), computeAO(pi, f));
+        emitQuad(SB, x, y, z, f, tileIndex(t, f), computeAOExt(pi, f));
       }
     }
   }
@@ -1297,9 +1412,9 @@ window.doPlace = function () {
     setBlock(cell[0], cell[1], cell[2], id);
     if (isModel) {
       const o = modelOrient(rt.def, p);
-      blockState.set(keyOf(cell[0], cell[1], cell[2]), { color: rt.def.colorable ? ext.curColor : null, rot: o.rot, qb: o.qb });
+      blockState.set(keyOf(cell[0], cell[1], cell[2]), { color: rt.def.colorable ? colorForNew() : null, rot: o.rot, qb: o.qb });
     } else if (rt) {
-      blockState.set(keyOf(cell[0], cell[1], cell[2]), { color: rt.def.colorable ? ext.curColor : null, rot: ext.rot });
+      blockState.set(keyOf(cell[0], cell[1], cell[2]), { color: rt.def.colorable ? colorForNew() : null, rot: ext.rot });
     }
     if (rt && rt.def.colorable) pushHistory(ext.curColor);
     playPlace(id);
@@ -1310,7 +1425,7 @@ window.doPlace = function () {
   const tp = tiltPlacement(p);
   const cc = tp.c;
   const to = tiltOrientFor(rt && rt.def, p, tp);
-  const stState = rt ? { color: rt.def.colorable ? ext.curColor : null, rot: to.rot } : null;
+  const stState = rt ? { color: rt.def.colorable ? colorForNew() : null, rot: to.rot } : null;
   const cell = [Math.floor(cc[0]), Math.floor(cc[1]), Math.floor(cc[2])];
   if (isSolidAt(cell)) return;
   const pp = player.pos;
@@ -2061,7 +2176,7 @@ function renderToolsSection() {
     </div>`;
 }
 // 標準ブロック（インベントリから取り出せる。岩盤と水は除く）
-const DEFAULT_IDS = [1, 2, 3, 4, 5, 6, 8, 9, 11, 12];
+const DEFAULT_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];   // 7 = 水（カラー対応）
 function renderInventory() {
   const catsEl = document.getElementById('extCats');
   const gridEl = document.getElementById('extGrid');
@@ -2267,6 +2382,7 @@ const PALETTE = ['#ffffff', '#d9d9d9', '#8c8c8c', '#333333', '#000000', '#e74c3c
   '#2ecc71', '#1abc9c', '#3498db', '#2c3e8f', '#9b59b6', '#e84393', '#8d5524', '#c8a46b'];
 function setCurColor(c) {
   ext.curColor = c;
+  ext.colorOff = false;
   const p = document.getElementById('extPicker');
   if (p) p.value = c;
   renderColor();
@@ -2279,7 +2395,9 @@ function renderColor() {
   his.innerHTML = ext.colorHistory.length
     ? ext.colorHistory.map(c => `<span class="ext-sw" data-col="${c}" style="background:${c}"></span>`).join('')
     : '<span class="note">まだ使用履歴はありません</span>';
-  document.getElementById('extCurLabel').textContent = '現在の色：' + ext.curColor;
+  document.getElementById('extCurLabel').textContent = ext.colorOff
+    ? '色の指定：解除中（置いても色は付きません）'
+    : '現在の色：' + ext.curColor;
 }
 function pushHistory(c) {
   ext.colorHistory = [c, ...ext.colorHistory.filter(x => x !== c)].slice(0, 12);
@@ -2299,6 +2417,17 @@ function targetCustom() {
   return rt ? { h, rt } : null;
 }
 function recolorTarget() {
+  // 水（標準ブロック）も、カラーを指定して照準先を塗り替えられる
+  const hw = origRaycast(7);
+  if (hw && hw.b === WATER) {
+    const kw = keyOf(hw.x, hw.y, hw.z);
+    const pw = blockState.get(kw) || {};
+    blockState.set(kw, { ...pw, color: colorForNew(), rot: 0 });
+    touchState(hw.x, hw.y, hw.z);
+    if (!ext.colorOff) pushHistory(ext.curColor);
+    remeshAt(hw.x, hw.y, hw.z);
+    return;
+  }
   const t = targetCustom();
   if (!t) return;
   if (!t.rt.def.colorable) { toast('このブロックはカラーブロックではありません'); return; }
@@ -3106,6 +3235,7 @@ function buildDOM() {
     <div class="ext-row" style="margin-top:10px">
       <input type="color" id="extPicker" value="#ffffff">
       <span id="extCurLabel" class="note"></span>
+      <button class="ext-btn sub" id="extColorOff">カラーの指定を解除</button>
     </div>
     <h3>使用履歴</h3>
     <div class="ext-row" id="extHistory"></div>
@@ -3284,6 +3414,11 @@ function wire() {
   });
   document.getElementById('extHistory').addEventListener('click', e => {
     const c = e.target.dataset.col; if (c) setCurColor(c);
+  });
+  document.getElementById('extColorOff').addEventListener('click', () => {
+    ext.colorOff = true;
+    renderColor();
+    toast('カラーの指定を解除しました（置いても色は付きません）');
   });
 
   document.getElementById('extCats').addEventListener('click', e => {
@@ -3949,6 +4084,8 @@ function init() {
   if (ext.turbo) setTurbo(true);
   window.addEventListener('resize', applyRenderScale);
   setInterval(enforceTurbo, 300);
+  buildWaterSettings();
+  applyWaterLook();
   hydrateReady = hydrateDefs().then(() => {
     // 中身を戻したあとは、しるしを作り直す（戻す前に作った古いしるしで照合すると、同じブロックを別物と判定して増えるため）
     if (window.VoxelCustom) for (const def of ext.defs) VoxelCustom.invalidate(def);

@@ -869,6 +869,9 @@ function buildChunk(c) {
     b.list.forEach((pc, i) => im.setMatrixAt(i, pieceMatrix(pc, _M, r)));
     im.instanceMatrix.needsUpdate = true;
     im.frustumCulled = false;
+    // 影：シェーダーの切り替えで影の描画が止まっていれば、ここで影を落としても負担はない
+    im.castShadow = true;
+    im.receiveShadow = true;
     scene.add(im);
     c.meshes.push(im);
   }
