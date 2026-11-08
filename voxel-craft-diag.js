@@ -88,15 +88,67 @@ async function readStore(key) {
   return json;
 }
 let diagLoaded = false;
+// この端末だけの斜めブロック（保存する）。部屋にいる間は部屋の記録だけを画面に出し、この端末のものは隠す（傾きブロックと同じ考え方）
+const locRecs = new Map();
+const dgTombs = new Map();    // 部屋で壊したもの key -> { ts, room }（部屋に届くまで送り続ける）
+let dgScope = null;
 function save() {
   if (!diagLoaded) return;
-  const list = [...recs.values()].map(r => ({ key: r.key, id: r.id, h: r.h, a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts }));
+  const list = [...locRecs.values()].map(r => ({ key: r.key, id: r.id, h: r.h, a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts }));
   writeStore(KEY, JSON.stringify(list));
 }
+function dgSig(o) { return JSON.stringify([o.h || null, o.h ? null : (o.id ?? null), o.a, o.i, o.j, o.k, o.st || null]); }
 function sendRec(r) {
   const v = { a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts };
   if (r.h) v.h = r.h; else v.id = r.id;
   VoxelMulti.send('dg:' + r.key, v);
+}
+function sendTomb(key) { VoxelMulti.send('dg:' + key, undefined, true); }
+function dgScopeNow() { return VoxelMulti.roomId() || 'local'; }
+function showRec(r) { recs.set(r.key, r); if (!tryVisual(r)) waiting.push(r); }
+function dgSwitchScope(s) {
+  for (const r of [...recs.values()]) if (r.src !== s) { removeVisual(r); recs.delete(r.key); }
+  dgScope = s;
+  if (s === 'local') for (const r of locRecs.values()) if (!recs.has(r.key)) showRec(r);
+}
+// 部屋の記録を一つ反映する（新しい方が勝つ。部屋で壊したものは、相手が後から置き直すまで戻さない）
+function dgApply(key, val, s) {
+  const t = dgTombs.get(key);
+  if (t) { if (!val.del && (val.ts || 0) > t.ts) dgTombs.delete(key); else return; }
+  const cur = recs.get(key);
+  if (val.del) {
+    if (cur && cur.src === s && cur.ts <= (val.ts || 0)) { removeVisual(cur); recs.delete(key); }
+    return;
+  }
+  const v = val.v || {};
+  if (cur && cur.src === s) {
+    if (cur.ts >= (val.ts || 0)) return;
+    if (cur.sig === dgSig(v)) { cur.ts = val.ts || 0; return; }      // 中身が同じなら描き直さない
+  }
+  if (cur) { removeVisual(cur); recs.delete(key); }
+  showRec({ key, id: v.id, h: v.h || null, a: Number(v.a), i: v.i, j: v.j, k: v.k, st: v.st || null, ts: val.ts || 0, src: s, sig: dgSig(v) });
+}
+// 部屋の記録と食い違うものを直す：部屋の記録（kv）を正とする
+function dgSync() {
+  if (!diagLoaded) return;
+  const s = dgScopeNow();
+  if (s !== dgScope) dgSwitchScope(s);
+  if (s === 'local' || !VoxelMulti.connected()) return;
+  const kv = VoxelNet.kv();
+  if (!kv) return;
+  for (const [k, val] of kv) if (k.startsWith('dg:')) dgApply(k.slice(3), val, s);
+  // 部屋に無いもの：この端末で置いたものは送り直す。それ以外（部屋で壊された）は消す
+  for (const r of [...recs.values()]) {
+    if (r.src !== s || kv.has('dg:' + r.key)) continue;
+    if (r.own) sendRec(r); else { removeVisual(r); recs.delete(r.key); }
+  }
+  // 壊したものが部屋に届いていなければ、届くまで送り続ける
+  for (const [key, t] of [...dgTombs]) {
+    if (t.room !== s) { dgTombs.delete(key); continue; }
+    const e = kv.get('dg:' + key);
+    if (e && (e.del || (e.ts || 0) > t.ts)) { dgTombs.delete(key); continue; }
+    sendTomb(key);
+  }
 }
 
 // ============================================================
@@ -134,20 +186,20 @@ function placeDiag(id, a) {
     h: rt ? VoxelCustom.publishDef(rt.def) : null
   };
   if (!addVisual(r)) { toast('このブロックは斜めには置けません'); return; }
+  r.src = dgScopeNow();
+  r.own = r.src !== 'local';
+  r.sig = dgSig(r);
   recs.set(key, r);
-  save();
-  // 部屋につながっているときに置いたものは、通信が切れても、つながった時にもう一度送る
-  r.own = VoxelMulti.connected();
-  r.room = VoxelMulti.roomId();
-  sendRec(r);
+  if (r.src === 'local') { locRecs.set(key, r); save(); }
+  else sendRec(r);          // 通信が切れていたら、つながった時に dgSync が送り直す
   if (rt && rt.def.colorable && typeof pushHistory === 'function') pushHistory(ext.curColor);
   playPlace(id);
 }
 function removeDiag(r) {
   removeVisual(r);
   recs.delete(r.key);
-  save();
-  VoxelMulti.send('dg:' + r.key, undefined, true);
+  if (r.src === 'local') { locRecs.delete(r.key); save(); }
+  else { dgTombs.set(r.key, { ts: VoxelNet.nowTs(), room: r.src }); sendTomb(r.key); }
   playBreak(r.id);
 }
 
@@ -213,16 +265,9 @@ window.doBreak = function () {
 // 5. 相手の置いた斜めブロック
 // ============================================================
 VoxelMulti.onOp('dg', rec => {
-  const key = String(rec.key).slice(3);
-  const cur = recs.get(key);
-  if (cur && cur.ts > (rec.ts || 0)) return;          // 新しい方が勝つ
-  if (cur) { removeVisual(cur); recs.delete(key); }
-  if (rec.del) { save(); return; }
-  const v = rec.v || {};
-  const r = { key, id: v.id, h: v.h || null, a: Number(v.a), i: v.i, j: v.j, k: v.k, st: v.st || null, ts: rec.ts || 0 };
-  recs.set(key, r);
-  if (!tryVisual(r)) waiting.push(r);                  // 定義が届くまで待つ
-  save();
+  const s = dgScopeNow();
+  if (s === 'local') return;
+  dgApply(String(rec.key).slice(3), { v: rec.v, del: !!rec.del, ts: rec.ts || 0 }, s);
 });
 
 function retryWaiting() {
@@ -243,10 +288,12 @@ setInterval(retryWaiting, 1000);
   try { list = JSON.parse((await readStore(KEY)) || '[]'); }
   catch (e) { console.error('斜めブロックの保存データを読めませんでした', e); return; }   // 読めないときは上書きしない
   for (const r of list) {
-    if (!r || typeof r.key !== 'string' || recs.has(r.key)) continue;
-    try { recs.set(r.key, r); if (!tryVisual(r)) waiting.push(r); } catch (e) { console.error(e); }
+    if (!r || typeof r.key !== 'string' || locRecs.has(r.key)) continue;
+    r.src = 'local';
+    locRecs.set(r.key, r);
   }
   diagLoaded = true;
+  dgSync();
 })();
 
 // ============================================================
@@ -285,13 +332,50 @@ function tlDropRec(r) {
   r.ent = null;
   tlRecs.delete(r.key);
 }
+const tlTombs = new Map();     // 部屋で壊したもの key -> { ts, room }（部屋に届くまで送り続ける）
+function tlSig(o) { return JSON.stringify([o.h || null, o.h ? null : (o.id ?? null), o.c, o.q, o.st || null]); }
 function tlRemove(key, notify) {
   const r = tlRecs.get(key);
   if (!r) return;
   const wasLocal = r.src === 'local';
   tlDropRec(r);
   if (wasLocal) tlSaveLocal();
-  if (notify && VoxelMulti.connected()) VoxelMulti.send('tl:' + key, undefined, true);
+  else if (notify) { tlTombs.set(key, { ts: VoxelNet.nowTs(), room: r.src }); VoxelMulti.send('tl:' + key, undefined, true); }
+}
+// 部屋の記録を一つ反映する（新しい方が勝つ。部屋で壊したものは、相手が後から置き直すまで戻さない）
+function tlApply(key, val, s) {
+  const t = tlTombs.get(key);
+  if (t) { if (!val.del && (val.ts || 0) > t.ts) tlTombs.delete(key); else return; }
+  const cur = tlRecs.get(key);
+  if (val.del) { if (cur && cur.src === s && (cur.ts || 0) <= (val.ts || 0)) tlDropRec(cur); return; }
+  const v = val.v || {};
+  if (!Array.isArray(v.c) || !Array.isArray(v.q)) return;
+  if (cur && cur.src === s) {
+    if ((cur.ts || 0) >= (val.ts || 0)) return;
+    if (cur.sig === tlSig(v)) { cur.ts = val.ts || 0; return; }      // 中身が同じなら描き直さない
+  }
+  if (cur) tlDropRec(cur);
+  const r = { key, id: v.id, h: v.h || null, c: v.c, q: v.q, st: v.st || null, ts: val.ts || v.ts || 0, src: s, ent: null, sig: tlSig(v) };
+  tlRecs.set(key, r);
+  if (!tlAddVisual(r)) tlWaiting.push(r);
+}
+// 部屋の記録と食い違うものを直す（通信が切れていた間の置く・壊すを、つながった時に届ける）
+function tlSync() {
+  const s = tlScopeNow();
+  if (s === 'local' || !VoxelMulti.connected()) return;
+  const kv = VoxelNet.kv();
+  if (!kv) return;
+  for (const [k, val] of kv) if (k.startsWith('tl:')) tlApply(k.slice(3), val, s);
+  for (const r of [...tlRecs.values()]) {
+    if (r.src !== s || kv.has('tl:' + r.key)) continue;
+    if (r.own) VoxelMulti.send('tl:' + r.key, tlStrip(r)); else tlDropRec(r);
+  }
+  for (const [key, t] of [...tlTombs]) {
+    if (t.room !== s) { tlTombs.delete(key); continue; }
+    const e = kv.get('tl:' + key);
+    if (e && (e.del || (e.ts || 0) > t.ts)) { tlTombs.delete(key); continue; }
+    VoxelMulti.send('tl:' + key, undefined, true);
+  }
 }
 // 傾けて置いたブロック（ext の傾き配置）を記録し、部屋にも送る
 function tlAdopt(ent) {
@@ -305,25 +389,16 @@ function tlAdopt(ent) {
   };
   ent.tl = r.key;
   r.ent = ent;
+  r.sig = tlSig(r);
   tlRecs.set(r.key, r);
   if (scope === 'local') tlSaveLocal();
-  else if (VoxelMulti.connected()) {
-    r.own = true; r.room = scope;                     // つながった時に送り直せるように印を付ける
+  else {
+    r.own = true; r.room = scope;                     // 通信が切れていたら、つながった時に tlSync が送り直す
     VoxelMulti.send('tl:' + r.key, tlStrip(r));
   }
 }
-// 通信が切れている間（スマホは裏に回すと切れやすい）に置いたものは、つながった時にもう一度送る
-let netWasOn = false;
-function resendOwnRecs() {
-  const room = VoxelMulti.roomId();
-  for (const r of recs.values()) if (r.own && r.room === room) sendRec(r);
-  for (const r of tlRecs.values()) if (r.own && r.room === room) VoxelMulti.send('tl:' + r.key, tlStrip(r));
-}
-setInterval(() => {
-  const on = VoxelMulti.connected();
-  if (on && !netWasOn) resendOwnRecs();
-  netWasOn = on;
-}, 1000);
+// 通信が切れている間に置いた・壊したものも、つながった時に部屋へ届くよう、1秒ごとに部屋の記録と照らし合わせる
+setInterval(dgSync, 1000);
 async function tlLoadLocal() {
   tlLocalReady = false;
   let list;
@@ -351,15 +426,11 @@ function tlRetry() {
 }
 // 相手の置いたもの（部屋の保存データを読み込んだときも、ここに届く）
 VoxelMulti.onOp('tl', rec => {
-  const key = String(rec.key).slice(3);
-  if (rec.del) { tlRemove(key, false); return; }
-  if (tlRecs.has(key)) return;
-  const v = rec.v || {};
-  if (!Array.isArray(v.c) || !Array.isArray(v.q)) return;
-  const r = { key, id: v.id, h: v.h || null, c: v.c, q: v.q, st: v.st || null, ts: v.ts || rec.ts || 0, src: tlScopeNow(), ent: null };
-  tlRecs.set(key, r);
-  if (!tlAddVisual(r)) tlWaiting.push(r);
+  const s = tlScopeNow();
+  if (s === 'local') return;
+  tlApply(String(rec.key).slice(3), { v: rec.v, del: !!rec.del, ts: rec.ts || 0 }, s);
 });
+setInterval(tlSync, 1000);
 VoxelCustom.onAdopt(tlRetry);
 setInterval(() => {
   const s = tlScopeNow();
