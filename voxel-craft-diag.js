@@ -136,6 +136,9 @@ function placeDiag(id, a) {
   if (!addVisual(r)) { toast('このブロックは斜めには置けません'); return; }
   recs.set(key, r);
   save();
+  // 部屋につながっているときに置いたものは、通信が切れても、つながった時にもう一度送る
+  r.own = VoxelMulti.connected();
+  r.room = VoxelMulti.roomId();
   sendRec(r);
   if (rt && rt.def.colorable && typeof pushHistory === 'function') pushHistory(ext.curColor);
   playPlace(id);
@@ -304,8 +307,23 @@ function tlAdopt(ent) {
   r.ent = ent;
   tlRecs.set(r.key, r);
   if (scope === 'local') tlSaveLocal();
-  else if (VoxelMulti.connected()) VoxelMulti.send('tl:' + r.key, tlStrip(r));
+  else if (VoxelMulti.connected()) {
+    r.own = true; r.room = scope;                     // つながった時に送り直せるように印を付ける
+    VoxelMulti.send('tl:' + r.key, tlStrip(r));
+  }
 }
+// 通信が切れている間（スマホは裏に回すと切れやすい）に置いたものは、つながった時にもう一度送る
+let netWasOn = false;
+function resendOwnRecs() {
+  const room = VoxelMulti.roomId();
+  for (const r of recs.values()) if (r.own && r.room === room) sendRec(r);
+  for (const r of tlRecs.values()) if (r.own && r.room === room) VoxelMulti.send('tl:' + r.key, tlStrip(r));
+}
+setInterval(() => {
+  const on = VoxelMulti.connected();
+  if (on && !netWasOn) resendOwnRecs();
+  netWasOn = on;
+}, 1000);
 async function tlLoadLocal() {
   tlLocalReady = false;
   let list;

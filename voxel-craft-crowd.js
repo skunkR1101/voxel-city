@@ -163,6 +163,16 @@ function groundAt(x, z, fromY) {
   }
   return null;
 }
+// 今いる足元の近くで、歩ける地面の高さ。1ブロックまでの段差は上り、数ブロックの段は下る。
+// 天井（地下道の上）や、遠くの地面には乗らない（地下道は地下道の床を歩く）
+function groundNear(x, z, feetY) {
+  const ix = Math.floor(x), iz = Math.floor(z);
+  const fy = Math.floor(feetY);
+  for (let c = Math.floor(feetY + 0.05); c >= fy - 8; c--) {
+    if (isSolid(getBlock(ix, c, iz))) return c + 1;
+  }
+  return null;
+}
 function inRects(g, x, z) {
   for (const r of g.rects) if (x >= r.x1 && x <= r.x2 && z >= r.z1 && z <= r.z2) return true;
   return false;
@@ -259,8 +269,8 @@ function simulateCrowd(dt) {
     h.tg -= dt;
     if (h.tg <= 0) {
       h.tg = rnd(0.4, 0.9);
-      const gy = groundAt(h.x, h.z, h.y + 1);
-      if (gy != null) h.y = gy;                                // 段差・坂に合わせる
+      const gy = groundNear(h.x, h.z, h.y);
+      if (gy != null) h.y = gy;                                // 段差・坂に合わせる（今いる足元の近くだけ）
     }
   }
   C.humans = C.humans.filter(h => !h.dead);

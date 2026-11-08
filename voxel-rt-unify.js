@@ -249,6 +249,14 @@ async function adopt(room, gen, ts, data) {
   location.reload();
 }
 
+// 自動反映の設定（この端末だけの設定。ワールドの保存とは別の場所に保存する）
+const AUTO_KEY = 'vcpref_autosync';
+function autoSyncOn() {
+  try { return localStorage.getItem(AUTO_KEY) === '1'; } catch (e) { return false; }
+}
+function setAutoSync(on) {
+  try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch (e) {}
+}
 // 定期的に見る：統一が新しければ、読み込む（入ったばかりは確認してから）
 function check(room) {
   if (!room || rm !== room || adopting) return;
@@ -259,7 +267,8 @@ function check(room) {
   if (a && a.id === gen.id) return;
   if (obsGen !== gen.id) {
     // 初めて見た統一：入ったばかりに見つけたものは「確認してから」、入ったあとに出てきたものは強制
-    obsForced = obsGen !== null || Date.now() - attachedAt > JOIN_WINDOW_MS;
+    // 自動反映がオンなら、確認せずに読み込む
+    obsForced = obsGen !== null || Date.now() - attachedAt > JOIN_WINDOW_MS || autoSyncOn();
     obsGen = gen.id;
   }
   const data = readyFor(room, gen);
@@ -444,5 +453,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTUnify = { skipBlk, busy, press, check: () => check(rm), pending: () => pressing };
+window.VoxelRTUnify = { skipBlk, busy, press, check: () => check(rm), pending: () => pressing, autoSyncOn, setAutoSync };
 })();

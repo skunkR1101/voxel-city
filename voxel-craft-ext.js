@@ -49,6 +49,9 @@ const ext = {
   curColor: '#ffffff',
   colorOff: false,          // カラーの指定を解除中（置くとき色を付けない）
   lightMin: 0,              // 光の届かない所の明るさ（0〜100%。0で真っ暗）
+  replaceMode: false,       // 置き換えモード（フィル時、対象だけを別のブロックに置き換える）
+  replaceFrom: null,        // 置き換え対象（ブロックID）
+  replaceTo: null,          // 置き換えるブロック（ブロックID）
   waterDim: 0,              // 水の暗さ（0〜100）
   waterTint: '#ffffff',     // 水の色味（シェーダー時・通常時の両方）
   rot: 0,
@@ -1106,6 +1109,28 @@ function buildWaterSettings() {
     syncUi(); applyWaterLook(); saveExt();
   });
 }
+// 設定画面に「統一の自動反映」を追加する（部屋で最後に行われた作業を、統一せずに自動で反映する）
+function buildAutoSyncSetting() {
+  const close = document.getElementById('settingsClose');
+  if (!close || document.getElementById('extAutoSec')) return;
+  const sec = document.createElement('div');
+  sec.id = 'extAutoSec';
+  sec.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #3a4a60;border-radius:8px';
+  const on = () => (window.VoxelRTUnify && VoxelRTUnify.autoSyncOn) ? VoxelRTUnify.autoSyncOn()
+    : localStorage.getItem('vcpref_autosync') === '1';
+  sec.innerHTML = `
+    <label style="display:flex;gap:8px;align-items:flex-start">
+      <input type="checkbox" id="extAutoSync" ${on() ? 'checked' : ''} style="margin-top:3px">
+      <span><b>統一の自動反映</b><br>部屋に入ったとき、ほかの人が最後に行った作業を、統一せずに自動で反映します。</span>
+    </label>
+    <div style="font-size:11px;color:#f0c27b;margin-top:4px">オンのときは、この端末だけの作業は、部屋の内容に置き換わります。</div>`;
+  close.parentNode.insertBefore(sec, close);
+  document.getElementById('extAutoSync').addEventListener('change', e => {
+    const v = e.target.checked;
+    if (window.VoxelRTUnify && VoxelRTUnify.setAutoSync) VoxelRTUnify.setAutoSync(v);
+    else try { localStorage.setItem('vcpref_autosync', v ? '1' : '0'); } catch (err) {}
+  });
+}
 // 水の見た目（暗さ・色味）を、シェーダー用と通常用の両方に反映する
 function applyWaterLook() {
   const dim = clamp(ext.waterDim, 0, 100) / 100;
@@ -1786,11 +1811,14 @@ function fillSel() {
   const b = selBounds();
   if (!b || wand.stage !== 2) { toast('先にステッキで範囲を選択してください'); return; }
   if (b.sx * b.sy * b.sz > MAX_VOLUME) { toast('範囲が大きすぎます'); return; }
-  const id = ext.dropper;
+  // 置き換えモードのときは、「置き換え対象」だけを「置き換えるブロック」に変える
+  const repl = ext.replaceMode && ext.replaceFrom != null && ext.replaceTo != null;
+  const id = repl ? ext.replaceTo : ext.dropper;
+  const from = repl ? ext.replaceFrom : null;
   const changes = [];
   for (let y = b.min[1]; y <= b.max[1]; y++) for (let z = b.min[2]; z <= b.max[2]; z++) for (let x = b.min[0]; x <= b.max[0]; x++) {
     const oldId = getBlock(x, y, z);
-    if (oldId === id) continue;
+    if (repl ? (oldId !== from || oldId === id) : (oldId === id)) continue;
     const k = keyOf(x, y, z);
     const oldSt = blockState.get(k) || null;
     changes.push({ x, y, z, k, oldId, oldSt });
@@ -1798,9 +1826,90 @@ function fillSel() {
     blockState.delete(k);
   }
   pushUndo(changes);
-  toast(`「${nameOf(id)}」で ${changes.length} 個埋めました`);
+  if (repl) toast(`「${repLabel(from)}」を「${repLabel(id)}」に ${changes.length} 個置き換えました`);
+  else toast(`「${nameOf(id)}」で ${changes.length} 個埋めました`);
 }
 
+// ── 置き換え（フィル時に、対象のブロックだけを別のブロックに変える）──
+function repLabel(id) {
+  if (id === AIR_ID) return '空気';
+  const d = ext.defs.find(x => x.id === id);
+  if (d) return d.name || ('カスタム ' + id);
+  return nameOf(id);
+}
+// 置き換えの選択に出す一覧：空気・標準ブロック（水を含む）・カスタムブロック
+function replaceItems() {
+  const std = [AIR_ID, ...DEFAULT_IDS];
+  const custom = ext.defs.map(d => d.id);
+  return [...std, ...custom];
+}
+function openReplacePicker() {
+  let stage = 'from';
+  const ov = document.createElement('div');
+  ov.id = 'extRepOv';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:20;display:flex;align-items:center;justify-content:center;padding:12px';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#1b2430;color:#fff;border-radius:12px;padding:12px;width:460px;max-width:100%;max-height:86vh;overflow:auto';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  const items = replaceItems();
+  const draw = () => {
+    const title = stage === 'from' ? '① 置き換え対象（この種類を、置き換えます）' : '② 置き換えるブロック（これに変えます）';
+    box.innerHTML = `
+      <div style="font-weight:bold;margin-bottom:8px">${title}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px">
+        ${items.map(id => `<button class="ext-btn sub" data-id="${id}" type="button">${esc(repLabel(id))}</button>`).join('')}
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="ext-btn sub" data-x="close" type="button">閉じる</button>
+      </div>`;
+  };
+  draw();
+  box.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.x === 'close') { ov.remove(); updateReplaceBar(); return; }
+    const id = Number(b.dataset.id);
+    if (stage === 'from') { ext.replaceFrom = id; stage = 'to'; draw(); return; }
+    ext.replaceTo = id;
+    ext.replaceMode = true;
+    ov.remove();
+    updateReplaceBar();
+    toast(`「${repLabel(ext.replaceFrom)}」→「${repLabel(id)}」を置き換えモードにしました`);
+  });
+}
+function buildReplaceBar() {
+  if (document.getElementById('extReplaceBar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'extReplaceBar';
+  bar.style.cssText = 'position:fixed;left:12px;top:352px;z-index:6;display:none;flex-direction:column;gap:6px';
+  bar.innerHTML = `
+    <button class="ext-btn" id="extRepMode" type="button"></button>
+    <button class="ext-btn sub" id="extRepSet" type="button"></button>`;
+  document.body.appendChild(bar);
+  document.getElementById('extRepMode').addEventListener('click', () => {
+    if (!ext.replaceMode && (ext.replaceFrom == null || ext.replaceTo == null)) { openReplacePicker(); return; }
+    ext.replaceMode = !ext.replaceMode;
+    updateReplaceBar();
+  });
+  document.getElementById('extRepSet').addEventListener('click', () => openReplacePicker());
+  updateReplaceBar();
+  // フィルを持っているときだけ表示する
+  setInterval(() => {
+    const show = typeof HOTBAR !== 'undefined' && HOTBAR[selIdx] === T_FILL;
+    bar.style.display = show ? 'flex' : 'none';
+  }, 250);
+}
+function updateReplaceBar() {
+  const m = document.getElementById('extRepMode');
+  const s = document.getElementById('extRepSet');
+  if (!m || !s) return;
+  m.textContent = '置き換えモード：' + (ext.replaceMode ? 'ON' : 'OFF');
+  m.style.background = ext.replaceMode ? '#2f7d4f' : '';
+  s.textContent = (ext.replaceFrom == null || ext.replaceTo == null)
+    ? '置き換えを設定'
+    : `${repLabel(ext.replaceFrom)} → ${repLabel(ext.replaceTo)}`;
+}
 function copySel() {
   const b = selBounds();
   if (!b || wand.stage !== 2) { toast('先にステッキで範囲を選択してください'); return; }
@@ -4268,6 +4377,8 @@ function init() {
   setInterval(enforceTurbo, 300);
   buildWaterSettings();
   applyWaterLook();
+  buildReplaceBar();
+  buildAutoSyncSetting();
   hydrateReady = hydrateDefs().then(() => {
     // 中身を戻したあとは、しるしを作り直す（戻す前に作った古いしるしで照合すると、同じブロックを別物と判定して増えるため）
     if (window.VoxelCustom) for (const def of ext.defs) VoxelCustom.invalidate(def);
