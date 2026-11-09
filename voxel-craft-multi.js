@@ -240,7 +240,7 @@ setInterval(() => {
 // 受信（届いた変更を、ワールドとほかの機能へ反映）
 // ============================================================
 // ---------- デバッグ用の記録（設定の「デバッグログ」で見られる） ----------
-const BUILD = '2026-11-09-dbg1';
+const BUILD = '2026-11-09-live1';
 const DBG = { build: BUILD, log: [], recv: {}, sent: {}, errs: {}, unhandled: {}, dropped: 0, started: Date.now() };
 function dbgLog(kind, text) {
   DBG.log.push(new Date().toLocaleTimeString() + ' [' + kind + '] ' + text);
@@ -310,6 +310,7 @@ async function debugReport() {
   lines.push('== 部屋 ==');
   lines.push('つながっている：' + (VoxelMulti.connected() ? 'はい' : 'いいえ') + '　部屋ID：' + (VoxelMulti.roomId() || 'なし'));
   lines.push('つながっている相手の数：' + (window.VoxelNet && VoxelNet.linkCount ? VoxelNet.linkCount() : '-'));
+  lines.push('斜め・傾き・音声の通信：' + (window.VoxelLive ? (VoxelLive.connected() ? 'はい（部屋 ' + VoxelLive.roomId() + '・つながっている相手 ' + VoxelLive.status().links + '）' : 'いいえ（部屋に入っていない）') : '読み込まれていません'));
   lines.push('部屋の記録の数：' + (kv ? kv.size : '-') + '（斜め dg:' + count('dg:') + ' ・傾き tl:' + count('tl:') + ' ・音声 snd:' + count('snd:') + ' / sndf:' + count('sndf:') + ' ・ブロック b:' + count('b:') + '）');
   lines.push('送れなかった回数（つながっていない時）：' + DBG.dropped);
   lines.push('');
