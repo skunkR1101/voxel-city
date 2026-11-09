@@ -9,6 +9,28 @@
 const dbg = (k, t) => { try { if (window.VoxelDebug) VoxelDebug.log(k, t); } catch (e) {} };
 'use strict';
 
+// ---------- 部屋の通信への窓口（voxel-craft-live.js） ----------
+// 読み込みの順番に関係なく動くように、窓口が無いときは待ってから登録する
+// 窓口が無いときは、送信・参照は何もしない（エラーで止まらない）
+const LIVE = (() => {
+  const pend = [];
+  const t = setInterval(() => {
+    if (!window.VoxelLive) return;
+    clearInterval(t);
+    for (const [p, f] of pend) VoxelLive.onOp(p, f);
+    pend.length = 0;
+  }, 50);
+  return {
+    onOp(p, f) { if (window.VoxelLive) VoxelLive.onOp(p, f); else pend.push([p, f]); },
+    send(...a) { if (window.VoxelLive) VoxelLive.send(...a); },
+    connected() { return !!(window.VoxelLive && VoxelLive.connected()); },
+    roomId() { return window.VoxelLive ? VoxelLive.roomId() : null; },
+    kv() { return window.VoxelLive ? VoxelLive.kv() : null; },
+    nowTs() { return window.VoxelLive ? VoxelLive.nowTs() : Date.now(); }
+  };
+})();
+
+
 const VX = window.VoxelExt;
 if (!VX || typeof VX.T_SOUND !== 'number') { console.error('voxel-craft-sound: 道具の番号が見つかりません'); return; }
 const T_SOUND = VX.T_SOUND;
@@ -32,10 +54,10 @@ let lookId = null;             // 視点が合っている音声ブロック
 let editId = null;             // 設定画面を開いている音声ブロック
 let curRoom = null, sentRoom = null;
 
-function nowTs() { return window.VoxelLive ? VoxelLive.nowTs() : Date.now(); }
+function nowTs() { return LIVE.nowTs(); }
 function clampN(v, lo, hi, d) { const n = Number(v); if (!isFinite(n)) return d; return Math.min(hi, Math.max(lo, n)); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
-function isRoomOn() { return !!(window.VoxelLive && VoxelLive.connected()); }
+function isRoomOn() { return LIVE.connected(); }
 
 // 設定の形をそろえる（受け取ったものも、古いものも、同じ形にする）
 function normalize(raw) {
@@ -183,7 +205,7 @@ function touchPlay(d) {
   if (t - (lastTouch.get(d.id) || -1e9) < TOUCH_GAP) return;
   lastTouch.set(d.id, t);
   if (typeof player !== 'undefined' && inRange(d, player.pos)) playDef(d);
-  if (isRoomOn()) VoxelLive.send('sndp:' + d.id, { t: Date.now() }, false, true);
+  if (isRoomOn()) LIVE.send('sndp:' + d.id, { t: Date.now() }, false, true);
 }
 
 // ---------- 毎回の判定（0.1秒ごと） ----------
@@ -243,7 +265,7 @@ function dropRoomDef(d) {
   if (editId === d.id) closeSettings();
 }
 function syncRoom() {
-  const r = window.VoxelLive && VoxelLive.roomId ? VoxelLive.roomId() : null;
+  const r = LIVE.roomId();
   if (r !== curRoom) {
     curRoom = r;
     for (const d of [...defs.values()]) if (d.src === 'room' && d.room !== r) dropRoomDef(d);
@@ -256,7 +278,7 @@ function syncRoom() {
   if (!on) sentRoom = null;
 }
 function sendDef(d) {
-  if (isRoomOn()) VoxelLive.send('snd:' + d.id, wire(d), false, false);
+  if (isRoomOn()) LIVE.send('snd:' + d.id, wire(d), false, false);
 }
 
 // ---------- 音声ファイルの共有 ----------
@@ -295,17 +317,17 @@ async function sendFile(d) {
     const b64 = await blobToB64(blob);
     const ver = fileVerOf(d);
     const n = Math.max(1, Math.ceil(b64.length / FILE_PART));
-    VoxelLive.send('sndf:' + d.id, { ver, n, name: d.fileName, type: blob.type || '' });
-    for (let i = 0; i < n; i++) VoxelLive.send('sndc:' + d.id + ':' + ver + ':' + i, b64.slice(i * FILE_PART, (i + 1) * FILE_PART));
+    LIVE.send('sndf:' + d.id, { ver, n, name: d.fileName, type: blob.type || '' });
+    for (let i = 0; i < n; i++) LIVE.send('sndc:' + d.id + ':' + ver + ':' + i, b64.slice(i * FILE_PART, (i + 1) * FILE_PART));
     const old = fileSent.get(d.id);
-    if (old && old.ver !== ver) for (let i = 0; i < old.n; i++) VoxelLive.send('sndc:' + d.id + ':' + old.ver + ':' + i, undefined, true);
+    if (old && old.ver !== ver) for (let i = 0; i < old.n; i++) LIVE.send('sndc:' + d.id + ':' + old.ver + ':' + i, undefined, true);
     fileSent.set(d.id, { ver, n });
   } finally { fileBusy.delete(d.id); }
 }
 // 部屋に、この端末の音声が無ければ送る（つながった時・音声を変えた時）
 function ensureFiles() {
   if (!isRoomOn()) return;
-  const kv = window.VoxelLive ? VoxelLive.kv() : null;
+  const kv = LIVE.kv();
   if (!kv) return;
   for (const d of defs.values()) {
     if (d.src !== 'local' || !d.fileName) continue;
@@ -338,7 +360,7 @@ function tryFile(id) {
 // 部屋の記録（kv）から、受け取り損ねた設定・音声を拾う（ライブの知らせが届かなかった時の保険）
 function pullFromRoom() {
   if (!isRoomOn()) return;
-  const kv = window.VoxelLive ? VoxelLive.kv() : null;
+  const kv = LIVE.kv();
   if (!kv) return;
   for (const [k, e] of kv) {
     if (k.startsWith('snd:')) {
@@ -359,8 +381,8 @@ function pullFromRoom() {
   }
 }
 setInterval(pullFromRoom, 1000);
-if (window.VoxelLive && VoxelLive.onOp) {
-  VoxelLive.onOp('sndf', rec => {
+{
+  LIVE.onOp('sndf', rec => {
     const id = String(rec.key || '').slice(5);
     if (!id || rec.del || !rec.v || typeof rec.v !== 'object') return;
     const ver = String(rec.v.ver);
@@ -371,7 +393,7 @@ if (window.VoxelLive && VoxelLive.onOp) {
     for (const v of [...f.parts.keys()]) if (v !== ver) f.parts.delete(v);
     tryFile(id);
   });
-  VoxelLive.onOp('sndc', rec => {
+  LIVE.onOp('sndc', rec => {
     const p = String(rec.key || '').slice(5).split(':');   // 音声の番号 : 版 : 番号
     if (p.length !== 3 || rec.del || typeof rec.v !== 'string') return;
     const id = p[0], ver = p[1], i = Number(p[2]);
@@ -407,13 +429,13 @@ function applyRemoteDef(id, rec) {
     if (editId === id) closeSettings();
     return;
   }
-  const d = normalize({ ...inc, id, src: 'room', room: VoxelLive.roomId() });
+  const d = normalize({ ...inc, id, src: 'room', room: LIVE.roomId() });
   defs.set(id, d);
   refreshMesh(d);
 }
-if (window.VoxelLive && VoxelLive.onOp) {
-  VoxelLive.onOp('snd', rec => applyRemoteDef(String(rec.key || '').slice(4), rec));
-  VoxelLive.onOp('sndp', rec => {                  // タッチの知らせ（記録には残らない）
+{
+  LIVE.onOp('snd', rec => applyRemoteDef(String(rec.key || '').slice(4), rec));
+  LIVE.onOp('sndp', rec => {                  // タッチの知らせ（記録には残らない）
     if (rec.del || !rec.v) return;
     const id = String(rec.key || '').slice(5);
     const d = defs.get(id);
@@ -457,7 +479,7 @@ function deleteDef(id, notify, keepFile) {
   disposeMesh(id);
   if (!keepFile) { fileDel(id).catch(() => {}); }
   if (d.src === 'local') saveLocal();
-  if (notify !== false && isRoomOn()) VoxelLive.send('snd:' + id, null, true, false);
+  if (notify !== false && isRoomOn()) LIVE.send('snd:' + id, null, true, false);
   if (editId === id) closeSettings();
 }
 

@@ -12,6 +12,7 @@
  */
 (function () {
 'use strict';
+if (window.VoxelLive) return;     // 二重に読み込まれても、一度だけ動く
 
 // この窓口で扱う通信名（接頭語）。ほかの仕組みの接頭語とは重ならない
 const PREFIXES = ['dg', 'tl', 'snd', 'sndf', 'sndc', 'sndp'];
@@ -88,6 +89,12 @@ const VoxelLive = {
 };
 window.VoxelLive = VoxelLive;
 
-// 部屋の通信（voxel-rt）の、部屋に入った・出た通知に登録する
-if (window.VoxelRTUI && VoxelRTUI.onRoom) VoxelRTUI.onRoom(attach);
+// 部屋の通信（voxel-rt）の、部屋に入った・出た通知に登録する（voxel-rt-ui.js が後から読まれても待つ）
+function hookRoom() {
+  if (window.VoxelRTUI && VoxelRTUI.onRoom) { VoxelRTUI.onRoom(attach); return true; }
+  return false;
+}
+if (!hookRoom()) {
+  const t = setInterval(() => { if (hookRoom()) clearInterval(t); }, 100);
+}
 })();

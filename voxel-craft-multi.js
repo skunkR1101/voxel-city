@@ -240,7 +240,7 @@ setInterval(() => {
 // 受信（届いた変更を、ワールドとほかの機能へ反映）
 // ============================================================
 // ---------- デバッグ用の記録（設定の「デバッグログ」で見られる） ----------
-const BUILD = '2026-11-09-live1';
+const BUILD = '2026-11-09-live2';
 const DBG = { build: BUILD, log: [], recv: {}, sent: {}, errs: {}, unhandled: {}, dropped: 0, started: Date.now() };
 function dbgLog(kind, text) {
   DBG.log.push(new Date().toLocaleTimeString() + ' [' + kind + '] ' + text);

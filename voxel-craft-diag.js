@@ -1,3 +1,12 @@
+
+// voxel-craft-live.js が読み込まれていなければ、同じ場所から読み込む
+(function () {
+  if (window.VoxelLive || document.querySelector('script[src*="voxel-craft-live.js"]')) return;
+  const here = document.currentScript && document.currentScript.src ? document.currentScript.src : location.href;
+  const s = document.createElement('script');
+  s.src = new URL('voxel-craft-live.js', here).href;
+  document.head.appendChild(s);
+})();
 /* voxel-craft-diag.js (v1)  斜めグリッド配置
  *  ・「設定」→「斜めグリッド配置」で角度を決めると、その角度に傾いた格子（横方向）にブロックを置ける
  *  ・都市の斜めの区画づくり用。角度は 0（通常）〜89.5 度
@@ -7,6 +16,28 @@
  */
 (function () {
 'use strict';
+
+// ---------- 部屋の通信への窓口（voxel-craft-live.js） ----------
+// 読み込みの順番に関係なく動くように、窓口が無いときは待ってから登録する
+// 窓口が無いときは、送信・参照は何もしない（エラーで止まらない）
+const LIVE = (() => {
+  const pend = [];
+  const t = setInterval(() => {
+    if (!window.VoxelLive) return;
+    clearInterval(t);
+    for (const [p, f] of pend) VoxelLive.onOp(p, f);
+    pend.length = 0;
+  }, 50);
+  return {
+    onOp(p, f) { if (window.VoxelLive) VoxelLive.onOp(p, f); else pend.push([p, f]); },
+    send(...a) { if (window.VoxelLive) VoxelLive.send(...a); },
+    connected() { return !!(window.VoxelLive && VoxelLive.connected()); },
+    roomId() { return window.VoxelLive ? VoxelLive.roomId() : null; },
+    kv() { return window.VoxelLive ? VoxelLive.kv() : null; },
+    nowTs() { return window.VoxelLive ? VoxelLive.nowTs() : Date.now(); }
+  };
+})();
+
 // ext.js の内部の名前を、window.VoxelExt から受け取る（ext.js は外から見えないため）
 const { CUSTOM_BASE, ext, defRT, tiltList, addTilt, removeTilt, pickTarget, pushHistory, isTool } = window.VoxelExt;
 
@@ -101,10 +132,10 @@ function dgSig(o) { return JSON.stringify([o.h || null, o.h ? null : (o.id ?? nu
 function sendRec(r) {
   const v = { a: r.a, i: r.i, j: r.j, k: r.k, st: r.st, ts: r.ts };
   if (r.h) v.h = r.h; else v.id = r.id;
-  VoxelLive.send('dg:' + r.key, v);
+  LIVE.send('dg:' + r.key, v);
 }
-function sendTomb(key) { VoxelLive.send('dg:' + key, undefined, true); }
-function dgScopeNow() { return VoxelLive.roomId() || 'local'; }
+function sendTomb(key) { LIVE.send('dg:' + key, undefined, true); }
+function dgScopeNow() { return LIVE.roomId() || 'local'; }
 function showRec(r) { recs.set(r.key, r); if (!tryVisual(r)) waiting.push(r); }
 function dgSwitchScope(s) {
   for (const r of [...recs.values()]) if (r.src !== s) { removeVisual(r); recs.delete(r.key); }
@@ -135,8 +166,8 @@ function dgSync() {
   if (!diagLoaded) return;
   const s = dgScopeNow();
   if (s !== dgScope) dgSwitchScope(s);
-  if (s === 'local' || !VoxelLive.connected()) return;
-  const kv = VoxelLive.kv();
+  if (s === 'local' || !LIVE.connected()) return;
+  const kv = LIVE.kv();
   if (!kv) return;
   for (const [k, val] of kv) if (k.startsWith('dg:')) dgApply(k.slice(3), val, s);
   // 部屋に無いもの：この端末で置いたものは送り直す。それ以外（部屋で壊された）は消す
@@ -183,7 +214,7 @@ function placeDiag(id, a) {
   const rt = id >= CUSTOM_BASE ? defRT.get(id) : null;
   if (id >= CUSTOM_BASE && (!rt || !rt.ready)) return;
   const r = {
-    key, id, a, i: c.i, j: c.j, k: c.k, ts: (window.VoxelLive ? VoxelLive.nowTs() : Date.now()),
+    key, id, a, i: c.i, j: c.j, k: c.k, ts: (LIVE.nowTs()),
     st: rt ? { color: rt.def.colorable ? ext.curColor : null, rot: ext.rot } : null,
     h: rt ? VoxelCustom.publishDef(rt.def) : null
   };
@@ -201,7 +232,7 @@ function removeDiag(r) {
   removeVisual(r);
   recs.delete(r.key);
   if (r.src === 'local') { locRecs.delete(r.key); save(); }
-  else { dgTombs.set(r.key, { ts: VoxelLive.nowTs(), room: r.src }); sendTomb(r.key); }
+  else { dgTombs.set(r.key, { ts: LIVE.nowTs(), room: r.src }); sendTomb(r.key); }
   playBreak(r.id);
 }
 
@@ -266,7 +297,7 @@ window.doBreak = function () {
 // ============================================================
 // 5. 相手の置いた斜めブロック
 // ============================================================
-VoxelLive.onOp('dg', rec => {
+LIVE.onOp('dg', rec => {
   const s = dgScopeNow();
   if (s === 'local') return;
   dgApply(String(rec.key).slice(3), { v: rec.v, del: !!rec.del, ts: rec.ts || 0 }, s);
@@ -307,7 +338,7 @@ const tlRecs = new Map();     // キー -> 記録 { key, id, h, c, q, st, ts, sr
 const tlWaiting = [];         // 定義がまだ届いていない記録
 let tlScope = null;
 function tlNewKey() { return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-function tlScopeNow() { return VoxelLive.roomId() || 'local'; }
+function tlScopeNow() { return LIVE.roomId() || 'local'; }
 function tlStrip(r) { return { key: r.key, id: r.id, h: r.h, c: r.c, q: r.q, st: r.st, ts: r.ts }; }
 let tlLocalReady = false;
 function tlSaveLocal() {
@@ -342,7 +373,7 @@ function tlRemove(key, notify) {
   const wasLocal = r.src === 'local';
   tlDropRec(r);
   if (wasLocal) tlSaveLocal();
-  else if (notify) { tlTombs.set(key, { ts: VoxelLive.nowTs(), room: r.src }); VoxelLive.send('tl:' + key, undefined, true); }
+  else if (notify) { tlTombs.set(key, { ts: LIVE.nowTs(), room: r.src }); LIVE.send('tl:' + key, undefined, true); }
 }
 // 部屋の記録を一つ反映する（新しい方が勝つ。部屋で壊したものは、相手が後から置き直すまで戻さない）
 function tlApply(key, val, s) {
@@ -365,19 +396,19 @@ function tlApply(key, val, s) {
 // 部屋の記録と食い違うものを直す（通信が切れていた間の置く・壊すを、つながった時に届ける）
 function tlSync() {
   const s = tlScopeNow();
-  if (s === 'local' || !VoxelLive.connected()) return;
-  const kv = VoxelLive.kv();
+  if (s === 'local' || !LIVE.connected()) return;
+  const kv = LIVE.kv();
   if (!kv) return;
   for (const [k, val] of kv) if (k.startsWith('tl:')) tlApply(k.slice(3), val, s);
   for (const r of [...tlRecs.values()]) {
     if (r.src !== s || kv.has('tl:' + r.key)) continue;
-    if (r.own) VoxelLive.send('tl:' + r.key, tlStrip(r)); else tlDropRec(r);
+    if (r.own) LIVE.send('tl:' + r.key, tlStrip(r)); else tlDropRec(r);
   }
   for (const [key, t] of [...tlTombs]) {
     if (t.room !== s) { tlTombs.delete(key); continue; }
     const e = kv.get('tl:' + key);
     if (e && (e.del || (e.ts || 0) > t.ts)) { tlTombs.delete(key); continue; }
-    VoxelLive.send('tl:' + key, undefined, true);
+    LIVE.send('tl:' + key, undefined, true);
   }
 }
 // 傾けて置いたブロック（ext の傾き配置）を記録し、部屋にも送る
@@ -388,7 +419,7 @@ function tlAdopt(ent) {
   const r = {
     key: tlNewKey(), id: ent.id, h: rt && rt.def ? VoxelCustom.publishDef(rt.def) : null,
     c: [ent.c[0], ent.c[1], ent.c[2]], q: [ent.q.x, ent.q.y, ent.q.z, ent.q.w],
-    st: ent.st || null, ts: (window.VoxelLive ? VoxelLive.nowTs() : Date.now()), src: scope
+    st: ent.st || null, ts: (LIVE.nowTs()), src: scope
   };
   ent.tl = r.key;
   r.ent = ent;
@@ -397,7 +428,7 @@ function tlAdopt(ent) {
   if (scope === 'local') tlSaveLocal();
   else {
     r.own = true; r.room = scope;                     // 通信が切れていたら、つながった時に tlSync が送り直す
-    VoxelLive.send('tl:' + r.key, tlStrip(r));
+    LIVE.send('tl:' + r.key, tlStrip(r));
   }
 }
 // 通信が切れている間に置いた・壊したものも、つながった時に部屋へ届くよう、1秒ごとに部屋の記録と照らし合わせる
@@ -428,7 +459,7 @@ function tlRetry() {
   }
 }
 // 相手の置いたもの（部屋の保存データを読み込んだときも、ここに届く）
-VoxelLive.onOp('tl', rec => {
+LIVE.onOp('tl', rec => {
   const s = tlScopeNow();
   if (s === 'local') return;
   tlApply(String(rec.key).slice(3), { v: rec.v, del: !!rec.del, ts: rec.ts || 0 }, s);
