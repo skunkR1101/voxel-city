@@ -313,21 +313,49 @@ function ensureFiles() {
     sendFile(d).catch(() => {});
   }
 }
-function tryFile(id) {
-  const f = fileIn.get(id);
-  if (!f || !f.n || fileDone.get(id) === f.ver) return;
-  const m = f.parts.get(f.ver);
-  if (!m || m.size < f.n) return;
+function assembleFile(id, ver, n, type, partOf) {
+  if (!n || fileDone.get(id) === ver) return false;
   let b64 = '';
-  for (let i = 0; i < f.n; i++) { const part = m.get(i); if (part === undefined) return; b64 += part; }
-  fileDone.set(id, f.ver);
-  f.parts.delete(f.ver);
-  filePut(id, b64ToBlob(b64, f.type)).then(() => {
+  for (let i = 0; i < n; i++) { const part = partOf(i); if (part === undefined || typeof part !== 'string') return false; b64 += part; }
+  fileDone.set(id, ver);
+  filePut(id, b64ToBlob(b64, type)).then(() => {
     dropAudio(id);
     const d = defs.get(id);
     if (d) refreshMesh(d);
   }).catch(() => fileDone.delete(id));
+  return true;
 }
+function tryFile(id) {
+  const f = fileIn.get(id);
+  if (!f || !f.n || fileDone.get(id) === f.ver) return;
+  const m = f.parts.get(f.ver);
+  if (!m) return;
+  if (assembleFile(id, f.ver, f.n, f.type, i => m.get(i))) f.parts.delete(f.ver);
+}
+// 部屋の記録（kv）から、受け取り損ねた設定・音声を拾う（ライブの知らせが届かなかった時の保険）
+function pullFromRoom() {
+  if (!isRoomOn()) return;
+  const kv = window.VoxelNet && VoxelNet.kv ? VoxelNet.kv() : null;
+  if (!kv) return;
+  for (const [k, e] of kv) {
+    if (k.startsWith('snd:')) {
+      const id = k.slice(4), cur = defs.get(id);
+      if (e.del) { if (cur && cur.src === 'room') applyRemoteDef(id, e); continue; }
+      if (!e.v || typeof e.v !== 'object') continue;
+      if (!cur || (Number(e.v.ts) || 0) > (cur.ts || 0)) applyRemoteDef(id, e);
+    } else if (k.startsWith('sndf:')) {
+      const id = k.slice(5);
+      if (e.del || !e.v) continue;
+      const ver = String(e.v.ver);
+      if (fileDone.get(id) === ver) continue;
+      assembleFile(id, ver, Number(e.v.n) || 0, e.v.type, i => {
+        const c = kv.get('sndc:' + id + ':' + ver + ':' + i);
+        return c && !c.del && typeof c.v === 'string' ? c.v : undefined;
+      });
+    }
+  }
+}
+setInterval(pullFromRoom, 1000);
 if (window.VoxelMulti && VoxelMulti.onOp) {
   VoxelMulti.onOp('sndf', rec => {
     const id = String(rec.key || '').slice(5);
@@ -356,30 +384,31 @@ if (window.VoxelMulti && VoxelMulti.onOp) {
 setInterval(ensureFiles, 3000);
 
 // ---------- 部屋からの受け取り ----------
+// 部屋からの設定を一つ反映する（rec.v が中身、rec.del が削除）
+function applyRemoteDef(id, rec) {
+  if (!id) return;
+  const cur = defs.get(id);
+  if (rec.del || !rec.v || typeof rec.v !== 'object') {
+    if (cur && cur.src === 'room') deleteDef(id, false, true);
+    return;
+  }
+  const inc = rec.v;
+  if (cur) {
+    if ((Number(inc.ts) || 0) < (cur.ts || 0)) return;          // 古い知らせは無視
+    const fileChanged = inc.fileName !== cur.fileName || inc.fileSize !== cur.fileSize;
+    Object.assign(cur, normalize({ ...inc, id, src: cur.src, room: cur.room }));
+    if (fileChanged) dropAudio(id);
+    if (cur.src === 'local') saveLocal();
+    refreshMesh(cur);
+    if (editId === id) closeSettings();
+    return;
+  }
+  const d = normalize({ ...inc, id, src: 'room', room: VoxelMulti.roomId() });
+  defs.set(id, d);
+  refreshMesh(d);
+}
 if (window.VoxelMulti && VoxelMulti.onOp) {
-  VoxelMulti.onOp('snd', rec => {
-    const id = String(rec.key || '').slice(4);
-    if (!id) return;
-    const cur = defs.get(id);
-    if (rec.del || !rec.v || typeof rec.v !== 'object') {
-      if (cur) deleteDef(id, false, true);
-      return;
-    }
-    const inc = rec.v;
-    if (cur) {
-      if ((Number(inc.ts) || 0) < (cur.ts || 0)) return;          // 古い知らせは無視
-      const fileChanged = inc.fileName !== cur.fileName || inc.fileSize !== cur.fileSize;
-      Object.assign(cur, normalize({ ...inc, id, src: cur.src, room: cur.room }));
-      if (fileChanged) dropAudio(id);
-      if (cur.src === 'local') saveLocal();
-      refreshMesh(cur);
-      if (editId === id) closeSettings();
-      return;
-    }
-    const d = normalize({ ...inc, id, src: 'room', room: VoxelMulti.roomId() });
-    defs.set(id, d);
-    refreshMesh(d);
-  });
+  VoxelMulti.onOp('snd', rec => applyRemoteDef(String(rec.key || '').slice(4), rec));
   VoxelMulti.onOp('sndp', rec => {                  // タッチの知らせ（記録には残らない）
     if (rec.del || !rec.v) return;
     const id = String(rec.key || '').slice(5);

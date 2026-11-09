@@ -238,6 +238,15 @@ setInterval(() => {
 // ============================================================
 // 受信（届いた変更を、ワールドとほかの機能へ反映）
 // ============================================================
+// 受け取りの失敗を、画面に一度だけ知らせる（受け取り先が無い・受け取り中に例外が出た、の2つ）
+const recvNoted = new Set();
+function noteRecv(kind, prefix, msg) {
+  const k = kind + ':' + prefix;
+  if (recvNoted.has(k)) return;
+  recvNoted.add(k);
+  console.error('受け取りの確認：', kind, prefix, msg || '');
+  try { toast('受け取りの確認：' + prefix + ' ' + (kind === 'nohandler' ? '（受け取り先なし）' : '（エラー：' + (msg || '') + '）')); } catch (e) {}
+}
 function applyOp(rec) {
   if (!rec || typeof rec.key !== 'string') return;
   const key = rec.key;
@@ -245,7 +254,8 @@ function applyOp(rec) {
   if (key === 'seed') return;
   const prefix = key.split(':')[0];
   const fn = handlers.get(prefix);
-  if (fn) { try { fn(rec); } catch (e) { console.error(e); } }
+  if (!fn) { noteRecv('nohandler', prefix); return; }
+  try { fn(rec); } catch (e) { console.error(e); noteRecv('error', prefix, e && e.message); }
 }
 
 // ============================================================
