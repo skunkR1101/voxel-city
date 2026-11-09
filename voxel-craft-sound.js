@@ -258,6 +258,103 @@ function sendDef(d) {
   if (isRoomOn()) VoxelMulti.send('snd:' + d.id, wire(d), false, false);
 }
 
+// ---------- 音声ファイルの共有 ----------
+// 音声ファイルは各自の端末に保存されるので、部屋へ小分けにして送る（「sndf:」に名前と版、「sndc:」に中身）。
+// 全部そろった端末だけが、その音声を使えるようになる。通信が切れていた分は、つながった時にもう一度送る。
+const FILE_PART = 40000;             // 1つの記録の大きさ（文字数）
+const fileSent = new Map();          // id -> { ver, n }：この端末が送った音声
+const fileIn = new Map();            // id -> { ver, n, name, type, parts: Map(版 -> Map(番号 -> 文字)) }
+const fileDone = new Map();          // id -> 使えるようにした版
+const fileBusy = new Set();
+function fileVerOf(d) {               // 版：サイズと名前から作る（コロンを含まない）
+  let h = 5381;
+  for (const ch of String(d.fileName || '')) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+  return (d.fileSize || 0) + '-' + h.toString(16);
+}
+function blobToB64(blob) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => { const s = String(fr.result); res(s.slice(s.indexOf(',') + 1)); };
+    fr.onerror = () => rej(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
+function b64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], { type: type || 'application/octet-stream' });
+}
+async function sendFile(d) {
+  if (!isRoomOn() || !d.fileName || fileBusy.has(d.id)) return;
+  fileBusy.add(d.id);
+  try {
+    const blob = await fileGet(d.id).catch(() => null);
+    if (!blob || !isRoomOn()) return;
+    const b64 = await blobToB64(blob);
+    const ver = fileVerOf(d);
+    const n = Math.max(1, Math.ceil(b64.length / FILE_PART));
+    VoxelMulti.send('sndf:' + d.id, { ver, n, name: d.fileName, type: blob.type || '' });
+    for (let i = 0; i < n; i++) VoxelMulti.send('sndc:' + d.id + ':' + ver + ':' + i, b64.slice(i * FILE_PART, (i + 1) * FILE_PART));
+    const old = fileSent.get(d.id);
+    if (old && old.ver !== ver) for (let i = 0; i < old.n; i++) VoxelMulti.send('sndc:' + d.id + ':' + old.ver + ':' + i, undefined, true);
+    fileSent.set(d.id, { ver, n });
+  } finally { fileBusy.delete(d.id); }
+}
+// 部屋に、この端末の音声が無ければ送る（つながった時・音声を変えた時）
+function ensureFiles() {
+  if (!isRoomOn()) return;
+  const kv = window.VoxelNet && VoxelNet.kv ? VoxelNet.kv() : null;
+  if (!kv) return;
+  for (const d of defs.values()) {
+    if (d.src !== 'local' || !d.fileName) continue;
+    const m = kv.get('sndf:' + d.id);
+    if (m && !m.del && m.v && m.v.ver === fileVerOf(d)) continue;
+    sendFile(d).catch(() => {});
+  }
+}
+function tryFile(id) {
+  const f = fileIn.get(id);
+  if (!f || !f.n || fileDone.get(id) === f.ver) return;
+  const m = f.parts.get(f.ver);
+  if (!m || m.size < f.n) return;
+  let b64 = '';
+  for (let i = 0; i < f.n; i++) { const part = m.get(i); if (part === undefined) return; b64 += part; }
+  fileDone.set(id, f.ver);
+  f.parts.delete(f.ver);
+  filePut(id, b64ToBlob(b64, f.type)).then(() => {
+    dropAudio(id);
+    const d = defs.get(id);
+    if (d) refreshMesh(d);
+  }).catch(() => fileDone.delete(id));
+}
+if (window.VoxelMulti && VoxelMulti.onOp) {
+  VoxelMulti.onOp('sndf', rec => {
+    const id = String(rec.key || '').slice(5);
+    if (!id || rec.del || !rec.v || typeof rec.v !== 'object') return;
+    const ver = String(rec.v.ver);
+    if (fileDone.get(id) === ver) return;
+    let f = fileIn.get(id);
+    if (!f) { f = { parts: new Map() }; fileIn.set(id, f); }
+    f.ver = ver; f.n = Number(rec.v.n) || 0; f.name = rec.v.name; f.type = rec.v.type;
+    for (const v of [...f.parts.keys()]) if (v !== ver) f.parts.delete(v);
+    tryFile(id);
+  });
+  VoxelMulti.onOp('sndc', rec => {
+    const p = String(rec.key || '').slice(5).split(':');   // 音声の番号 : 版 : 番号
+    if (p.length !== 3 || rec.del || typeof rec.v !== 'string') return;
+    const id = p[0], ver = p[1], i = Number(p[2]);
+    if (fileDone.get(id) === ver) return;
+    let f = fileIn.get(id);
+    if (!f) { f = { parts: new Map() }; fileIn.set(id, f); }
+    let m = f.parts.get(ver);
+    if (!m) { m = new Map(); f.parts.set(ver, m); }
+    m.set(i, rec.v);
+    tryFile(id);
+  });
+}
+setInterval(ensureFiles, 3000);
+
 // ---------- 部屋からの受け取り ----------
 if (window.VoxelMulti && VoxelMulti.onOp) {
   VoxelMulti.onOp('snd', rec => {
@@ -511,6 +608,7 @@ function openSettings(id) {
       cur.fileName = f.name; cur.fileSize = f.size; cur.ts = nowTs();
       if (cur.src === 'local') saveLocal();
       sendDef(cur);
+      sendFile(cur).catch(() => {});
       fileInfo();
       sndToast(ok ? '音声を登録しました' : '音声を登録しました（この端末では再生できない形式の可能性があります。mp3・m4a・wav を試してください）');
     } catch (err) {
