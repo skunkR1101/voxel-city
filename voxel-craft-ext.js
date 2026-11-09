@@ -1624,7 +1624,7 @@ window.doPlace = function () {
   const to = tiltOrientFor(rt && rt.def, p, tp);
   const stState = rt ? { color: rt.def.colorable ? colorForNew() : null, rot: to.rot } : null;
   const cell = [Math.floor(cc[0]), Math.floor(cc[1]), Math.floor(cc[2])];
-  if (isSolidAt(cell)) return;
+  if (ext.grid === 1 && isSolidAt(cell)) return;      // 細かい格子（0.5など）は壁を無視する
   const pp = player.pos;
   if (Math.hypot(cc[0] - pp.x, cc[1] - (pp.y + 0.9), cc[2] - pp.z) < 0.9) return;
   if (addTilt(id, cc, to.q, stState)) {
@@ -2322,7 +2322,7 @@ function updateGhost() {
     }
   } else {
     const tp = tiltPlacement(p);
-    valid = !isSolidAt([Math.floor(tp.c[0]), Math.floor(tp.c[1]), Math.floor(tp.c[2])]);
+    valid = ext.grid !== 1 || !isSolidAt([Math.floor(tp.c[0]), Math.floor(tp.c[1]), Math.floor(tp.c[2])]);   // 細かい格子は壁を無視
     const gdef = isModelId(id) ? (defById(id) || defRT.get(id).def) : null;
     const to = tiltOrientFor(gdef, p, tp);
     const off = isModelId(id) ? new THREE.Vector3(0, -0.5, 0).applyQuaternion(to.q) : new THREE.Vector3();

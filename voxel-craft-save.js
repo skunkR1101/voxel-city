@@ -199,6 +199,12 @@ async function loadFile(file) {
       if (k === 'voxelcraft_ext_v1' && window.VoxelExt && VoxelExt.importExtJson) await VoxelExt.importExtJson(v);
       else localStorage.setItem(k, v);
     }
+    // 0.5マスなどの細かいブロック・傾きブロックは、この端末の別の保存場所（IndexedDB）も読むので、
+    // 読み込んだファイルの内容で合わせる（古い内容が残って消えてしまうのを防ぐ）
+    for (const k of ['voxelcraft_diag_v1', 'voxelcraft_tilt_v1']) {
+      const v = (data.storage && typeof data.storage[k] === 'string') ? data.storage[k] : '[]';
+      if (window.VoxelExt && VoxelExt.blobPut) await VoxelExt.blobPut('idb:' + k, v);
+    }
     if (window.VoxelDia && VoxelDia.importSounds) await VoxelDia.importSounds(data.sounds || []);
     await idbPut(PENDING, { seed: data.seed ?? null, edits: (data.base && data.base.edits) || [] });
   } catch (e) {
