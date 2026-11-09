@@ -112,12 +112,13 @@ function dgSwitchScope(s) {
   if (s === 'local') for (const r of locRecs.values()) if (!recs.has(r.key)) showRec(r);
 }
 // 部屋の記録を一つ反映する（新しい方が勝つ。部屋で壊したものは、相手が後から置き直すまで戻さない）
+function dgLog(t) { try { if (window.VoxelDebug) VoxelDebug.log('斜め・0.5マス', t); } catch (e) {} }
 function dgApply(key, val, s) {
   const t = dgTombs.get(key);
   if (t) { if (!val.del && (val.ts || 0) > t.ts) dgTombs.delete(key); else return; }
   const cur = recs.get(key);
   if (val.del) {
-    if (cur && cur.src === s && cur.ts <= (val.ts || 0)) { removeVisual(cur); recs.delete(key); }
+    if (cur && cur.src === s && cur.ts <= (val.ts || 0)) { removeVisual(cur); recs.delete(key); dgLog('消す ' + key.slice(0, 24)); }
     return;
   }
   const v = val.v || {};
@@ -126,6 +127,7 @@ function dgApply(key, val, s) {
     if (cur.sig === dgSig(v)) { cur.ts = val.ts || 0; return; }      // 中身が同じなら描き直さない
   }
   if (cur) { removeVisual(cur); recs.delete(key); }
+  dgLog('受け取り ' + key.slice(0, 24) + '（' + (v.h ? '自作ブロック' : '標準ブロック ' + v.id) + '）');
   showRec({ key, id: v.id, h: v.h || null, a: Number(v.a), i: v.i, j: v.j, k: v.k, st: v.st || null, ts: val.ts || 0, src: s, sig: dgSig(v) });
 }
 // 部屋の記録と食い違うものを直す：部屋の記録（kv）を正とする
@@ -355,6 +357,7 @@ function tlApply(key, val, s) {
     if (cur.sig === tlSig(v)) { cur.ts = val.ts || 0; return; }      // 中身が同じなら描き直さない
   }
   if (cur) tlDropRec(cur);
+  dgLog('傾き 受け取り ' + key.slice(0, 24));
   const r = { key, id: v.id, h: v.h || null, c: v.c, q: v.q, st: v.st || null, ts: val.ts || v.ts || 0, src: s, ent: null, sig: tlSig(v) };
   tlRecs.set(key, r);
   if (!tlAddVisual(r)) tlWaiting.push(r);

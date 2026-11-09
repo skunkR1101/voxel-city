@@ -6,6 +6,7 @@
 // 読み込み：本体 voxel-craft.html で、voxel-craft-ext.js と voxel-craft-multi.js の後に読みます
 // ============================================================
 (function () {
+const dbg = (k, t) => { try { if (window.VoxelDebug) VoxelDebug.log(k, t); } catch (e) {} };
 'use strict';
 
 const VX = window.VoxelExt;
@@ -318,11 +319,13 @@ function assembleFile(id, ver, n, type, partOf) {
   let b64 = '';
   for (let i = 0; i < n; i++) { const part = partOf(i); if (part === undefined || typeof part !== 'string') return false; b64 += part; }
   fileDone.set(id, ver);
+  dbg('音声ファイル', '組み立て ' + id + '（' + n + 'こ）');
   filePut(id, b64ToBlob(b64, type)).then(() => {
     dropAudio(id);
+    dbg('音声ファイル', '保存できました ' + id);
     const d = defs.get(id);
     if (d) refreshMesh(d);
-  }).catch(() => fileDone.delete(id));
+  }).catch(e => { fileDone.delete(id); dbg('音声ファイル', '保存に失敗 ' + id + '：' + (e && e.message)); });
   return true;
 }
 function tryFile(id) {
@@ -388,6 +391,7 @@ setInterval(ensureFiles, 3000);
 function applyRemoteDef(id, rec) {
   if (!id) return;
   const cur = defs.get(id);
+  dbg('音声設定', (rec.del ? '削除 ' : '受け取り ') + id + (rec.v && rec.v.name ? '（' + rec.v.name + '）' : ''));
   if (rec.del || !rec.v || typeof rec.v !== 'object') {
     if (cur && cur.src === 'room') deleteDef(id, false, true);
     return;

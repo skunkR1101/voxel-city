@@ -102,7 +102,8 @@ async function idbSet(k, v) {
 // 送信（ブロック・ほかの機能の変更）
 // ============================================================
 function send(key, value, del, eph) {
-  if (!conn || !window.VoxelNet || !VoxelNet.active()) return;
+  if (!conn || !window.VoxelNet || !VoxelNet.active()) { DBG.dropped++; return; }
+  DBG.sent[String(key).split(':')[0]] = (DBG.sent[String(key).split(':')[0]] || 0) + 1;
   VoxelNet.send(key, value, del, eph);
 }
 // ============================================================
@@ -238,9 +239,20 @@ setInterval(() => {
 // ============================================================
 // 受信（届いた変更を、ワールドとほかの機能へ反映）
 // ============================================================
+// ---------- デバッグ用の記録（設定の「デバッグログ」で見られる） ----------
+const BUILD = '2026-11-09-dbg1';
+const DBG = { build: BUILD, log: [], recv: {}, sent: {}, errs: {}, unhandled: {}, dropped: 0, started: Date.now() };
+function dbgLog(kind, text) {
+  DBG.log.push(new Date().toLocaleTimeString() + ' [' + kind + '] ' + text);
+  if (DBG.log.length > 300) DBG.log.splice(0, DBG.log.length - 300);
+}
+window.VoxelDebug = { log: dbgLog, state: DBG };
 // 受け取りの失敗を、画面に一度だけ知らせる（受け取り先が無い・受け取り中に例外が出た、の2つ）
 const recvNoted = new Set();
 function noteRecv(kind, prefix, msg) {
+  if (kind === 'nohandler') DBG.unhandled[prefix] = (DBG.unhandled[prefix] || 0) + 1;
+  else DBG.errs[prefix] = (DBG.errs[prefix] || 0) + 1;
+  dbgLog(kind === 'nohandler' ? '受け取り先なし' : 'エラー', prefix + (msg ? '：' + msg : ''));
   const k = kind + ':' + prefix;
   if (recvNoted.has(k)) return;
   recvNoted.add(k);
@@ -250,13 +262,112 @@ function noteRecv(kind, prefix, msg) {
 function applyOp(rec) {
   if (!rec || typeof rec.key !== 'string') return;
   const key = rec.key;
-  if (key.startsWith('b:')) { applyRemoteCell(key, rec); return; }
+  if (key.startsWith('b:')) { DBG.recv.b = (DBG.recv.b || 0) + 1; applyRemoteCell(key, rec); return; }
   if (key === 'seed') return;
   const prefix = key.split(':')[0];
+  DBG.recv[prefix] = (DBG.recv[prefix] || 0) + 1;
   const fn = handlers.get(prefix);
   if (!fn) { noteRecv('nohandler', prefix); return; }
   try { fn(rec); } catch (e) { console.error(e); noteRecv('error', prefix, e && e.message); }
 }
+
+// ---------- デバッグログの画面（設定の中の「デバッグログ」ボタン） ----------
+function uaInfo() {
+  const ua = navigator.userAgent || '';
+  const m = ua.match(/(Edg|CriOS|Chrome|Version|Firefox|FxiOS)\/([\d.]+)/);
+  let brand = m ? m[1] : '不明', ver = m ? m[2] : '不明';
+  if (brand === 'CriOS') brand = 'Chrome(iOS)';
+  if (brand === 'Version') brand = 'Safari';
+  if (brand === 'FxiOS') brand = 'Firefox(iOS)';
+  const mobile = /Android|iPhone|iPad/.test(ua) ? '（端末：' + (ua.match(/Android [\d.]+|iPhone OS [\d_]+|iPad/) || ['?'])[0].replace(/_/g, '.') + '）' : '';
+  return brand + ' ' + ver + mobile;
+}
+async function latestBuild() {
+  const urls = [new URL('voxel-craft-multi.js', location.href).href, location.href.split('?')[0]];
+  for (const u of urls) {
+    try {
+      const r = await fetch(u + (u.includes('?') ? '&' : '?') + 'v=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) continue;
+      const t = await r.text();
+      const m = t.match(/const BUILD = '([^']+)'/);
+      if (m) return { build: m[1], from: u.split('/').pop() || '（このページ）' };
+    } catch (e) {}
+  }
+  return null;
+}
+async function debugReport() {
+  const kv = window.VoxelNet && VoxelNet.kv ? VoxelNet.kv() : null;
+  const count = pre => { if (!kv) return '-'; let n = 0; for (const k of kv.keys()) if (k.startsWith(pre)) n++; return n; };
+  const latest = await latestBuild();
+  const lines = [];
+  lines.push('== 版 ==');
+  lines.push('この端末の版：' + BUILD);
+  lines.push('配信されている最新の版：' + (latest ? latest.build + '（' + latest.from + '）' : '確認できませんでした（配信元に届かない）'));
+  lines.push(latest ? (latest.build === BUILD ? '→ 最新版です' : '→ 古い版です。ページを更新してください') : '');
+  lines.push('ブラウザ：' + uaInfo());
+  lines.push('ページ：' + location.origin + location.pathname + '（' + location.protocol + '）');
+  lines.push('');
+  lines.push('== 部屋 ==');
+  lines.push('つながっている：' + (VoxelMulti.connected() ? 'はい' : 'いいえ') + '　部屋ID：' + (VoxelMulti.roomId() || 'なし'));
+  lines.push('つながっている相手の数：' + (window.VoxelNet && VoxelNet.linkCount ? VoxelNet.linkCount() : '-'));
+  lines.push('部屋の記録の数：' + (kv ? kv.size : '-') + '（斜め dg:' + count('dg:') + ' ・傾き tl:' + count('tl:') + ' ・音声 snd:' + count('snd:') + ' / sndf:' + count('sndf:') + ' ・ブロック b:' + count('b:') + '）');
+  lines.push('送れなかった回数（つながっていない時）：' + DBG.dropped);
+  lines.push('');
+  lines.push('== 送った件数（この端末から） ==');
+  lines.push(JSON.stringify(DBG.sent));
+  lines.push('== 受け取った件数（この端末へ） ==');
+  lines.push(JSON.stringify(DBG.recv));
+  lines.push('受け取り先が無かった：' + JSON.stringify(DBG.unhandled));
+  lines.push('受け取り中のエラー：' + JSON.stringify(DBG.errs));
+  lines.push('');
+  lines.push('== 最近の記録（新しい順・最大300件） ==');
+  lines.push(DBG.log.slice().reverse().join('\n') || '（まだありません）');
+  return lines.join('\n');
+}
+function openDebugPanel() {
+  let box = document.getElementById('dbgPanel');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'dbgPanel';
+    box.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(5,10,18,.94);color:#e6eef7;font:12px/1.5 monospace;padding:12px;overflow:auto;display:none';
+    box.innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        <button id="dbgRefresh" style="padding:6px 10px">更新</button>
+        <button id="dbgCopy" style="padding:6px 10px">ログをコピー</button>
+        <button id="dbgClose" style="padding:6px 10px">閉じる</button>
+      </div>
+      <pre id="dbgText" style="white-space:pre-wrap;word-break:break-all;margin:0"></pre>`;
+    document.body.appendChild(box);
+    const txt = () => document.getElementById('dbgText');
+    const refresh = async () => { txt().textContent = '読み込み中…'; txt().textContent = await debugReport(); };
+    document.getElementById('dbgRefresh').onclick = refresh;
+    document.getElementById('dbgClose').onclick = () => { box.style.display = 'none'; };
+    document.getElementById('dbgCopy').onclick = async () => {
+      const t = txt().textContent;
+      try { await navigator.clipboard.writeText(t); toast('ログをコピーしました'); }
+      catch (e) {
+        const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta);
+        ta.select(); try { document.execCommand('copy'); toast('ログをコピーしました'); } catch (e2) { toast('コピーできませんでした。文字を長押しして選んでください'); }
+        ta.remove();
+      }
+    };
+    box._refresh = refresh;
+  }
+  box.style.display = 'block';
+  box._refresh();
+}
+function buildDebugButton() {
+  const close = document.getElementById('settingsClose');
+  if (!close || document.getElementById('dbgOpen')) return;
+  const btn = document.createElement('button');
+  btn.id = 'dbgOpen';
+  btn.textContent = 'デバッグログ（通信の確認・版の確認）';
+  btn.style.cssText = 'display:block;width:100%;margin:10px 0;padding:8px;border-radius:8px';
+  btn.onclick = openDebugPanel;
+  close.parentNode.insertBefore(btn, close);
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', buildDebugButton);
+else buildDebugButton();
 
 // ============================================================
 // 部屋の作成・参加・退室
