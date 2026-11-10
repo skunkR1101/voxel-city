@@ -15,7 +15,7 @@
 if (window.VoxelLive) return;     // 二重に読み込まれても、一度だけ動く
 
 // この窓口で扱う通信名（接頭語）。ほかの仕組みの接頭語とは重ならない
-const PREFIXES = ['dg', 'tl', 'snd', 'sndf', 'sndc', 'sndp'];
+const PREFIXES = ['dg', 'tl', 'snd', 'sndf', 'sndc', 'sndp', 'lsp', 'lsm', 'rbk'];   // 道路・線路（lsp/lsm）と道路のテクスチャ（rbk）を追加
 
 const handlers = new Map();      // 接頭語 -> fn(rec)  rec = { key, v, del, ts }
 let room = null;                 // 今いる部屋（voxel-rt の Room）。入っていなければ null

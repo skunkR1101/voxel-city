@@ -24,6 +24,15 @@ const STALE_MS = 40000;         // これより長く便りがない相手は、
 const QUIET_MS = 3000;          // 入った直後は、すでにいる人の「参加しました」を出さない
 const CHAT_MAX = 200;           // チャット1行の長さ（文字）
 const LOG_MAX = 80;
+const MEDIA_LIMIT = 260000;     // 画像・GIFの大きさ上限（文字数。送るときに、この大きさに縮める）
+const CHAT_OPT_KEY = 'voxelcraft_chat_opts_v1';
+const CHAT_OPT_DEF = { showImg: true, showGif: true, btnImg: true, btnGif: true };
+const CHAT_OPT_ITEMS = [
+  ['showImg', '画像を表示する（相手からの画像）'],
+  ['showGif', 'GIFを表示する（相手からのGIF）'],
+  ['btnImg', '画像を送るボタンを表示する'],
+  ['btnGif', 'GIFを送るボタンを表示する']
+];
 const STRIP_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]', 'g');
 
 let room = null, transport = null;
@@ -84,6 +93,7 @@ function injectCss() {
 
 // ---------- チャットの画面 ----------
 let chatBox, chatLog, chatForm, chatInput;
+let imgBtn, gifBtn, mediaInput;
 function buildChat() {
   chatBox = el('div'); chatBox.id = 'rtChat';
   const hd = el('button', 'hd', 'チャット ▾');
@@ -101,10 +111,28 @@ function buildChat() {
   chatInput.addEventListener('keyup', e => e.stopPropagation());
   chatInput.addEventListener('focus', () => { try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {} });
   const send = el('button', '', '送信'); send.type = 'submit';
-  chatForm.appendChild(chatInput); chatForm.appendChild(send);
+  imgBtn = el('button', 'mb', '画像'); imgBtn.type = 'button';
+  gifBtn = el('button', 'mb', 'GIF'); gifBtn.type = 'button';
+  mediaInput = el('input'); mediaInput.type = 'file'; mediaInput.style.display = 'none';
+  imgBtn.addEventListener('click', () => { mediaInput.accept = 'image/png,image/jpeg,image/webp'; mediaInput.click(); });
+  gifBtn.addEventListener('click', () => { mediaInput.accept = 'image/gif'; mediaInput.click(); });
+  mediaInput.addEventListener('change', () => { const f = mediaInput.files && mediaInput.files[0]; mediaInput.value = ''; if (f) sendMediaFile(f); });
+  chatForm.appendChild(chatInput); chatForm.appendChild(imgBtn); chatForm.appendChild(gifBtn); chatForm.appendChild(send); chatForm.appendChild(mediaInput);
   chatForm.addEventListener('submit', e => { e.preventDefault(); sendChat(); });
   chatBox.appendChild(chatForm);
   document.body.appendChild(chatBox);
+  const cs = document.createElement('style');
+  cs.textContent =
+    '#rtChat .mb{pointer-events:auto;background:#2b3a4f;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:4px 6px;font-size:12px;margin-left:4px}' +
+    '#rtChat .log a{color:#8fd3ff;text-decoration:underline;pointer-events:auto}' +
+    '#rtChat .log .med{display:inline-block;max-width:100%}' +
+    '#rtChat .log .med img{display:block;max-width:150px;max-height:110px;border-radius:6px;margin:2px 0;pointer-events:auto}' +
+    '#rtChat .log .med .ph{display:none;opacity:.75;font-size:12px}' +
+    '#rtChat .log.no-img .med[data-g="0"] img,#rtChat .log.no-gif .med[data-g="1"] img{display:none}' +
+    '#rtChat .log.no-img .med[data-g="0"] .ph,#rtChat .log.no-gif .med[data-g="1"] .ph{display:block}';
+  document.head.appendChild(cs);
+  refreshChatButtons(); applyChatView();
+  buildChatSettings();
 }
 function addLine(text, cls, nameColor, name) {
   if (!chatLog) return;
@@ -128,7 +156,136 @@ function sendChat() {
   chatInput.value = '';
   if (!t || !room) return;
   room.ephemeral('chat:' + room.peerId, { n: myName, t });
-  addLine(t, '', L.colorOf(myName), myName);
+  addText(t, L.colorOf(myName), myName);
+}
+
+
+// ---------- チャット：リンク・画像・GIF、表示の設定 ----------
+function chatOpts() {
+  try { return Object.assign({}, CHAT_OPT_DEF, JSON.parse(localStorage.getItem(CHAT_OPT_KEY) || '{}')); }
+  catch (e) { return Object.assign({}, CHAT_OPT_DEF); }
+}
+function setChatOpts(patch) {
+  const o = Object.assign(chatOpts(), patch);
+  try { localStorage.setItem(CHAT_OPT_KEY, JSON.stringify(o)); } catch (e) {}
+  refreshChatButtons(); applyChatView();
+}
+function refreshChatButtons() {
+  const o = chatOpts();
+  if (imgBtn) imgBtn.style.display = o.btnImg ? '' : 'none';
+  if (gifBtn) gifBtn.style.display = o.btnGif ? '' : 'none';
+}
+function applyChatView() {
+  const o = chatOpts();
+  if (!chatLog) return;
+  chatLog.classList.toggle('no-img', !o.showImg);
+  chatLog.classList.toggle('no-gif', !o.showGif);
+}
+window.addEventListener('vc-chat-opts', () => { refreshChatButtons(); applyChatView(); });
+
+function validMedia(u) {
+  return typeof u === 'string' && u.length <= MEDIA_LIMIT + 100 && /^data:image\/(png|jpeg|webp|gif);base64,/.test(u);
+}
+function readDataUrl(f) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+}
+// 静止画は、大きさと画質を下げて、上限に収まるまで縮める（WebP が使えなければ JPEG）
+async function shrinkImage(f) {
+  const bmp = await createImageBitmap(f);
+  for (const [max, q] of [[480, 0.82], [360, 0.72], [240, 0.6]]) {
+    const sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(bmp.width * sc)); c.height = Math.max(1, Math.round(bmp.height * sc));
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    let url = c.toDataURL('image/webp', q);
+    if (!url.startsWith('data:image/webp')) url = c.toDataURL('image/jpeg', q);
+    if (url.length <= MEDIA_LIMIT) return url;
+  }
+  return null;
+}
+async function sendMediaFile(f) {
+  if (!room) { sysLine('部屋に参加すると送れます'); return; }
+  const isGif = f.type === 'image/gif';
+  let url = null;
+  try {
+    if (isGif) {
+      if (f.size > 150000) { sysLine('GIFは150KB以下のものを送れます'); return; }
+      url = await readDataUrl(f);
+    } else {
+      url = await shrinkImage(f);
+    }
+  } catch (e) { sysLine('画像を読み込めませんでした'); return; }
+  if (!validMedia(url)) { sysLine('画像が大きすぎて送れませんでした'); return; }
+  room.ephemeral('chat:' + room.peerId, { n: myName, k: isGif ? 'gif' : 'img', u: url });
+  addMedia(url, isGif, L.colorOf(myName), myName);
+}
+// 文字の中の http・https のリンクを、押せるリンクにする（ほかの形式のリンクは作らない）
+function appendLinked(parent, t) {
+  const re = /https?:\/\/[^\s<>"']+/g;
+  let last = 0, m;
+  while ((m = re.exec(t))) {
+    if (m.index > last) parent.appendChild(document.createTextNode(t.slice(last, m.index)));
+    const a = el('a', '', m[0]);
+    a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    parent.appendChild(a);
+    last = m.index + m[0].length;
+  }
+  if (last < t.length) parent.appendChild(document.createTextNode(t.slice(last)));
+}
+function newLine(name, color) {
+  const d = el('div', 'ln');
+  if (name != null) {
+    const n = el('span', '', '<' + name + '> ');
+    n.style.color = color || '#fff';
+    d.appendChild(n);
+  }
+  return d;
+}
+function pushLine(d) {
+  chatLog.appendChild(d);
+  while (chatLog.childNodes.length > LOG_MAX) chatLog.removeChild(chatLog.firstChild);
+}
+function addText(t, color, name) {
+  if (!chatLog) return;
+  const d = newLine(name, color);
+  appendLinked(d, t);
+  pushLine(d);
+}
+function addMedia(url, isGif, color, name) {
+  if (!chatLog) return;
+  const d = newLine(name, color);
+  const m = el('span', 'med');
+  m.dataset.g = isGif ? '1' : '0';
+  const img = document.createElement('img');
+  img.src = url; img.alt = isGif ? 'GIF' : '画像'; img.loading = 'lazy';
+  m.appendChild(img);
+  m.appendChild(el('span', 'ph', isGif ? '［GIF（表示しない設定）］' : '［画像（表示しない設定）］'));
+  d.appendChild(m);
+  pushLine(d);
+  applyChatView();
+}
+// 設定の「チャット」の欄（ゲームの設定画面の、閉じるボタンの前に入れる）
+function buildChatSettings() {
+  const tryBuild = () => {
+    const close = document.getElementById('settingsClose');
+    if (!close) return false;
+    if (document.getElementById('chatOptSec')) return true;
+    const sec = document.createElement('div');
+    sec.id = 'chatOptSec';
+    sec.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #3a4a60;border-radius:8px';
+    sec.innerHTML = '<div style="font-weight:bold;margin-bottom:6px">チャット（画像・GIF・リンク）</div>' +
+      CHAT_OPT_ITEMS.map(([k, label]) =>
+        `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" data-k="${k}"><span>${label}</span></label>`).join('');
+    const o = chatOpts();
+    sec.querySelectorAll('input[data-k]').forEach(cb => {
+      const k = cb.dataset.k;
+      cb.checked = !!o[k];
+      cb.addEventListener('change', () => setChatOpts({ [k]: cb.checked }));
+    });
+    close.parentNode.insertBefore(sec, close);
+    return true;
+  };
+  if (!tryBuild()) { const t = setInterval(() => { if (tryBuild()) clearInterval(t); }, 300); }
 }
 
 // ---------- 名前の表示・ロケーターバー ----------
@@ -350,8 +507,12 @@ function wireRoom(rm) {
   rm.on('chat', (key, v, meta) => {
     if (!v || !meta || meta.peer === rm.peerId) return;
     const n = cleanText(v.n, L.NAME_MAX) || L.DEFAULT_NAME;
+    if (v.k === 'img' || v.k === 'gif') {
+      if (validMedia(v.u)) addMedia(v.u, v.k === 'gif', L.colorOf(n), n);
+      return;
+    }
     const t = cleanText(v.t, CHAT_MAX);
-    if (t) addLine(t, '', L.colorOf(n), n);
+    if (t) addText(t, L.colorOf(n), n);
   });
   rm.onEvent((ev, data) => {
     if (rm !== room) return;
@@ -473,5 +634,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTUI = { onRoom: fn => { roomListeners.push(fn); if (room) fn(room); }, room: () => room, join: joinRoom, leave: () => leaveRoom(true), remotes: () => remotes, say: t => { chatInput.value = t; sendChat(); } };
+window.VoxelRTUI = { onRoom: fn => { roomListeners.push(fn); if (room) fn(room); }, room: () => room, join: joinRoom, leave: () => leaveRoom(true), remotes: () => remotes, chatOpts: { get: chatOpts, set: setChatOpts }, say: t => { chatInput.value = t; sendChat(); } };
 })();

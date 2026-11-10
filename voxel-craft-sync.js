@@ -10,6 +10,25 @@
 (function () {
 'use strict';
 
+// ---------- 部屋の通信への窓口（voxel-craft-live.js）。読み込み順に関係なく、待ってから登録する ----------
+const LIVE = (() => {
+  const pend = [];
+  const t = setInterval(() => {
+    if (!window.VoxelLive) return;
+    clearInterval(t);
+    for (const [p, f] of pend) VoxelLive.onOp(p, f);
+    pend.length = 0;
+  }, 50);
+  return {
+    onOp(p, f) { if (window.VoxelLive) VoxelLive.onOp(p, f); else pend.push([p, f]); },
+    send(...a) { if (window.VoxelLive) VoxelLive.send(...a); },
+    connected() { return !!(window.VoxelLive && VoxelLive.connected()); },
+    kv() { return window.VoxelLive ? VoxelLive.kv() : null; },
+    nowTs() { return window.VoxelLive ? VoxelLive.nowTs() : Date.now(); }
+  };
+})();
+
+
 const MIRROR = {                      // 保存キー -> 通信での名前（短い英字）
   'voxelcraft_road_v1': 'road',
   'voxelcraft_dia_v1': 'dia',
@@ -50,17 +69,17 @@ function reloadKey(k) {
 // ============================================================
 function sendValue(name, text, ts) {
   const n = Math.max(1, Math.ceil(text.length / PART));
-  for (let i = 0; i < n; i++) VoxelMulti.send('lsp:' + name + ':' + i, { ts, d: text.slice(i * PART, (i + 1) * PART) });
-  VoxelMulti.send('lsm:' + name, { ts, n });
+  for (let i = 0; i < n; i++) LIVE.send('lsp:' + name + ':' + i, { ts, d: text.slice(i * PART, (i + 1) * PART) });
+  LIVE.send('lsm:' + name, { ts, n });
 }
 function localWrite(k, text) {
-  if (quiet || !VoxelMulti.connected()) return;
+  if (quiet || !LIVE.connected()) return;
   clearTimeout(timers.get(k));
   timers.set(k, setTimeout(() => {
     timers.delete(k);
     const name = MIRROR[k];
     const prev = lastMeta.get(name) ? lastMeta.get(name).ts : 0;
-    const ts = Math.max((window.VoxelNet ? VoxelNet.nowTs() : Date.now()), prev + 1);
+    const ts = Math.max(LIVE.nowTs(), prev + 1);
     lastMeta.set(name, { ts, n: 0 });
     sendValue(name, text, ts);
   }, DEBOUNCE));
@@ -77,7 +96,7 @@ Storage.prototype.setItem = function (k, v) {
 VoxelSync.announceAll = function () {
   for (const k of Object.keys(MIRROR)) {
     const v = origGet.call(localStorage, k);
-    if (v != null) sendValue(MIRROR[k], String(v), Math.max((window.VoxelNet ? VoxelNet.nowTs() : Date.now()), (lastMeta.get(MIRROR[k]) || { ts: 0 }).ts + 1));
+    if (v != null) sendValue(MIRROR[k], String(v), Math.max(LIVE.nowTs(), (lastMeta.get(MIRROR[k]) || { ts: 0 }).ts + 1));
   }
 };
 
@@ -119,7 +138,7 @@ function tryApply(name) {
   for (const t of [...byTs.keys()]) if (t < meta.ts) byTs.delete(t);
 }
 
-VoxelMulti.onOp('lsp', rec => {
+LIVE.onOp('lsp', rec => {
   const m = /^lsp:([a-z]+):(\d+)$/.exec(rec.key || '');
   if (!m || !rec.v || typeof rec.v.d !== 'string') return;
   const name = m[1], i = Number(m[2]);
@@ -130,7 +149,7 @@ VoxelMulti.onOp('lsp', rec => {
   byTs.set(rec.v.ts, arr);
   tryApply(name);
 });
-VoxelMulti.onOp('lsm', rec => {
+LIVE.onOp('lsm', rec => {
   const m = /^lsm:([a-z]+)$/.exec(rec.key || '');
   if (!m || !rec.v) return;
   const name = m[1];

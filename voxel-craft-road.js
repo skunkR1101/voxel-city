@@ -10,6 +10,25 @@
 (function () {
 'use strict';
 
+// ---------- 部屋の通信への窓口（voxel-craft-live.js）。読み込み順に関係なく、待ってから登録する ----------
+const LIVE = (() => {
+  const pend = [];
+  const t = setInterval(() => {
+    if (!window.VoxelLive) return;
+    clearInterval(t);
+    for (const [p, f] of pend) VoxelLive.onOp(p, f);
+    pend.length = 0;
+  }, 50);
+  return {
+    onOp(p, f) { if (window.VoxelLive) VoxelLive.onOp(p, f); else pend.push([p, f]); },
+    send(...a) { if (window.VoxelLive) VoxelLive.send(...a); },
+    connected() { return !!(window.VoxelLive && VoxelLive.connected()); },
+    kv() { return window.VoxelLive ? VoxelLive.kv() : null; },
+    nowTs() { return window.VoxelLive ? VoxelLive.nowTs() : Date.now(); }
+  };
+})();
+
+
 // ============================================================
 // 定数・状態
 // ============================================================
@@ -92,13 +111,13 @@ function queueBlob(key, text) {
 }
 function sendBlob(key, text) {
   const n = Math.max(1, Math.ceil(text.length / BLOB_PART));
-  for (let i = 0; i < n; i++) VoxelMulti.send('rbk:' + key + '#' + i, { d: text.slice(i * BLOB_PART, (i + 1) * BLOB_PART) });
-  VoxelMulti.send('rbk:' + key + '#n', { n });
+  for (let i = 0; i < n; i++) LIVE.send('rbk:' + key + '#' + i, { d: text.slice(i * BLOB_PART, (i + 1) * BLOB_PART) });
+  LIVE.send('rbk:' + key + '#n', { n });
   blobN.set(key, n);
 }
 // 部屋につながっているときだけ、まだ送っていないものを送る
 function sendPendingBlobs() {
-  if (!blobPending.size || !window.VoxelMulti || !VoxelMulti.connected()) return;
+  if (!blobPending.size || !LIVE.connected()) return;
   for (const [key, text] of [...blobPending]) { blobPending.delete(key); sendBlob(key, text); }
 }
 setInterval(() => { tryBlobRx(); sendPendingBlobs(); }, 3000);
@@ -377,8 +396,8 @@ function onBlobRec(rec) {
 // 受け取りの窓口は、通信の読み込みが済んでから登録する（読み込み順に左右されないよう、待って登録する）
 let blobRxOn = false;
 function tryBlobRx() {
-  if (blobRxOn || !window.VoxelMulti || typeof VoxelMulti.onOp !== 'function') return;
-  VoxelMulti.onOp('rbk', onBlobRec);
+  if (blobRxOn) return;
+  LIVE.onOp('rbk', onBlobRec);
   blobRxOn = true;
 }
 tryBlobRx();
@@ -1349,8 +1368,8 @@ function deleteVariant(id) {
     if (!key) continue;
     const n = blobN.get(key);
     if (n) {
-      for (let i = 0; i < n; i++) VoxelMulti.send('rbk:' + key + '#' + i, null, true);
-      VoxelMulti.send('rbk:' + key + '#n', null, true);
+      for (let i = 0; i < n; i++) LIVE.send('rbk:' + key + '#' + i, null, true);
+      LIVE.send('rbk:' + key + '#n', null, true);
       blobN.delete(key);
     }
     blobPending.delete(key);
