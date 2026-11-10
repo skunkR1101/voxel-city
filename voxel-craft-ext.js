@@ -1118,6 +1118,62 @@ function buildWaterSettings() {
   });
 }
 // 設定画面に「統一の自動反映」を追加する（部屋で最後に行われた作業を、統一せずに自動で反映する）
+// ============================================================
+// 視野（画角）と、画面のボタンの非表示（設定）
+// ============================================================
+const VIEW_KEY = 'voxelcraft_view_v1';
+function viewPref() {
+  try { return Object.assign({ fov: 75, hideUi: false }, JSON.parse(localStorage.getItem(VIEW_KEY) || '{}')); }
+  catch (e) { return { fov: 75, hideUi: false }; }
+}
+function applyViewPref() {
+  const v = viewPref();
+  try { if (typeof camera !== 'undefined' && camera) { camera.fov = Number(v.fov) || 75; camera.updateProjectionMatrix(); } } catch (e) {}
+  document.body.classList.toggle('vc-hide-ui', !!v.hideUi);
+}
+function setViewPref(patch) {
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify(Object.assign(viewPref(), patch))); } catch (e) {}
+  applyViewPref();
+}
+(function addHideUiCss() {
+  const st = document.createElement('style');
+  // 設定の画面を開いているときは、ボタンを隠さない（設定を操作できるように）
+  st.textContent =
+    'body.vc-hide-ui:not(:has(#settings.show)) #info,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #hotWrap,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #touchUI,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #reticle,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #extQuick,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #rtChat,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #rtLoc,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) #rtTags,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) .tb,' +
+    'body.vc-hide-ui:not(:has(#settings.show)) button:not(#gearBtn):not(#overlay *):not(#settings *):not(.ext-panel *):not(#rtPreview *)' +
+    '{ display: none !important; }';
+  document.head.appendChild(st);
+})();
+function buildViewSettings() {
+  const close = document.getElementById('settingsClose');
+  if (!close || document.getElementById('viewSec')) return;
+  const v = viewPref();
+  const sec = document.createElement('div');
+  sec.id = 'viewSec';
+  sec.style.cssText = 'margin:10px 0;padding:8px;border:1px solid #3a4a60;border-radius:8px';
+  sec.innerHTML = `
+    <div style="font-weight:bold;margin-bottom:6px">視野・画面</div>
+    <label style="display:block;margin:4px 0">視野（画角）：<span id="viewFovVal">${v.fov}</span>°
+      <input type="range" id="viewFov" min="30" max="110" step="1" value="${v.fov}" style="width:100%"></label>
+    <div style="font-size:11px;opacity:.75;margin-bottom:6px">大きいほど広く見えます（標準は75°）。</div>
+    <label style="display:flex;gap:8px;align-items:center;margin:6px 0">
+      <input type="checkbox" id="viewHideUi" ${v.hideUi ? 'checked' : ''}>
+      <span><b>画面上の全てのボタンを非表示</b><br><span style="font-size:11px;opacity:.75">設定ボタン以外を隠します（写真撮影用）。解除は、この設定でオフにしてください。</span></span>
+    </label>`;
+  close.parentNode.insertBefore(sec, close);
+  const fov = document.getElementById('viewFov');
+  fov.addEventListener('input', () => { document.getElementById('viewFovVal').textContent = fov.value; setViewPref({ fov: Number(fov.value) }); });
+  document.getElementById('viewHideUi').addEventListener('change', e => setViewPref({ hideUi: e.target.checked }));
+}
+
 function buildAutoSyncSetting() {
   const close = document.getElementById('settingsClose');
   if (!close || document.getElementById('extAutoSec')) return;
@@ -4401,6 +4457,8 @@ function init() {
   applyWaterLook();
   buildReplaceBar();
   buildAutoSyncSetting();
+  buildViewSettings();
+  applyViewPref();
   hydrateReady = hydrateDefs().then(() => {
     // 中身を戻したあとは、しるしを作り直す（戻す前に作った古いしるしで照合すると、同じブロックを別物と判定して増えるため）
     if (window.VoxelCustom) for (const def of ext.defs) VoxelCustom.invalidate(def);

@@ -24,7 +24,9 @@ const STALE_MS = 40000;         // これより長く便りがない相手は、
 const QUIET_MS = 3000;          // 入った直後は、すでにいる人の「参加しました」を出さない
 const CHAT_MAX = 200;           // チャット1行の長さ（文字）
 const LOG_MAX = 80;
-const MEDIA_LIMIT = 260000;     // 画像・GIFの大きさ上限（文字数。送るときに、この大きさに縮める）
+const MEDIA_LIMIT = 4200000;    // 画像・GIFの大きさ上限（文字数。大きいものは、少しずつ分けて送る）
+const MEDIA_PART = 60000;       // 1通の大きさ（文字数）。通信の1通の上限より小さくしている
+const MEDIA_GIF_BYTES = 3000000; // GIFの元のファイルの大きさ上限（バイト）
 const CHAT_OPT_KEY = 'voxelcraft_chat_opts_v1';
 const CHAT_OPT_DEF = { showImg: true, showGif: true, btnImg: true, btnGif: true };
 const CHAT_OPT_ITEMS = [
@@ -128,6 +130,9 @@ function buildChat() {
     '#rtChat .log .med{display:inline-block;max-width:100%}' +
     '#rtChat .log .med img{display:block;max-width:150px;max-height:110px;border-radius:6px;margin:2px 0;pointer-events:auto}' +
     '#rtChat .log .med .ph{display:none;opacity:.75;font-size:12px}' +
+    '#rtChat .log .med img{cursor:zoom-in}' +
+    '#rtPreview{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;padding:12px;cursor:zoom-out}' +
+    '#rtPreview img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px}' +
     '#rtChat .log.no-img .med[data-g="0"] img,#rtChat .log.no-gif .med[data-g="1"] img{display:none}' +
     '#rtChat .log.no-img .med[data-g="0"] .ph,#rtChat .log.no-gif .med[data-g="1"] .ph{display:block}';
   document.head.appendChild(cs);
@@ -192,7 +197,7 @@ function readDataUrl(f) {
 // 静止画は、大きさと画質を下げて、上限に収まるまで縮める（WebP が使えなければ JPEG）
 async function shrinkImage(f) {
   const bmp = await createImageBitmap(f);
-  for (const [max, q] of [[480, 0.82], [360, 0.72], [240, 0.6]]) {
+  for (const [max, q] of [[960, 0.85], [720, 0.8], [480, 0.75], [360, 0.65]]) {
     const sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
     const c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(bmp.width * sc)); c.height = Math.max(1, Math.round(bmp.height * sc));
@@ -209,16 +214,45 @@ async function sendMediaFile(f) {
   let url = null;
   try {
     if (isGif) {
-      if (f.size > 150000) { sysLine('GIFは150KB以下のものを送れます'); return; }
+      if (f.size > MEDIA_GIF_BYTES) { sysLine('GIFは3MB以下のものを送れます'); return; }
       url = await readDataUrl(f);
     } else {
       url = await shrinkImage(f);
     }
   } catch (e) { sysLine('画像を読み込めませんでした'); return; }
   if (!validMedia(url)) { sysLine('画像が大きすぎて送れませんでした'); return; }
-  room.ephemeral('chat:' + room.peerId, { n: myName, k: isGif ? 'gif' : 'img', u: url });
   addMedia(url, isGif, L.colorOf(myName), myName);
+  sendMediaParts(url, isGif ? 'gif' : 'img');
 }
+// 大きい画像・GIFは、少しずつ分けて送る（受け取った側で、すべて届いてから組み立てる）
+function sendMediaParts(url, kind) {
+  if (!room) return;
+  if (url.length <= MEDIA_PART) { room.ephemeral('chat:' + room.peerId, { n: myName, k: kind, u: url }); return; }
+  const id = Math.random().toString(36).slice(2, 10);
+  const c = Math.ceil(url.length / MEDIA_PART);
+  for (let i = 0; i < c; i++) {
+    room.ephemeral('chat:' + room.peerId, { n: myName, k: 'part', mk: kind, id, i, c, d: url.slice(i * MEDIA_PART, (i + 1) * MEDIA_PART) });
+  }
+}
+const partsIn = new Map();      // 送り手:番号 -> { c, got, kind, name, t }
+function onMediaPart(peer, v, n) {
+  if (typeof v.id !== 'string' || !Number.isInteger(v.i) || !Number.isInteger(v.c) || v.c < 1 || v.c > 100) return;
+  if (v.i < 0 || v.i >= v.c || typeof v.d !== 'string' || v.d.length > MEDIA_PART) return;
+  const key = peer + ':' + v.id;
+  let p = partsIn.get(key);
+  if (!p) { p = { c: v.c, got: new Array(v.c), kind: v.mk === 'gif' ? 'gif' : 'img', name: n, t: Date.now() }; partsIn.set(key, p); }
+  if (p.c !== v.c) return;
+  p.got[v.i] = v.d;
+  if (p.got.filter(x => typeof x === 'string').length === p.c) {
+    partsIn.delete(key);
+    const url = p.got.join('');
+    if (validMedia(url)) addMedia(url, p.kind === 'gif', L.colorOf(p.name), p.name);
+  }
+}
+setInterval(() => {                       // 届かないままの分は、1分で捨てる
+  const now = Date.now();
+  for (const [k, p] of partsIn) if (now - p.t > 60000) partsIn.delete(k);
+}, 15000);
 // 文字の中の http・https のリンクを、押せるリンクにする（ほかの形式のリンクは作らない）
 function appendLinked(parent, t) {
   const re = /https?:\/\/[^\s<>"']+/g;
@@ -258,11 +292,26 @@ function addMedia(url, isGif, color, name) {
   m.dataset.g = isGif ? '1' : '0';
   const img = document.createElement('img');
   img.src = url; img.alt = isGif ? 'GIF' : '画像'; img.loading = 'lazy';
+  img.title = 'タップで大きく見る';
+  img.addEventListener('click', () => openPreview(url, isGif));
   m.appendChild(img);
   m.appendChild(el('span', 'ph', isGif ? '［GIF（表示しない設定）］' : '［画像（表示しない設定）］'));
   d.appendChild(m);
   pushLine(d);
   applyChatView();
+}
+// 画像・GIFを、大きく表示する（タップ・クリックで閉じる）
+function openPreview(url, isGif) {
+  let box = document.getElementById('rtPreview');
+  if (!box) {
+    box = el('div'); box.id = 'rtPreview';
+    box.addEventListener('click', () => { box.style.display = 'none'; box.firstChild.src = ''; });
+    box.appendChild(document.createElement('img'));
+    document.body.appendChild(box);
+  }
+  box.firstChild.src = url;
+  box.firstChild.alt = isGif ? 'GIF' : '画像';
+  box.style.display = 'flex';
 }
 // 設定の「チャット」の欄（ゲームの設定画面の、閉じるボタンの前に入れる）
 function buildChatSettings() {
@@ -507,6 +556,7 @@ function wireRoom(rm) {
   rm.on('chat', (key, v, meta) => {
     if (!v || !meta || meta.peer === rm.peerId) return;
     const n = cleanText(v.n, L.NAME_MAX) || L.DEFAULT_NAME;
+    if (v.k === 'part') { onMediaPart(meta.peer, v, n); return; }
     if (v.k === 'img' || v.k === 'gif') {
       if (validMedia(v.u)) addMedia(v.u, v.k === 'gif', L.colorOf(n), n);
       return;
