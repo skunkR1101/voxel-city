@@ -1,3 +1,11 @@
+/* キーボード操作（voxel-craft-keys.js）を、この場所と同じ場所から読み込む（読み込み忘れを防ぐ） */
+(function () {
+  if (window.__vcKeys || document.querySelector('script[src*="voxel-craft-keys.js"]')) return;
+  const here = document.currentScript && document.currentScript.src ? document.currentScript.src : location.href;
+  const s = document.createElement('script');
+  s.src = new URL('voxel-craft-keys.js', here).href;
+  document.head.appendChild(s);
+})();
 /* voxel-craft-ext.js  (v4)
  * voxel-craft.html の機能追加モジュール（既存HTMLは変更しない）
  *  1. ターボモード
@@ -4058,7 +4066,7 @@ window.addEventListener('keydown', e => {
   if (menuOpen || paused || !started) return;
   if (e.code === 'KeyC') recolorTarget();
   if (e.code === 'KeyR') resetTarget();
-  if (e.code === 'KeyT') rotateTarget();
+  if (e.code === 'KeyV') rotateTarget();                  // 回転は V へ（T はチャット）
   if (e.code === 'KeyZ') undoLast();
   if (e.code === 'KeyY') { ext.pasteOpt.rot = (ext.pasteOpt.rot + 1) % 4; pasteDirty = true; toast(`ペースト：回転 ${ext.pasteOpt.rot * 90}°`); }
   if (e.code === 'KeyU') { ext.pasteOpt.mx = !ext.pasteOpt.mx; pasteDirty = true; toast(`ペースト：X反転 ${ext.pasteOpt.mx ? 'ON' : 'OFF'}`); }
@@ -4277,13 +4285,21 @@ function renderBag() {
   setupSkinPreview();
 }
 
+let bagFrom = null;     // バックパックから持ち出したもの（移動元）{ key, h, i }
 function onBagCell(cell) {
   const isHot = cell.dataset.h !== undefined;
   const i = Number(isHot ? cell.dataset.h : cell.dataset.b);
   const key = (isHot ? 'h' : 'b') + i;
   if (bagPick !== null) {
+    const from = bagFrom;
+    bagFrom = null;
+    if (from && from.key === key) {                           // 同じ場所をもう一度タップ → 取り消し
+      bagPick = null; bagLastKey = ''; renderBag(); return;
+    }
+    if (from) { if (from.h) HOTBAR[from.i] = 0; else bag[from.i] = 0; }   // 移動元を空ける
     if (isHot) { HOTBAR[i] = bagPick; selectSlot(i); refreshHotbarVisuals(); }
-    else { bag[i] = bagPick; saveBag(); }
+    else bag[i] = bagPick;
+    saveBag();
     toast(`「${bagNameOf(bagPick)}」を入れました`);
     bagPick = null;
     bagLastKey = '';
@@ -4299,6 +4315,12 @@ function onBagCell(cell) {
     return;
   }
   bagLastKey = key; bagLastT = now;
+  if (!isHot && bag[i]) {                                    // バックパックのアイテムをタップ → 持つ（次にスロットかバックパックをタップで入る）
+    bagPick = bag[i];
+    bagFrom = { key, h: false, i };
+    renderBag();
+    return;
+  }
   if (isHot) { selectSlot(i); renderBag(); }
 }
 
