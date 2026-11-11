@@ -179,14 +179,24 @@ function render() {
   let inner;
   if (view === 'home') inner = homeHtml();
   else if (view === 'settings') inner = settingsHtml();
-  else { const a = APPS.find(x => x.id === view); inner = a ? pendingHtml(a) : homeHtml(); }
+  else {
+    const a = APPS.find(x => x.id === view);
+    if (a && a.mount) inner = appChrome(a.name, '<div id="phoneAppBody"></div>');
+    else inner = a ? pendingHtml(a) : homeHtml();
+  }
   frame.setAttribute('style', frame.getAttribute('style').replace(/background:[^;]*;?/, '') + ';' + bg);
   frame.innerHTML = `<div style="height:100%;display:flex;flex-direction:column;position:relative">
     <div style="flex:1;overflow:hidden">${inner}</div>
     <div style="height:34px;display:flex;align-items:center;justify-content:center">
       <button data-act="${view === 'home' ? 'close' : 'home'}" style="${btnCss()};border-radius:12px">${view === 'home' ? '閉じる' : 'ホームへ'}</button>
     </div></div>`;
+  const a = APPS.find(x => x.id === view);
+  if (view !== 'home' && view !== 'settings' && a && a.mount) {
+    const body = document.getElementById('phoneAppBody');
+    if (body) { try { a.mount(body); } catch (e) { body.textContent = 'エラー：' + (e && e.message); } }
+  }
 }
+function typingNow() { const x = document.activeElement; return !!(frame && frame.contains(x) && /INPUT|TEXTAREA|SELECT/.test(x.tagName)); }
 
 // ---------- 開く・閉じる ----------
 async function openPhone() {
@@ -198,7 +208,7 @@ async function openPhone() {
   await load(WALL_KEY);
   render();
   clearInterval(clockT);
-  clockT = setInterval(() => { if (isOpenFlag) render(); }, 30000);
+  clockT = setInterval(() => { if (isOpenFlag && !typingNow()) render(); }, 30000);
   refreshButton();
 }
 function closePhone() {
@@ -235,7 +245,15 @@ window.addEventListener('keydown', e => {
   if (e.code === 'Escape' && isOpenFlag) { e.preventDefault(); closePhone(); }
 });
 
+// 他のファイルが、端末にアプリを追加する（mount(要素) で、その中の画面を作る）
+function registerApp(app) {
+  const a = APPS.find(x => x.id === app.id);
+  if (a) { a.name = app.name; a.emoji = app.emoji; a.mount = app.mount; a.ready = true; }
+  else APPS.push({ id: app.id, name: app.name, emoji: app.emoji, mount: app.mount, ready: true });
+  if (isOpenFlag) render();
+}
 window.VoxelPhone = {
+  registerApp,
   isOpen: () => isOpenFlag,
   open: () => openPhone(),
   close: () => closePhone()
