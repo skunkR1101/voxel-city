@@ -1000,7 +1000,12 @@ window.VoxelStation = {
   },
   trains: () => trains.map(t => ({ id: t.id, s: t.s, speed: t.speed, state: t.state, si: t.si, dead: t.dead, len: t.len })),
   clock: () => gclock,
-  stations: () => sdb.stations
+  stations: () => sdb.stations,
+  // 利益地点の判定用：列車（編成）の先頭の位置（owner＝この端末が計算している側だけ判定する）
+  trainPoints: () => ({
+    owner: !(window.VoxelFrame && VoxelFrame.mode('train') === 'remote'),
+    list: trains.filter(t => !t.dead && t.head).map(t => ({ id: t.id, x: t.head.x, y: t.head.y, z: t.head.z }))
+  })
 };
 init();
 

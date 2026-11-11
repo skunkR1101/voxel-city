@@ -147,7 +147,7 @@ function appChrome(title, body) {
       <button data-act="home" style="background:none;border:0;color:#fff;font-size:15px;cursor:pointer">‹ ホーム</button>
       <b style="margin-left:auto;margin-right:auto;padding-right:50px">${esc(title)}</b>
     </div>
-    <div style="padding:12px;overflow:auto;height:calc(100% - 110px);background:rgba(20,24,34,.82)">${body}</div>`;
+    <div style="padding:12px;background:rgba(20,24,34,.82)">${body}</div>`;
 }
 function settingsHtml() {
   const row = (app) => `
@@ -186,7 +186,7 @@ function render() {
   }
   frame.setAttribute('style', frame.getAttribute('style').replace(/background:[^;]*;?/, '') + ';' + bg);
   frame.innerHTML = `<div style="height:100%;display:flex;flex-direction:column;position:relative">
-    <div style="flex:1;overflow:hidden">${inner}</div>
+    <div id="phoneScroll" style="flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y">${inner}</div>
     <div style="height:34px;display:flex;align-items:center;justify-content:center">
       <button data-act="${view === 'home' ? 'close' : 'home'}" style="${btnCss()};border-radius:12px">${view === 'home' ? '閉じる' : 'ホームへ'}</button>
     </div></div>`;
@@ -252,6 +252,14 @@ function registerApp(app) {
   else APPS.push({ id: app.id, name: app.name, emoji: app.emoji, mount: app.mount, ready: true });
   if (isOpenFlag) render();
 }
+// 端末の中で縦にスクロールしたとき、ゲームの「画面を動かす」操作に邪魔されないようにする
+window.addEventListener('touchmove', e => {
+  if (root && root.style.display !== 'none' && root.contains(e.target)) e.stopImmediatePropagation();
+}, { capture: true, passive: true });
+window.addEventListener('touchstart', e => {
+  if (root && root.style.display !== 'none' && root.contains(e.target)) e.stopImmediatePropagation();
+}, { capture: true, passive: true });
+
 window.VoxelPhone = {
   registerApp,
   isOpen: () => isOpenFlag,

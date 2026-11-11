@@ -182,8 +182,58 @@ function addIncome(cid, amount, note) {
   return true;
 }
 
+// ---------- 利益地点（範囲に入った人・車・電車の数だけ、会社に収益が入る） ----------
+// 判定そのものは voxel-craft-profit.js が行う。ここは保存と、設定の画面だけ
+const PP_CONDS = { crowd: '人混み', car: '自動車', train: '電車' };
+function remove(k) {
+  const r = room();
+  if (r) r.del(k);
+  else { local.delete(k); localSave(); }
+  notify();
+}
+function pointsOf(cid) { return entries('eco:pp:' + cid + ':').filter(p => p && p.id && p.cid === cid); }
+function allPoints() { return entries('eco:pp:').filter(p => p && p.id && company(p.cid)); }
+function addPoint(cid, d) {
+  if (!company(cid)) return 'その会社がありません';
+  if (roleOf(cid) !== 'admin') return '利益地点は、社長・管理の人だけが設定できます';
+  if (!d.range) return 'ステッキで範囲の始点と終点をタップして選んでください';
+  if (!PP_CONDS[d.cond]) return '条件を選んでください';
+  const amount = Number(d.amount);
+  if (!Number.isInteger(amount) || amount < 1 || amount > 1e9) return '金額は1以上の整数で入力してください';
+  const id = newId('p');
+  put('eco:pp:' + cid + ':' + id, { id, cid, name: clean(d.name || '', 20), cond: d.cond, amount,
+    min: d.range.min.map(Number), max: d.range.max.map(Number), by: ME, ts: Date.now() });
+  return '';
+}
+function removePoint(cid, id) {
+  if (roleOf(cid) !== 'admin') return '削除は、社長・管理の人だけができます';
+  remove('eco:pp:' + cid + ':' + id);
+  return '';
+}
+function ppHtml(c) {
+  const r = (window.VoxelExt && VoxelExt.wandRange) ? VoxelExt.wandRange() : null;
+  const rangeTxt = r
+    ? `選んでいる範囲：(${r.min.join(', ')}) 〜 (${r.max.join(', ')})`
+    : 'ステッキで、範囲の始点と終点をタップして選んでください（選んだら、この画面を開き直すと表示が変わります）';
+  const list = pointsOf(c.id).sort((a, b) => (a.ts || 0) - (b.ts || 0)).map(p =>
+    `<div style="display:flex;gap:6px;align-items:center;margin:4px 0;background:rgba(255,255,255,.08);border-radius:8px;padding:6px">
+      <span style="flex:1;min-width:0"><b>${esc(p.name || '（名前なし）')}</b>　${PP_CONDS[p.cond] || ''}／1回 ${yen(p.amount)}<br>
+      <small style="opacity:.75">(${p.min.join(', ')}) 〜 (${p.max.join(', ')})</small></span>
+      <button data-eco="ppdel" data-v="${esc(p.id)}" data-c="${esc(c.id)}" style="${btn(false)}">削除</button></div>`).join('')
+    || '<div style="opacity:.75">まだ、利益地点はありません</div>';
+  const opts = Object.entries(PP_CONDS).map(([k, l]) => `<option value="${k}" ${st.pp.cond === k ? 'selected' : ''}>${l}</option>`).join('');
+  return `<div style="font-weight:bold;margin-top:8px">利益地点</div>
+    <div style="font-size:12px;opacity:.85;margin:4px 0">${esc(rangeTxt)}</div>
+    <input data-eco-field="ppName" value="${esc(st.pp.name)}" placeholder="地点の名前（任意）" maxlength="20" style="${field};margin:4px 0">
+    <select data-eco-field="ppCond" style="${field};margin:4px 0">${opts}</select>
+    <input data-eco-field="ppAmount" value="${esc(st.pp.amount)}" inputmode="numeric" placeholder="1回の金額（円）" style="${field};margin:4px 0">
+    <button data-eco="ppadd" data-c="${esc(c.id)}" style="${btn(true)};margin:4px 0">この範囲を利益地点に登録</button>
+    <div style="font-size:11px;opacity:.75;margin-bottom:4px">範囲に人・車・電車が入るたびに、1人・1台・1編成ごとに金額が会社に入ります（出ていって、また入ると、もう一度入ります）。</div>
+    ${list}`;
+}
+
 // ---------- 画面 ----------
-let st = { tab: 'co', filter: 'all', sel: null, msg: '', msgOk: true, icon: null, fromCid: '', toCid: '',
+let st = { tab: 'co', filter: 'all', sel: null, msg: '', msgOk: true, icon: null, fromCid: '', toCid: '', pp: { name: '', cond: 'crowd', amount: '1000' },
   draft: { name: '', concept: '', pres: [''], amount: '' } };   // 入力中の内容（画面を作り直しても消えない）
 let mountEl = null;
 
@@ -253,6 +303,7 @@ function detailHtml(c) {
       <div style="flex:1;background:rgba(255,255,255,.1);border-radius:10px;padding:8px"><small>収益（累計）</small><br><b>${yen(t.inc)}</b></div>
     </div>
     ${canOpen ? `<button data-eco="sendfrom" data-v="${esc(c.id)}" style="${btn(false)};margin-bottom:8px">この会社から送金する</button>` : ''}
+    ${r === 'admin' ? ppHtml(c) : ''}
     <div style="font-weight:bold;margin-top:8px">メンバー</div><ul style="margin:4px 0 8px;padding-left:18px">${mem || '<li>（まだいません）</li>'}</ul>
     ${canOpen ? `<div style="font-weight:bold;margin-top:8px">スカウト</div>${candHtml}
       <div style="font-weight:bold;margin-top:8px">スカウトの状況</div><ul style="margin:4px 0;padding-left:18px">${scoutLines}</ul>` : ''}`;
@@ -356,6 +407,17 @@ function handleClick(e) {
     render(); return;
   }
   if (act === 'addpres') { if (st.draft.pres.length < LIM.pres) st.draft.pres.push(''); render(); return; }
+  if (act === 'ppadd') {
+    const err = addPoint(b.dataset.c, { name: st.pp.name, cond: st.pp.cond, amount: st.pp.amount, range: (window.VoxelExt && VoxelExt.wandRange) ? VoxelExt.wandRange() : null });
+    say(!err, err || '利益地点を登録しました');
+    if (!err) st.pp.name = '';
+    render(); return;
+  }
+  if (act === 'ppdel') {
+    const err = removePoint(b.dataset.c, v);
+    say(!err, err || '利益地点を削除しました');
+    render(); return;
+  }
   if (act === 'pickicon') { pickIcon(); return; }
   if (act === 'clearicon') { st.icon = null; render(); return; }
   if (act === 'create') {
@@ -400,12 +462,15 @@ function mount(el) {
       const t = e.target;
       const f = t.dataset && t.dataset.ecoField;
       if (f === 'name' || f === 'concept' || f === 'amount') st.draft[f] = t.value;
+      if (f === 'ppName') st.pp.name = t.value;
+      if (f === 'ppAmount') st.pp.amount = t.value;
       if (t.dataset && t.dataset.pres !== undefined) st.draft.pres[Number(t.dataset.pres)] = t.value;
     });
     el.addEventListener('change', e => {
       const f = e.target.dataset && e.target.dataset.ecoField;
       if (f === 'fromCid') st.fromCid = e.target.value;
       if (f === 'toCid') st.toCid = e.target.value;
+      if (f === 'ppCond') st.pp.cond = e.target.value;
     });
     el.addEventListener('keydown', e => e.stopPropagation());
     el.addEventListener('keyup', e => e.stopPropagation());
@@ -422,6 +487,7 @@ subs.add(() => {
 
 window.VoxelEconomy = {
   companies, company, totals, addIncome, members, roleOf,
+  pointsOf, allPoints, addPoint, removePoint, PP_CONDS,
   yen
 };
 

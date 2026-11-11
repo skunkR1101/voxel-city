@@ -993,7 +993,21 @@ function saveSoonIfDirty() {
   const k = S.seq + ':' + S.nodes.size + ':' + S.edges.size;
   if (k !== lastSaveCount) { lastSaveCount = k; saveNow(); }
 }
-window.VoxelTraffic = { save: saveNow, stats: () => ({ nodes: S.nodes.size, edges: S.edges.size, cars: S.cars.length }) };
+window.VoxelTraffic = {
+  save: saveNow,
+  stats: () => ({ nodes: S.nodes.size, edges: S.edges.size, cars: S.cars.length }),
+  // 利益地点の判定用：自動車の現在位置（owner＝この端末が計算している側だけ判定する）
+  carPoints: () => ({
+    owner: !(window.VoxelFrame && VoxelFrame.mode('traffic') === 'remote'),
+    list: S.cars.filter(c => !c.dead).map(c => {
+      const e = S.edges.get(c.e);
+      if (!e) return null;
+      if (!c.fid) c.fid = Math.random().toString(36).slice(2, 10);
+      const q = pointAt(e, c.s);
+      return { id: c.fid, x: q.x, y: q.y, z: q.z };
+    }).filter(Boolean)
+  })
+};
 init();
 
 })();

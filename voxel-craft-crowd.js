@@ -847,7 +847,14 @@ function init() {
   }
   requestAnimationFrame(frame);
 }
-window.VoxelCrowd = { stats: () => ({ groups: C.groups.length, humans: C.humans.length, max: MAX_H }) };
+window.VoxelCrowd = {
+  stats: () => ({ groups: C.groups.length, humans: C.humans.length, max: MAX_H }),
+  // 利益地点の判定用：人の現在位置（owner＝この端末が計算している側だけ判定する）
+  humanPoints: () => ({
+    owner: !(window.VoxelFrame && VoxelFrame.mode('crowd') === 'remote'),
+    list: C.humans.filter(h => !h.dead).map(h => ({ id: h.id, x: h.x, y: h.y, z: h.z }))
+  })
+};
 init();
 
 })();
