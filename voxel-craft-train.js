@@ -50,7 +50,7 @@ function newCar(name) {
     parts: {},
     hitboxes: [],
     anims: {},
-    vvvf: { enabled: false, accel: null, decel: null, divisions: 120 }
+    vvvf: { enabled: false, accel: null, decel: null, accelSplit: null, decelSplit: null, divisions: 120 }
   };
 }
 function carById(id) { return lib.cars.find(c => c.id === id); }
@@ -332,16 +332,38 @@ async function decodeCached(url) {
   audioCache.set(key, dec);
   return dec;
 }
+// 分割音（120個など）を、名前の数字順（録音した時間順）につないで、一つの音にする（VVVF用）
+const splitCache = new Map();
+async function loadVvvfSide(v, side) {
+  const list = v[side + 'Split'];
+  if (!list || !list.length) return decodeCached(v[side].data);
+  const key = list.map(x => x.name + ':' + x.data.length).join('|');
+  if (splitCache.has(key)) return splitCache.get(key);
+  const bufs = [];
+  for (const x of list) bufs.push(await decodeCached(x.data));
+  const d0 = bufs[0].duration;
+  if (bufs.some(b => Math.abs(b.duration - d0) > d0 * 0.05)) tmsg('分割音の長さがそろっていません（同じ長さにすると、速度とずれません）');
+  const sr = actx.sampleRate;
+  const total = bufs.reduce((n, b) => n + b.duration, 0);
+  const off = new OfflineAudioContext(2, Math.max(1, Math.ceil(total * sr)), sr);
+  let t = 0;
+  for (const b of bufs) { const src = off.createBufferSource(); src.buffer = b; src.connect(off.destination); src.start(t); t += b.duration; }
+  const out = await off.startRendering();
+  splitCache.set(key, out);
+  return out;
+}
+function splitNote(list) { return list && list.length ? `✓ ${list.length}個（${list[0].name} など）` : '未設定'; }
 function makeVvvfChannel(car) {
   const v = car.vvvf;
-  if (!v || !v.enabled || !v.accel || !v.decel) return null;
+  if (!v || !v.enabled || !(v.accel || v.accelSplit) || !(v.decel || v.decelSplit)) return null;
   const out = actx.createGain();
   out.connect(masterGain);
   const aGain = actx.createGain(), dGain = actx.createGain();
   aGain.connect(out); dGain.connect(out);
   aGain.gain.value = 0; dGain.gain.value = 0;
   // 減速音は「高速→低速」の録音として扱う（時間の向きが加速音と逆）
-  return { N: Math.max(1, Math.round(v.divisions || 120)), out, aGain, dGain, aBuf: null, dBuf: null, aSrc: null, dSrc: null, idx: -1 };
+  const n = (v.accelSplit && v.accelSplit.length) || (v.decelSplit && v.decelSplit.length) || v.divisions || 120;
+  return { N: Math.max(1, Math.round(n)), out, aGain, dGain, aBuf: null, dBuf: null, aSrc: null, dSrc: null, idx: -1 };
 }
 function startChannel(ch, aBuf, dBuf) {
   ch.aBuf = aBuf; ch.dBuf = dBuf;
@@ -482,7 +504,7 @@ async function startRun() {
       const chn = makeVvvfChannel(car);
       if (chn) {
         try {
-          startChannel(chn, await decodeCached(car.vvvf.accel.data), await decodeCached(car.vvvf.decel.data));
+          startChannel(chn, await loadVvvfSide(car.vvvf, 'accel'), await loadVvvfSide(car.vvvf, 'decel'));
           ch = chn;
         } catch (e) { console.error(e); tmsg(`「${car.name}」の走行音を読み込めませんでした`); }
       }
@@ -916,6 +938,8 @@ function renderEditor() {
     ${car.vvvf.enabled ? `
     <div class="trn-row">加速音 <input type="file" accept="audio/*" data-f="vAccel"> <span class="trn-note">${car.vvvf.accel ? '✓ 設定済み' : '未設定'}</span></div>
     <div class="trn-row">減速音 <input type="file" accept="audio/*" data-f="vDecel"> <span class="trn-note">${car.vvvf.decel ? '✓ 設定済み' : '未設定'}</span></div>
+    <div class="trn-row">加速音・分割（120個など。録音した順＝名前の数字順に並べて、まとめて選んでください） <input type="file" accept="audio/*" multiple data-f="vAccelSplit"> <span class="trn-note">${splitNote(car.vvvf.accelSplit)}</span>${car.vvvf.accelSplit ? ' <button class="trn-btn small danger" data-act="vsplitclr" data-side="accel">分割音を消す</button>' : ''}</div>
+    <div class="trn-row">減速音・分割（同じく録音した順。高速から低速へ録ったものを、順番どおりに） <input type="file" accept="audio/*" multiple data-f="vDecelSplit"> <span class="trn-note">${splitNote(car.vvvf.decelSplit)}</span>${car.vvvf.decelSplit ? ' <button class="trn-btn small danger" data-act="vsplitclr" data-side="decel">分割音を消す</button>' : ''}</div>
     <div class="trn-row">時速による分割数 <input type="number" min="2" max="1000" step="1" class="trn-in w" data-f="vDiv" value="${car.vvvf.divisions}"> <span class="trn-note">既定120分割</span></div>` : '<p class="trn-note">オフ：この車両は走行音を鳴らしません。</p>'}
   </div>
   <div class="trn-row"><button class="trn-btn" data-act="savecar">この車両を保存して反映</button></div>`;
@@ -959,6 +983,7 @@ function bindEditor() {
     const act = b.dataset.act;
     if (act === 'savecar') { touchAndRefresh(selId); tmsg('保存しました'); return; }
     if (!car) return;
+    if (act === 'vsplitclr') { car.vvvf[b.dataset.side + 'Split'] = null; touchAndRefresh(car.id); renderEditor(); }
     if (act === 'exdel') { car.extras.splice(Number(b.dataset.i), 1); touchAndRefresh(car.id); renderEditor(); }
     if (act === 'exadd') {
       const f = root.querySelector('[data-f="exNew"]').files[0];
@@ -1069,14 +1094,22 @@ function bindEditor() {
     else if (f === 'vEnable') { car.vvvf.enabled = el.checked; renderEditor(); }
     else if (f === 'vAccel') { const file = el.files[0]; if (file) car.vvvf.accel = { name: file.name, data: await fileAsUrl(file) }; }
     else if (f === 'vDecel') { const file = el.files[0]; if (file) car.vvvf.decel = { name: file.name, data: await fileAsUrl(file) }; }
+    else if (f === 'vAccelSplit' || f === 'vDecelSplit') {
+      const files = [...el.files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+      if (!files.length) return;
+      if (files.length === 1) { tmsg('分割音は、2個以上まとめて選んでください（1個だけなら、通常の加速音・減速音を使ってください）'); return; }
+      const side = f === 'vAccelSplit' ? 'accelSplit' : 'decelSplit';
+      car.vvvf[side] = await Promise.all(files.map(async x => ({ name: x.name, data: await fileAsUrl(x) })));
+      car.vvvf.divisions = car.vvvf[side].length;
+    }
     else if (f === 'vDiv') car.vvvf.divisions = clamp(Math.round(num()), 2, 1000);
     else return;
     touchCar(car.id);
     saveLib();
-    if (['mainFile', 'mainTex', 'mainMode', 'length', 'exMode', 'pivot', 'exadd', 'animFile', 'vAccel', 'vDecel', 'vEnable'].includes(f)) {
+    if (['mainFile', 'mainTex', 'mainMode', 'length', 'exMode', 'pivot', 'exadd', 'animFile', 'vAccel', 'vDecel', 'vAccelSplit', 'vDecelSplit', 'vEnable'].includes(f)) {
       if (car.id === selId) setPreviewCar(car.id);
     }
-    if (['vEnable', 'vAccel', 'vDecel', 'animFile', 'hbType'].includes(f)) renderEditor();
+    if (['vEnable', 'vAccel', 'vDecel', 'vAccelSplit', 'vDecelSplit', 'animFile', 'hbType'].includes(f)) renderEditor();
     if (f === 'hb' || f === 'hbType') { if (prev) prev.hbDirty = true; }
     renderLibrary();
   });
