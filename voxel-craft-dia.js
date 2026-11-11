@@ -130,29 +130,57 @@ function soundsLoadAll() {
     tx.onerror = () => rej(tx.error);
   }));
 }
+// 保存：音声の中身は「素材」（IndexedDB の参照）に置き、保存領域には参照だけ残す。
+// 部屋の相手にも、参照をたどって音声が届く
+const dsndSaved = new Set();
+function dsndKey(s) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619) >>> 0; h2 = Math.imul(h2 + c, 2246822519) >>> 0; }
+  return 'dsnd' + s.length.toString(36) + '-' + h1.toString(36) + '-' + h2.toString(36);
+}
+let saveSeqD = 0;
 function save() {
-  try {
-    const light = { lines: dia.lines, sounds: dia.sounds.map(x => ({ id: x.id, name: x.name })) };
-    localStorage.setItem(KEY, JSON.stringify(light));
-    return true;
-  } catch (e) {
-    msg('保存できませんでした（容量超過）');
-    return false;
-  }
+  const seq = ++saveSeqD;
+  return (async () => {
+    try {
+      const sounds = [];
+      for (const x of dia.sounds) {
+        if (typeof x.data === 'string' && window.VoxelExt && VoxelExt.blobPut) {
+          const key = dsndKey(x.data);
+          if (!dsndSaved.has(key)) { await VoxelExt.blobPut(key, x.data); dsndSaved.add(key); }
+          x.ref = key;
+        }
+        sounds.push({ id: x.id, name: x.name, data: x.ref ? { __blob: x.ref } : (typeof x.data === 'string' ? x.data : null) });
+      }
+      if (seq !== saveSeqD) return true;
+      localStorage.setItem(KEY, JSON.stringify({ lines: dia.lines, sounds }));
+      return true;
+    } catch (e) {
+      msg('保存できませんでした（容量超過または保存領域の不具合）');
+      return false;
+    }
+  })();
 }
 function load() {
-  try {
-    const s = JSON.parse(localStorage.getItem(KEY) || '{}');
-    if (Array.isArray(s.lines)) dia.lines = s.lines;
-    if (Array.isArray(s.sounds)) {
-      // 以前の版では音声の中身を localStorage に入れていたので、IndexedDB へ移す
-      for (const x of s.sounds) if (x && x.id && x.data) soundPut(x.id, x.data).catch(() => {});
-      dia.sounds = s.sounds.map(x => ({ id: x.id, name: x.name, data: x.data || null }));
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { s = {}; }
+  if (Array.isArray(s.lines)) dia.lines = s.lines;
+  if (Array.isArray(s.sounds)) {
+    dia.sounds = s.sounds.filter(x => x && x.id).map(x => ({
+      id: x.id, name: x.name,
+      data: typeof x.data === 'string' ? x.data : null,
+      ref: x.data && typeof x.data === 'object' && typeof x.data.__blob === 'string' ? x.data.__blob : null
+    }));
+  }
+  // 中身：参照（部屋の素材）→ 以前の保存（IndexedDB の音声）の順に読む
+  soundsLoadAll().then(async map => {
+    for (const x of dia.sounds) {
+      if (x.ref && window.VoxelExt && VoxelExt.blobGet) {
+        const t = await Promise.resolve(VoxelExt.blobGet(x.ref)).catch(() => null);
+        if (typeof t === 'string') { x.data = t; continue; }
+      }
+      if (!x.data && map.has(x.id)) x.data = map.get(x.id);
     }
-  } catch (e) {}
-  // 音声の中身を IndexedDB から読み込む（読み終わるまで、その音は鳴りません）
-  soundsLoadAll().then(map => {
-    for (const x of dia.sounds) { if (map.has(x.id)) x.data = map.get(x.id); }
     renderPanel();
   }).catch(() => msg('音声の保存領域を開けませんでした'));
   if (dia.lines.length) ui.lineId = dia.lines[0].id;
@@ -1131,128 +1159,6 @@ function makeMarker(color) {
   scene.add(m);
   return m;
 }
-// ============================================================
-// 部屋での共有（路線・音声ブロック）
-//  ・路線は「dia:路線id」に中身を入れる。消したものは削除の印
-//  ・音声は「dsn:音声id」に名前と分割数、中身は「dsc:音声id:番号」に小分けして入れる（全部そろったら使える）
-//  ・部屋の記録（kv）と、この端末の内容を1秒ごとに照らし合わせる。通信が切れていた間の変更も、つながった時に届く
-//  ・部屋に入ると、部屋の内容とこの端末の内容が一つになる（同じ名前の路線は新しい方が残る）
-// ============================================================
-const lineSent = new Map();   // 路線id -> 部屋と最後に揃えた中身（JSON）
-const lineTs = new Map();     // 路線id -> 部屋から受けた時刻
-const sndSent = new Set();    // 部屋と揃った音声id
-const sndParts = new Map();   // 音声id -> 分割数
-const SND_PART = 48000;       // 1つの記録の大きさ（文字数）
-let diaRoom = null;
-function diaPullLines(kv) {
-  let changed = false;
-  for (const [k, e] of kv) {
-    if (!k.startsWith('dia:')) continue;
-    const id = k.slice(4);
-    const i = dia.lines.findIndex(l => l.id === id);
-    const local = i >= 0 ? JSON.stringify(dia.lines[i]) : null;
-    if (local !== null && lineSent.has(id) && lineSent.get(id) !== local) continue;   // この端末で変えた分は、あとで送る
-    if (local === null && lineSent.has(id)) continue;                                  // この端末で消した分は、あとで削除の印を送る
-    if (e.del) {
-      if (i >= 0 && (e.ts || 0) > (lineTs.get(id) || 0)) { dia.lines.splice(i, 1); lineSent.delete(id); changed = true; }
-      continue;
-    }
-    if (e.v === undefined) continue;
-    const json = JSON.stringify(e.v);
-    if (local === json) { lineSent.set(id, json); lineTs.set(id, Math.max(lineTs.get(id) || 0, e.ts || 0)); continue; }
-    if (local !== null && (e.ts || 0) <= (lineTs.get(id) || 0)) continue;
-    if (i >= 0) dia.lines[i] = JSON.parse(json); else dia.lines.push(JSON.parse(json));
-    lineSent.set(id, json); lineTs.set(id, e.ts || 0); changed = true;
-  }
-  return changed;
-}
-function diaPushLines() {
-  for (const l of dia.lines) {
-    const json = JSON.stringify(l);
-    if (lineSent.get(l.id) === json) continue;
-    VoxelMulti.send('dia:' + l.id, JSON.parse(json));
-    lineSent.set(l.id, json);
-  }
-  const have = new Set(dia.lines.map(l => l.id));
-  for (const id of [...lineSent.keys()]) {
-    if (have.has(id)) continue;
-    VoxelMulti.send('dia:' + id, undefined, true);
-    lineSent.delete(id);
-  }
-}
-function diaPullSounds(kv) {
-  let changed = false;
-  for (const [k, e] of kv) {
-    if (!k.startsWith('dsn:')) continue;
-    const id = k.slice(4);
-    const i = dia.sounds.findIndex(x => x.id === id);
-    if (e.del) {
-      if (i >= 0 && sndSent.has(id)) {          // 部屋で消された音声
-        dia.sounds.splice(i, 1);
-        soundDel(id).catch(() => {});
-        sndSent.delete(id); sndParts.delete(id);
-        for (const l of dia.lines) {
-          for (const ev of l.events) if (ev.soundId === id) ev.soundId = null;
-          for (const j of l.joints) if (j.soundId === id) j.soundId = null;
-        }
-        if (ui.soundId === id) ui.soundId = null;
-        changed = true;
-      }
-      continue;
-    }
-    if (i >= 0 || sndSent.has(id)) continue;     // もう持っている（この端末で消した分は、あとで削除の印を送る）
-    const meta = e.v || {};
-    const n = Math.max(0, Number(meta.n) || 0);
-    if (!n) continue;
-    const parts = [];
-    for (let j = 0; j < n; j++) {
-      const c = kv.get('dsc:' + id + ':' + j);
-      if (!c || typeof c.v !== 'string') break;
-      parts.push(c.v);
-    }
-    if (parts.length < n) continue;              // まだ全部は届いていない
-    const data = parts.join('');
-    dia.sounds.push({ id, name: String(meta.name || '音声'), data });
-    soundPut(id, data).catch(() => {});
-    sndSent.add(id); sndParts.set(id, n);
-    changed = true;
-  }
-  return changed;
-}
-function diaPushSounds() {
-  for (const x of dia.sounds) {
-    if (sndSent.has(x.id) || !x.data) continue;
-    const n = Math.max(1, Math.ceil(x.data.length / SND_PART));
-    VoxelMulti.send('dsn:' + x.id, { name: x.name, n });
-    for (let j = 0; j < n; j++) VoxelMulti.send('dsc:' + x.id + ':' + j, x.data.slice(j * SND_PART, (j + 1) * SND_PART));
-    sndSent.add(x.id); sndParts.set(x.id, n);
-  }
-  for (const id of [...sndSent]) {
-    if (dia.sounds.some(x => x.id === id)) continue;
-    const n = sndParts.get(id) || 0;
-    VoxelMulti.send('dsn:' + id, undefined, true);
-    for (let j = 0; j < n; j++) VoxelMulti.send('dsc:' + id + ':' + j, undefined, true);
-    sndSent.delete(id); sndParts.delete(id);
-  }
-}
-function diaSync() {
-  if (!window.VoxelMulti || !VoxelMulti.connected() || !window.VoxelNet) return;
-  const rid = VoxelMulti.roomId();
-  if (rid && rid !== diaRoom) {                  // 別の部屋に入ったときは、その部屋との揃え方をやり直す
-    if (diaRoom) { lineSent.clear(); lineTs.clear(); sndSent.clear(); sndParts.clear(); }
-    diaRoom = rid;
-  }
-  const kv = VoxelNet.kv();
-  if (!kv) return;
-  // 先に部屋からの変更を受け取り、そのあとでこの端末の変更を送る（消したものが戻らないように）
-  const a = diaPullLines(kv);
-  const b = diaPullSounds(kv);
-  diaPushLines();
-  diaPushSounds();
-  if (a || b) { save(); rebuildViz(); renderPanel(); }
-}
-setInterval(diaSync, 1000);
-
 function init() {
   if (!VT) { console.error('voxel-craft-train.js が先に読み込まれていません'); return; }
   VT.customUpdate = (r, dt) => diaUpdate(r, dt);
@@ -1263,6 +1169,8 @@ function init() {
   renderPanel();
   requestAnimationFrame(diaFrame);
 }
+window.VoxelSync = window.VoxelSync || {};
+VoxelSync.dia = { reload: () => { load(); } };
 init();
 
 })();

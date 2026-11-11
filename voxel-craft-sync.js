@@ -31,10 +31,8 @@ const LIVE = (() => {
 
 const MIRROR = {                      // 保存キー -> 通信での名前（短い英字）
   'voxelcraft_road_v1': 'road',
-  'voxelcraft_dia_v1': 'dia',
-  'voxelcraft_station_v1': 'station',
-  'voxelcraft_train_v1': 'train'
-};
+  'voxelcraft_station_v1': 'station'
+};   // 車両（train）とダイヤ（dia）は、素材を送れる部屋の仕組み（rt/voxel-rt-state.js）で同期する
 const KEY_OF = {};
 for (const k of Object.keys(MIRROR)) KEY_OF[MIRROR[k]] = k;
 // 部屋に入るとき、この端末の状態をいったん空にする（変えたくない項目は残す）

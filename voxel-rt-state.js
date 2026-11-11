@@ -185,11 +185,25 @@ function joinCheck(room) {
 }
 
 // 画面を開いたまま、相手の変更が届いたとき：ボタンで反映する（画面は自動では変えない）
+// 車両（train）とダイヤ（dia）は、相手の変更を、確認なしでそのまま反映する（素材がそろってから）
+const AUTO = { voxelcraft_train_v1: 'train', voxelcraft_dia_v1: 'dia' };
+function autoApply(room) {
+  for (const k of Object.keys(AUTO)) {
+    const rv = kvValue(room, k);
+    if (rv === null || rv === getLocal(k)) continue;
+    if (!allReady(room, { [k]: rv })) continue;
+    if (!setLocal(k, rv)) continue;
+    lastSeen.set(k, rv);                       // 受け取った内容を、そのまま送り返さない
+    const m = window.VoxelSync && VoxelSync[AUTO[k]];
+    if (m && typeof m.reload === 'function') { try { m.reload(); } catch (e) { console.error(e); } }
+  }
+}
 function checkLive(room) {
   if (rm !== room) return;
   if (window.VoxelRTUnify && VoxelRTUnify.busy()) { hideBanner(); return; }
   assembleBlobs(room);
   pushLocal(room);
+  autoApply(room);
   // カスタムブロックの追加・カテゴリ移動は、画面を変えずにそのまま反映する
   const rext = kvValue(room, EXT_K);
   if (rext !== null && rext !== getLocal(EXT_K) && !extBusy && window.VoxelExt && VoxelExt.applyRemoteExt) {

@@ -164,19 +164,29 @@ function visualOf(car) {
 }
 async function ensureVisual(t) {
   if (t.cars || t.building) return;
+  const cars = t.carIds.map(id => carById(id));
+  if (cars.some(c => !c)) return;          // 車両の情報がまだ届いていない（届いたら、また作る）
   t.building = true;
-  const arr = [];
-  for (const id of t.carIds) {
-    const car = carById(id);
-    if (!car) continue;
-    const v = await visualOf(car);
-    const root = v.root.clone(true);
-    root.traverse(o => { if (o.isMesh && o.material) o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone(); });
-    arr.push({ car, root, parts: partsOf(root), length: v.length });
-  }
-  t.cars = arr;
-  t.building = false;
+  try {
+    const arr = [];
+    for (const car of cars) {
+      const v = await visualOf(car);
+      const root = v.root.clone(true);
+      root.traverse(o => { if (o.isMesh && o.material) o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone(); });
+      arr.push({ car, root, parts: partsOf(root), length: v.length });
+    }
+    t.cars = arr;
+  } finally { t.building = false; }
 }
+// 車両の中身が変わったとき：表示を作り直す（走っている列車も、次に近くで描くときに新しい車両になる）
+window.addEventListener('vc-train-lib', () => {
+  visualCache.clear();
+  for (const t of trains) {
+    if (!t.cars) continue;
+    if (t.shown) for (const c of t.cars) scene.remove(c.root);
+    t.cars = null; t.shown = false;
+  }
+});
 
 // ============================================================
 // 扉・幕アニメーション（名前から、どの側か・開閉か・幕かを判断する）
@@ -1007,6 +1017,20 @@ window.VoxelStation = {
     list: trains.filter(t => !t.dead && t.head).map(t => ({ id: t.id, x: t.head.x, y: t.head.y, z: t.head.z }))
   })
 };
+// 相手が駅・路線を変えたとき：駅の情報を読み直し、走っている列車を新しい路線に合わせる
+function reloadStationData() {
+  load();
+  rebuildWaitCoords();
+  for (const t of trains) {
+    if (t.dead) continue;
+    const L = lineById(t.line && t.line.id);
+    const R = L && L.routes.find(r => r.id === t.routeId);
+    if (!L || !R) { t.dead = true; continue; }
+    t.line = L;
+  }
+}
+window.VoxelSync = window.VoxelSync || {};
+VoxelSync.station = { reload: reloadStationData };
 init();
 
 })();

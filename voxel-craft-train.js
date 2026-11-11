@@ -56,24 +56,77 @@ function newCar(name) {
 function carById(id) { return lib.cars.find(c => c.id === id); }
 function touchCar(id) { built.delete(id); }
 
-function saveLib() {
-  try {
-    localStorage.setItem(LIB_KEY, JSON.stringify({ cars: lib.cars, comp: lib.comp, maxKmh: lib.maxKmh }));
-    return true;
-  } catch (e) {
-    tmsg('保存できませんでした（ファイルが大きすぎる可能性があります）');
-    return false;
+// ---- 保存：大きい中身（模型・画像・音声）は、IndexedDB の「素材」に別に置き、保存領域には参照だけ残す ----
+// 部屋の仕組みは、この参照をたどって中身を相手に送る。相手は、参照から素材を受け取って車両を作る
+const BIG_TXT = 2048;                 // これより長い文字列は、素材に逃がす
+const trnMem = new Map();             // 素材のキー -> 中身（この端末で読んだ・書いたもの）
+const trnSaved = new Set();           // 素材として書き終えたキー
+let libSeq = 0, loadSeq = 0, retryN = 0;
+let pendingRaw = [];                  // まだ素材が届いていない車両（届いたら作る。保存のとき、そのまま残す）
+function trnHash(s) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619) >>> 0; h2 = Math.imul(h2 + c, 2246822519) >>> 0; }
+  return 'trn' + s.length.toString(36) + '-' + h1.toString(36) + '-' + h2.toString(36);
+}
+const hasBlobs = () => !!(window.VoxelExt && VoxelExt.blobPut && VoxelExt.blobGet);
+async function slimOf(v) {
+  if (typeof v === 'string' && v.length >= BIG_TXT && hasBlobs()) {
+    const key = trnHash(v);
+    trnMem.set(key, v);
+    if (!trnSaved.has(key)) { await VoxelExt.blobPut(key, v); trnSaved.add(key); }
+    return { __blob: key };
   }
+  if (Array.isArray(v)) return Promise.all(v.map(slimOf));
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v)) o[k] = await slimOf(v[k]); return o; }
+  return v;
 }
-function loadLib() {
-  try {
-    const s = JSON.parse(localStorage.getItem(LIB_KEY) || '{}');
-    if (Array.isArray(s.cars)) lib.cars = s.cars;
-    if (Array.isArray(s.comp)) lib.comp = s.comp.filter(id => carById(id));
-    if (typeof s.maxKmh === 'number') lib.maxKmh = clamp(s.maxKmh, 20, 300);
-  } catch (e) {}
+async function restoreOf(v) {
+  if (v == null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return Promise.all(v.map(restoreOf));
+  if (typeof v.__blob === 'string' && Object.keys(v).length === 1) {
+    if (trnMem.has(v.__blob)) return trnMem.get(v.__blob);
+    if (!hasBlobs()) throw new Error('素材を開けません');
+    const t = await VoxelExt.blobGet(v.__blob);
+    if (typeof t !== 'string') throw new Error('素材がまだ届いていません');
+    trnMem.set(v.__blob, t);
+    return t;
+  }
+  const o = {}; for (const k of Object.keys(v)) o[k] = await restoreOf(v[k]); return o;
 }
-
+function saveLib() {
+  const seq = ++libSeq;
+  return (async () => {
+    try {
+      const cars = [];
+      for (const c of lib.cars) cars.push(await slimOf(c));
+      if (seq !== libSeq) return true;        // 後から新しい保存があれば、そちらを書く
+      localStorage.setItem(LIB_KEY, JSON.stringify({ cars: cars.concat(pendingRaw), comp: lib.comp, maxKmh: lib.maxKmh }));
+      return true;
+    } catch (e) {
+      tmsg('保存できませんでした（' + (e && e.message ? e.message : '保存領域が足りません') + '）');
+      return false;
+    }
+  })();
+}
+async function loadLib() {
+  const seq = ++loadSeq;
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem(LIB_KEY) || '{}') || {}; } catch (e) { s = {}; }
+  const ok = [], pend = [];
+  for (const c of (Array.isArray(s.cars) ? s.cars : [])) {
+    try { ok.push(await restoreOf(c)); } catch (e) { pend.push(c); }
+  }
+  if (seq !== loadSeq) return;
+  lib.cars = ok;
+  pendingRaw = pend;
+  const ids = new Set([...ok, ...pend].map(c => c.id));
+  if (Array.isArray(s.comp)) lib.comp = s.comp.filter(id => ids.has(id));
+  if (typeof s.maxKmh === 'number') lib.maxKmh = clamp(s.maxKmh, 20, 300);
+  built.clear();
+  window.dispatchEvent(new Event('vc-train-lib'));
+  if (pend.length && retryN++ < 200) setTimeout(() => { loadLib(); }, 1500);   // 素材が届くのを待って、もう一度作る
+  else retryN = 0;
+}
 // ============================================================
 // 読み込みユーティリティ
 // ============================================================
@@ -1367,10 +1420,10 @@ function trnLoop(now) {
 }
 
 function init() {
-  loadLib();
   buildUI();
   requestAnimationFrame(renderPreview);
   requestAnimationFrame(trnLoop);
+  loadLib().then(() => renderLibrary());
 }
 window.VoxelSync = window.VoxelSync || {};
 VoxelSync.train = { reload: () => { loadLib(); } };
