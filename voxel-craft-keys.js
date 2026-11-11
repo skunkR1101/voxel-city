@@ -27,7 +27,8 @@ function isTyping(e) { return !!(e.target && /INPUT|TEXTAREA|SELECT/.test(e.targ
 function gameStarted() { try { return typeof started !== 'undefined' && !!started; } catch (x) { return false; } }
 function settingsOpen() { const s = el('settings'); return !!(s && s.classList.contains('show')); }
 function panelOpen() { return !!document.querySelector('.ext-panel.show'); }
-function uiOpen() { return settingsOpen() || panelOpen(); }
+function phoneOpen() { return !!(window.VoxelPhone && VoxelPhone.isOpen()); }
+function uiOpen() { return settingsOpen() || panelOpen() || phoneOpen(); }
 function chatInput() { const box = el('rtChat'); return box ? box.querySelector('input') : null; }
 function chatting() { const i = chatInput(); return !!i && document.activeElement === i; }
 function playing() { try { return gameStarted() && !uiOpen() && !chatting() && !(typeof menuOpen !== 'undefined' && menuOpen); } catch (x) { return false; } }
@@ -86,7 +87,7 @@ function setCursorFree(v) {
 // カーソルを出している間や、チャット中は、ポインターロックが外れても「一時停止」の画面を出さない
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement) return;
-  if (cursorFree || chatting() || settingsOpen() || panelOpen()) {
+  if (cursorFree || chatting() || settingsOpen() || panelOpen() || phoneOpen()) {
     try { if (typeof paused !== 'undefined') paused = false; } catch (x) {}
     const ov = el('overlay');
     if (ov) ov.style.display = 'none';
@@ -110,6 +111,7 @@ window.addEventListener('keydown', e => {
   switch (e.code) {
     case 'Escape': {
       if (!gameStarted()) return;
+      if (phoneOpen()) return;                   // 端末の閉じ方は、端末側の Esc に任せる
       if (settingsOpen()) { eat(e); if (typeof closeSettings === 'function') closeSettings(); return; }
       if (panelOpen()) return;                   // パネルの閉じ方は、既存の Esc に任せる
       eat(e);
