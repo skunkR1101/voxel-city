@@ -488,6 +488,10 @@ subs.add(() => {
 window.VoxelEconomy = {
   companies, company, totals, addIncome, members, roleOf,
   pointsOf, allPoints, addPoint, removePoint, PP_CONDS,
+  // 路線図アプリが、同じ保存・同じ通知（部屋の共有・自動保存）を使うための窓口
+  kvGet: getv, kvEntries: entries, kvPut: put, kvDel: remove,
+  subscribe: f => { subs.add(f); return () => subs.delete(f); },
+  canEdit: cid => roleOf(cid) === 'admin',
   yen
 };
 

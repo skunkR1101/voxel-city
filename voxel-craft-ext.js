@@ -1,7 +1,7 @@
 /* キーボード操作（voxel-craft-keys.js）を、この場所と同じ場所から読み込む（読み込み忘れを防ぐ） */
 (function () {
   const here = document.currentScript && document.currentScript.src ? document.currentScript.src : location.href;
-  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js']]) {
+  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js']]) {
     if (window[flag] || document.querySelector('script[src*="' + file + '"]')) continue;
     const s = document.createElement('script');
     s.src = new URL(file, here).href;
