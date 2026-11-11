@@ -129,6 +129,7 @@ function saveAll() {
       if (v.builtin) return v;
       const o = { id: v.id, kind: v.kind, name: v.name, builtin: false };
       if (v.scale) o.scale = v.scale;
+      if (v.place) o.place = v.place;
       if (!blobs) { o.texData = v.texData || null; o.model = v.model || null; return o; }
       if (v.texData && !v.texKey) { v.texKey = 'road:tex:' + v.id; queueBlob(v.texKey, v.texData); }
       if (v.model && v.model.data && !v.model.key) { v.model.key = 'road:mdl:' + v.id; queueBlob(v.model.key, v.model.data); }
@@ -318,7 +319,9 @@ async function buildParts(d) {
   wrap.updateMatrixWorld(true);
   const b = new THREE.Box3().setFromObject(wrap);
   const c = b.getCenter(new V3());
-  raw.position.set(-c.x, -b.min.y, -c.z);
+  // 位置：中心に合わせる（今まで通り）／Blockbenchの位置のまま（原点はそのまま使う）
+  if (d.place === 'raw') raw.position.set(0, 0, 0);
+  else raw.position.set(-c.x, -b.min.y, -c.z);
   wrap.updateMatrixWorld(true);
   const bb = new THREE.Box3().setFromObject(wrap);
   const size = bb.getSize(new V3());
@@ -444,10 +447,10 @@ async function resolvedVariant(v) {
     const data = v.model.data || (v.model.key ? await blobGetSafe(v.model.key) : null);
     if (data) model = { format: v.model.format, data };
   }
-  return { aid: v.aid, kind: v.kind, name: v.name, scale: v.scale || null, texData: texData || null, model };
+  return { aid: v.aid, kind: v.kind, name: v.name, scale: v.scale || null, place: v.place || null, texData: texData || null, model };
 }
 function sameAsset(a, b) {
-  return a.kind === b.kind && a.name === b.name && (a.scale || null) === (b.scale || null) &&
+  return a.kind === b.kind && a.name === b.name && (a.scale || null) === (b.scale || null) && (a.place || null) === (b.place || null) &&
     (a.texData || null) === (b.texData || null) &&
     ((a.model && a.model.data) || null) === ((b.model && b.model.data) || null);
 }
@@ -455,6 +458,7 @@ async function setVariantContent(v, c) {
   v.kind = c.kind;
   v.name = c.name;
   v.scale = c.scale || undefined;
+  v.place = c.place || undefined;
   v.texData = c.texData || null;
   v.texKey = v.texData ? 'road:tex:' + v.id : null;
   if (v.texKey) queueBlob(v.texKey, v.texData);
@@ -1315,6 +1319,7 @@ async function addVariant() {
   const texFile = document.getElementById('rdTex').files[0];
   const modelFile = document.getElementById('rdModel').files[0];
   const scaleStr = document.getElementById('rdScale').value.trim();
+  const placeStr = document.getElementById('rdPlace').value;
   const status = document.getElementById('rdStatus');
   if (!modelFile && !texFile) { status.textContent = 'テクスチャかモデルのどちらか（または両方）を選んでください。'; return; }
   let model = null, texData = null;
@@ -1337,7 +1342,7 @@ async function addVariant() {
     return;
   }
   const scale = Number(scaleStr);
-  const def = { id: uid(), aid: newAid(), kind, name, texData, model, builtin: false, scale: (scaleStr && scale > 0) ? scale : undefined };
+  const def = { id: uid(), aid: newAid(), kind, name, texData, model, builtin: false, scale: (scaleStr && scale > 0) ? scale : undefined, place: placeStr === 'raw' ? 'raw' : undefined };
   if (def.model) def.model.key = null;
   status.textContent = 'モデルを読み込み中…';
   await ensureVariant(def);
@@ -1495,6 +1500,7 @@ function buildUI() {
     <div class="rd-row"><label>テクスチャ <input type="file" id="rdTex" accept="image/png,image/jpeg"></label></div>
     <div class="rd-row"><label>モデル <input type="file" id="rdModel" accept=".obj,.fbx,.json,.bbmodel"></label></div>
     <div class="rd-row"><label>スケール（空欄＝自動）<input id="rdScale" type="number" step="0.01" min="0.001" style="width:100px"></label></div>
+    <div class="rd-row"><label>モデルの位置 <select id="rdPlace"><option value="center">自動で中心に合わせる（今まで通り）</option><option value="raw">Blockbenchで作った位置のまま</option></select></label></div>
     <p class="note">モデルは縮めずに使います。進行方向をZ軸、道幅をX軸にしてください。</p>
     <div class="rd-row">
       <button class="rd-btn" id="rdSave">追加して登録</button>

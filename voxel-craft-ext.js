@@ -440,9 +440,17 @@ function autoScaleFor(raw) {
   const m = Math.max(s.x, s.y, s.z);
   return m > 8 ? 1 / 16 : 1;
 }
-function placeModel(raw, scale) {
+function placeModel(raw, scale, place) {
   const outer = new THREE.Group();
   raw.scale.setScalar(scale);
+  // Blockbenchの位置のまま：ブロックの角（0〜16px＝0〜1ブロック）を、ブロックの角に合わせる。
+  // 出力の原点はブロックの中心（底面）なので、角の分だけずらす。中心に寄せない
+  if (place === 'raw') {
+    raw.position.set(-0.5, 0, -0.5);
+    outer.add(raw);
+    outer.updateMatrixWorld(true);
+    return outer;
+  }
   raw.position.set(0, 0, 0);
   outer.add(raw);
   outer.updateMatrixWorld(true);
@@ -547,7 +555,7 @@ async function buildObjWithMtl(text, mtlText, images) {
   }
   return root;
 }
-async function loadModelObject(format, data, texUrl, scaleOverride, rotDeg, mdl) {
+async function loadModelObject(format, data, texUrl, scaleOverride, rotDeg, mdl, place) {
   let raw, fromMtl = false;
   if (format === 'obj' && mdl && mdl.mtl) { raw = await buildObjWithMtl(data, mdl.mtl, mdl.images || {}); fromMtl = true; }
   else if (format === 'obj') raw = new THREE.OBJLoader().parse(data);
@@ -559,7 +567,7 @@ async function loadModelObject(format, data, texUrl, scaleOverride, rotDeg, mdl)
     if (tex) applyTexToObj(raw, tex);
   }
   const scale = typeof scaleOverride === 'number' ? scaleOverride : autoScaleFor(raw);
-  const root = placeModel(raw, scale);
+  const root = placeModel(raw, scale, place);
   // 向きの補正（Blockbenchで反転したときに、0・90・180・270度で直す）
   if (rotDeg) { root.rotation.y = rotDeg * Math.PI / 180; root.updateMatrixWorld(true); }
   sanitizeMaterials(root);
@@ -607,7 +615,7 @@ async function registerDef(def) {
   } else if (def.model) {
     try {
       const r = await loadModelObject(def.model.format, def.model.data, typeof def.texData === 'string' ? def.texData : null,
-        typeof def.scale === 'number' ? def.scale : null, def.modelRot || 0, def.model);
+        typeof def.scale === 'number' ? def.scale : null, def.modelRot || 0, def.model, def.place || 'center');
       rt.template = r.root;
     } catch (err) {
       console.error(err);
@@ -3039,7 +3047,7 @@ function newDraft() {
     look: 'cut', glow: 1.5, glowDeep: 1,
     texData: null, model: null, modelTex: null, template: null,
     orient: 'fixed',
-    scaleMode: 'auto', customScale: 1, resolvedScale: null, modelRot: 0,
+    scaleMode: 'auto', customScale: 1, resolvedScale: null, modelRot: 0, place: 'center',
     sounds: { break: { type: 'none' }, place: { type: 'none' } }
   };
 }
@@ -3074,6 +3082,7 @@ function fillImportForm() {
   document.getElementById('extOrient').value = d.orient;
   document.getElementById('extModelRot').value = String(d.modelRot || 0);
   document.getElementById('extScaleMode').value = d.scaleMode;
+  document.getElementById('extPlace').value = d.place || 'center';
   document.getElementById('extScaleVal').value = d.customScale;
   document.getElementById('extScaleVal').style.display = d.scaleMode === 'custom' ? 'inline-block' : 'none';
   document.getElementById('extModelStatus').textContent = d.model
@@ -3086,7 +3095,7 @@ async function rebuildDraftTemplate() {
   if (!draft.model) return;
   document.getElementById('extModelStatus').textContent = '読み込み中…';
   try {
-    const r = await loadModelObject(draft.model.format, draft.model.data, draft.modelTex, scaleOverrideOf(draft), draft.modelRot || 0, draft.model);
+    const r = await loadModelObject(draft.model.format, draft.model.data, draft.modelTex, scaleOverrideOf(draft), draft.modelRot || 0, draft.model, draft.place || 'center');
     draft.template = r.root;
     draft.resolvedScale = r.scale;
     document.getElementById('extModelStatus').textContent =
@@ -3116,6 +3125,7 @@ async function saveDraft() {
     } : null,
     orient: draft.kind === 'model' ? draft.orient : undefined,
     modelRot: draft.kind === 'model' ? (draft.modelRot || 0) : undefined,
+    place: draft.kind === 'model' ? (draft.place || 'center') : undefined,
     scale: draft.kind === 'model' ? (draft.resolvedScale ?? 1) : undefined,
     sounds: draft.sounds,
     alpha: draft.look || 'cut',
@@ -3156,7 +3166,7 @@ let bulk = null;                                     // { items, i, done, keep }
 function baseName(n) { return String(n).replace(/\.[^.]+$/, ''); }
 function pickKeep(d) {
   return { category: d.category, colorable: d.colorable, look: d.look, glow: d.glow, glowDeep: d.glowDeep, orient: d.orient,
-    modelRot: d.modelRot, scaleMode: d.scaleMode, customScale: d.customScale, sounds: d.sounds };
+    modelRot: d.modelRot, scaleMode: d.scaleMode, customScale: d.customScale, place: d.place, sounds: d.sounds };
 }
 async function modelItemsFrom(files) {
   const extOf = f => f.name.split('.').pop().toLowerCase();
@@ -3201,6 +3211,7 @@ async function bulkShow() {
   draft.name = it.name;
   if (it.kind === 'cube') draft.texData = it.texData;
   else { draft.model = it.model; draft.modelTex = it.modelTex || null; draft.resolvedScale = null; }
+  draft.place = it.place || 'center';
   fillImportForm();
   if (it.kind === 'model') await rebuildDraftTemplate();
   document.getElementById('extBulkBar').style.display = 'flex';
@@ -3293,7 +3304,7 @@ function resolveConflict(v) {
   closePanel();
   if (r) r(v);
 }
-const DEF_FIELDS = ['name', 'kind', 'colorable', 'texData', 'model', 'orient', 'modelRot', 'scale', 'alpha', 'glowPower', 'glowDeep'];
+const DEF_FIELDS = ['name', 'kind', 'colorable', 'texData', 'model', 'orient', 'modelRot', 'place', 'scale', 'alpha', 'glowPower', 'glowDeep'];
 async function importAssets(file) {
   let s;
   try { s = JSON.parse(await readAs(file, 'text')); } catch (e) { toast('ファイルを読めませんでした'); return; }
@@ -3672,6 +3683,12 @@ function buildDOM() {
           </select>
         </label>
         <input class="ext-input" id="extScaleVal" type="number" step="0.01" min="0.001" style="width:90px;display:none">
+        <label>位置
+          <select class="ext-input" id="extPlace">
+            <option value="center">自動で中心（今まで通り）</option>
+            <option value="raw">Blockbenchで作った位置のまま</option>
+          </select>
+        </label>
       </div>
       <div class="ext-canvas-box" style="margin-top:8px"><canvas id="extPrev" width="260" height="260"></canvas></div>
       <p class="note" id="extModelStatus">モデルを選ぶとプレビューが自動で表示されます。</p>
@@ -3895,6 +3912,10 @@ function wire() {
   document.getElementById('extScaleMode').addEventListener('change', async e => {
     draft.scaleMode = e.target.value;
     document.getElementById('extScaleVal').style.display = draft.scaleMode === 'custom' ? 'inline-block' : 'none';
+    if (draft.model) await rebuildDraftTemplate();
+  });
+  document.getElementById('extPlace').addEventListener('change', async e => {
+    draft.place = e.target.value;
     if (draft.model) await rebuildDraftTemplate();
   });
   document.getElementById('extScaleVal').addEventListener('change', async e => {
@@ -4528,7 +4549,7 @@ async function applyRemoteExt(text) {
       }
       // 同じブロック（aid）で、相手の方が新しい設定（一括変更など）になっていれば、設定だけ合わせる
       if (o.aid && have.aid === o.aid && (o.rev || 0) > (have.rev || 0) && VoxelCustom.defHash(have) !== H) {
-        for (const k of ['name', 'kind', 'colorable', 'alpha', 'glowPower', 'glowDeep', 'orient', 'scale', 'modelRot', 'texData', 'model']) {
+        for (const k of ['name', 'kind', 'colorable', 'alpha', 'glowPower', 'glowDeep', 'orient', 'scale', 'modelRot', 'place', 'texData', 'model']) {
           if (o[k] !== undefined) have[k] = o[k];
         }
         have.rev = o.rev;
