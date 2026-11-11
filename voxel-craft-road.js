@@ -601,13 +601,13 @@ function cutTris(T, zMin, zA, zB, off, l, P, N, U) {
   }
 }
 let cutFrame = null;   // 描画の1フレームの中で使う時間（重い切り出しを、画面が止まらないように分ける）
-const CUT_MS = 5;      // 1フレームで切り出しに使ってよい時間（ミリ秒）
-const CUT_MAX = 96;    // 1つのバリエーションで保存する切り出しの上限
+// 切り出しは時間で途中打ち切りしない（途中で止まると、区画が作れず敷設が見えなくなるため）。
+// 区画は1フレームに1つずつ作るので、重さは区画ごとに一度だけ。
+const CUT_MAX = 1000;  // 1つのバリエーションで保存する切り出しの上限（区画が使う分より十分に多く取る）
 function cutGeo(r, k, a, l) {
   const key = k + '|' + a.toFixed(4) + '|' + l.toFixed(4);
   let g = r.cut.get(key);
   if (g) { r.cut.delete(key); r.cut.set(key, g); return g; }   // 使ったものを一番新しい位置へ
-  if (cutFrame && cutFrame.n > 0 && performance.now() - cutFrame.t0 > CUT_MS) return null;   // 次のフレームに回す
   if (cutFrame) cutFrame.n++;
   const T = triOf(r, k);
   const P = [], N = [], U = [];
