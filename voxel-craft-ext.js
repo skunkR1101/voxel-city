@@ -1,7 +1,7 @@
 /* キーボード操作（voxel-craft-keys.js）を、この場所と同じ場所から読み込む（読み込み忘れを防ぐ） */
 (function () {
   const here = document.currentScript && document.currentScript.src ? document.currentScript.src : location.href;
-  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js'], ['VoxelEdit', 'voxel-craft-edit.js']]) {
+  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js'], ['VoxelEdit', 'voxel-craft-edit.js'], ['VoxelConvert', 'voxel-craft-convert.js']]) {
     if (window[flag] || document.querySelector('script[src*="' + file + '"]')) continue;
     const s = document.createElement('script');
     s.src = new URL(file, here).href;
@@ -4582,7 +4582,7 @@ async function applyRemoteExt(text) {
 window.VoxelExt = {
   T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
   keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp, setPlaceHook,
-  applyRemoteExt, hydrated: () => hydrateReady,
+  applyRemoteExt, hydrated: () => hydrateReady, makeModelInstance,
   // ステッキで始点と終点を選び終えているときの範囲（利益地点の設定に使う）。選んでいなければ null
   wandRange: () => { if (wand.stage !== 2) return null; const b = selBounds(); return b ? { min: b.min.slice(), max: b.max.slice() } : null; }
 };

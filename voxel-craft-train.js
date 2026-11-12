@@ -190,7 +190,23 @@ async function buildCar(car) {
   let s = 1;
   let mainRoot = null;
 
-  if (car.main.data) {
+  if (car.blocks && window.VoxelConvert && VoxelConvert.buildRoot) {
+    // ブロックから作った車両：部品ごとのグループを、長さに合わせて拡大し、中心を合わせる（模型と同じ扱い）
+    const bd = VoxelConvert.parseBlocks(car.blocks);
+    const texMap = {};
+    for (const k of Object.keys(bd.texs || {})) { try { texMap[k] = await texFromUrl(bd.texs[k]); } catch (e) {} }
+    mainRoot = VoxelConvert.buildRoot(bd, texMap);
+    const wrapB = new THREE.Group();
+    wrapB.add(mainRoot);
+    wrapB.updateMatrixWorld(true);
+    const mB = measure(mainRoot);
+    s = L / Math.max(mB.size.z, 1e-3);
+    mainRoot.scale.setScalar(s);
+    wrapB.updateMatrixWorld(true);
+    const bB = new THREE.Box3().setFromObject(wrapB);
+    const cB = bB.getCenter(new V3());
+    mainRoot.position.set(-cB.x, -bB.min.y, -cB.z);
+  } else if (car.main.data) {
     mainRoot = new THREE.OBJLoader().parse(car.main.data);
     const tex = car.main.tex ? await texFromUrl(car.main.tex) : null;
     const m = measure(mainRoot);
@@ -1176,6 +1192,7 @@ function bindLibrary() {
     saveLib();
     renderLibrary(); renderEditor(); setPreviewCar(c.id);
   });
+  document.getElementById('trnConv').addEventListener('click', () => { if (window.VoxelConvert) VoxelConvert.open('train'); });
   document.getElementById('trnLib').addEventListener('click', e => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
@@ -1344,6 +1361,7 @@ function buildUI() {
     <h2>カスタム列車エディット</h2>
     <div class="trn-row">
       <button class="trn-btn" id="trnNew">＋ 新規車両</button>
+      <button class="trn-btn" id="trnConv">ブロックで作った車両を追加</button>
       <label>最高速度 <input id="trnMaxKmh" type="number" min="20" max="300" step="5" style="width:70px" value="${lib.maxKmh}"> km/h</label>
       <button class="trn-btn" id="trnRun">▶ 運行（B）</button>
       <button class="trn-btn sub" id="trnClose">閉じる（N）</button>
@@ -1401,6 +1419,16 @@ window.addEventListener('keydown', e => {
 // ---- 別ファイル（voxel-craft-dia.js など）から使うための窓口 ----
 window.VoxelTrain = {
   lib, ctl, GAP,
+  // ブロックから作った車両を、ライブラリに追加する（窓口：voxel-craft-convert.js から使う）
+  addFromBlocks: o => {
+    const c = newCar(o.name);
+    c.length = o.length;
+    c.blocks = o.blocks;
+    lib.cars.push(c);
+    selId = c.id;
+    saveLib(); renderLibrary(); renderEditor(); setPreviewCar(c.id);
+    return c.id;
+  },
   carById, buildCar, partsOf, applyAnims, makeVvvfChannel, startChannel, stopChannel, updateChannel,
   decodeCached, ensureAudio, routeAt, applyAnimsEx,
   audio: () => ({ actx, masterGain }),

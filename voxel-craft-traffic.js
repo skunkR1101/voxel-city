@@ -304,7 +304,7 @@ async function buildCustom(rec) {
     const matName = m.material && !Array.isArray(m.material) ? m.material.name : '';
     const info = mtl && matName ? mtl.get(matName) : null;
     let tex = info && info.map ? texFor(texMap, info.map) : null;
-    if (!tex && (!info || !info.map)) tex = firstTex(texMap);
+    if (!tex && (!info || !info.map) && !/^(solid|glow|glass)_/.test(matName)) tex = firstTex(texMap);
     const kd = info && info.kd ? new THREE.Color(info.kd[0], info.kd[1], info.kd[2]) : null;
     const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide, color: kd || (tex ? 0xffffff : 0xbbbbbb) });
     if (tex) {
@@ -312,6 +312,9 @@ async function buildCustom(rec) {
       if (rec.alpha === 'glow') { mat.emissive = new THREE.Color(0xffffff); mat.emissiveMap = tex; mat.emissiveIntensity = 1; }
       else mat.alphaTest = 0.3;                                 // 半透明部分をそのまま透かす
     }
+    // ブロックから作った車のマテリアル（名前の接頭辞で、発光・半透明にする）
+    if (matName.indexOf('glow_') === 0) { mat.emissive = mat.color.clone(); mat.emissiveIntensity = 1; }
+    if (matName.indexOf('glass_') === 0) { mat.transparent = true; mat.opacity = 0.45; mat.depthWrite = false; }
     parts.push({ geo: g, mat });
   });
   if (!parts.length) throw new Error('メッシュが見つかりません');
@@ -879,6 +882,7 @@ function openSetPanel() {
     <div class="rowv">マテリアル（.mtl・任意）<input id="trMtl" type="file" accept=".mtl"></div>
     <div class="rowv">テクスチャ（png / jpg・複数可）<input id="trTx" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"></div>
     <p class="note">MTLを入れると、そのファイルの色とテクスチャ名（map_Kd）どおりに貼ります。テクスチャが1枚だけなら、全体に貼ります。</p>
+    <div class="rowv"><button class="btn" data-a="fromblocks">ブロックで作った車・バスを追加</button></div>
     <div class="rowv"><button class="btn" data-a="add">追加する</button><span id="trMsg" class="note"></span></div>
     <h3>その他</h3>
     <div class="rowv"><button class="btn danger" data-a="clearcars">走っている車を全部消す</button>
@@ -922,6 +926,7 @@ function openSetPanel() {
     }
     const a = b.dataset.a;
     if (a === 'close') closeP();
+    if (a === 'fromblocks') { closeP(); if (window.VoxelConvert) VoxelConvert.open('car'); }
     if (a === 'clearcars') { S.cars = []; toast2('車を消しました'); }
     if (a === 'clearroute') { S.edges.clear(); S.nodes.clear(); S.cars = []; TP.pend = null; TP.undo = []; markersDirty = true; saveSoon(); toast2('ルートを消しました'); closeP(); }
     if (a === 'add') {
@@ -1049,6 +1054,8 @@ function saveSoonIfDirty() {
 }
 window.VoxelTraffic = {
   save: saveNow,
+  // ブロックから作った車を登録する（窓口：voxel-craft-convert.js から使う）
+  addCustom: async rec => { await buildCustom(rec); S.customs.push(rec); saveSoon(); return rec.id; },
   stats: () => ({ nodes: S.nodes.size, edges: S.edges.size, cars: S.cars.length }),
   // 利益地点の判定用：自動車の現在位置（owner＝この端末が計算している側だけ判定する）
   carPoints: () => ({
