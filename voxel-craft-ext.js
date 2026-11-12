@@ -1,7 +1,7 @@
 /* キーボード操作（voxel-craft-keys.js）を、この場所と同じ場所から読み込む（読み込み忘れを防ぐ） */
 (function () {
   const here = document.currentScript && document.currentScript.src ? document.currentScript.src : location.href;
-  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js']]) {
+  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js'], ['VoxelEdit', 'voxel-craft-edit.js']]) {
     if (window[flag] || document.querySelector('script[src*="' + file + '"]')) continue;
     const s = document.createElement('script');
     s.src = new URL(file, here).href;
@@ -4162,6 +4162,7 @@ function cullTilts() {
   for (const ent of tiltList) {
     const c = ent.c, o = ent.obj;
     if (!c || !o) continue;
+    if (ent.hideDraft) { o.visible = false; continue; }      // エディットで消した（保存するまで隠す）
     const cx = Math.floor(c[0] / CS), cy = Math.floor(c[1] / CS), cz = Math.floor(c[2] / CS);
     const vis = inRange(cx, cz, curPcx, curPcz, RD) && Math.abs(cy - curPcy) <= RD;
     if (o.visible !== vis) o.visible = vis;

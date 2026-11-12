@@ -339,7 +339,7 @@ const tlWaiting = [];         // 定義がまだ届いていない記録
 let tlScope = null;
 function tlNewKey() { return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function tlScopeNow() { return LIVE.roomId() || 'local'; }
-function tlStrip(r) { return { key: r.key, id: r.id, h: r.h, c: r.c, q: r.q, st: r.st, ts: r.ts }; }
+function tlStrip(r) { return { key: r.key, id: r.id, h: r.h, c: r.c, q: r.q, st: r.st, ts: r.ts, s: r.s }; }
 let tlLocalReady = false;
 function tlSaveLocal() {
   if (!tlLocalReady) return;
@@ -358,6 +358,32 @@ function tlAddVisual(r) {
   ent.tl = r.key;
   r.ent = ent;
   r.id = id;
+  if (r.s && r.s !== 1) tlPlaceEnt(ent, ent.c, ent.q, r.s);      // 大きさ（エディットで伸ばしたもの）
+  return true;
+}
+// 画面の傾きブロックの位置・向き・大きさを変える（記録は変えない。保存は tlMove で行う）
+function tlPlaceEnt(ent, c, q, s) {
+  const k = s || 1;
+  const off = ent.isModel ? new THREE.Vector3(0, -0.5 * k, 0).applyQuaternion(q) : new THREE.Vector3();
+  ent.c = [c[0], c[1], c[2]];
+  ent.q = q.clone();
+  ent.s = k;
+  ent.obj.position.set(c[0] + off.x, c[1] + off.y, c[2] + off.z);
+  ent.obj.quaternion.copy(q);
+  ent.obj.scale.setScalar(k);
+  ent.obj.updateMatrixWorld(true);
+}
+// 記録の位置・向き・大きさを変えて、保存と部屋への送信をする（エディットの保存で使う）
+function tlMove(key, ent, c, q, s) {
+  const r = tlRecs.get(key);
+  if (!r || r.ent !== ent) return false;
+  r.c = [c[0], c[1], c[2]];
+  r.q = [q.x, q.y, q.z, q.w];
+  r.s = s || 1;
+  r.ts = LIVE.nowTs();
+  r.sig = tlSig(r);
+  if (r.src === 'local') tlSaveLocal();
+  else { r.own = true; r.room = r.src; LIVE.send('tl:' + r.key, tlStrip(r)); }
   return true;
 }
 function tlDropRec(r) {
@@ -366,7 +392,7 @@ function tlDropRec(r) {
   tlRecs.delete(r.key);
 }
 const tlTombs = new Map();     // 部屋で壊したもの key -> { ts, room }（部屋に届くまで送り続ける）
-function tlSig(o) { return JSON.stringify([o.h || null, o.h ? null : (o.id ?? null), o.c, o.q, o.st || null]); }
+function tlSig(o) { return JSON.stringify([o.h || null, o.h ? null : (o.id ?? null), o.c, o.q, o.st || null, o.s || 1]); }
 function tlRemove(key, notify) {
   const r = tlRecs.get(key);
   if (!r) return;
@@ -389,7 +415,7 @@ function tlApply(key, val, s) {
   }
   if (cur) tlDropRec(cur);
   dgLog('傾き 受け取り ' + key.slice(0, 24));
-  const r = { key, id: v.id, h: v.h || null, c: v.c, q: v.q, st: v.st || null, ts: val.ts || v.ts || 0, src: s, ent: null, sig: tlSig(v) };
+  const r = { key, id: v.id, h: v.h || null, c: v.c, q: v.q, st: v.st || null, s: v.s, ts: val.ts || v.ts || 0, src: s, ent: null, sig: tlSig(v) };
   tlRecs.set(key, r);
   if (!tlAddVisual(r)) tlWaiting.push(r);
 }
@@ -419,7 +445,7 @@ function tlAdopt(ent) {
   const r = {
     key: tlNewKey(), id: ent.id, h: rt && rt.def ? VoxelCustom.publishDef(rt.def) : null,
     c: [ent.c[0], ent.c[1], ent.c[2]], q: [ent.q.x, ent.q.y, ent.q.z, ent.q.w],
-    st: ent.st || null, ts: (LIVE.nowTs()), src: scope
+    st: ent.st || null, s: ent.s, ts: (LIVE.nowTs()), src: scope
   };
   ent.tl = r.key;
   r.ent = ent;
@@ -517,6 +543,11 @@ else addSection();
 window.VoxelDiag = {
   angle: () => deg, setAngle: setDeg, count: () => recs.size,
   adoptTilt: ent => tlAdopt(ent),                                  // 貼り付けた傾きブロックを記録して部屋へ送る
+  // エディットモード用：傾きブロックの記録の取得・移動・削除・画面の配置
+  tilt: {
+    move: tlMove, place: tlPlaceEnt,
+    remove: key => tlRemove(key, true)
+  },
   dropTilt: ent => { if (ent.tl) tlRemove(ent.tl, true); else removeTilt(ent); }   // 元に戻す用
 };
 })();
