@@ -34,7 +34,7 @@ const S = {
   spawnAcc: 0,
   paused: false
 };
-const TP = { pend: null, mid: null, nextMid: false, color: null, undo: [] };
+const TP = { pend: null, mid: null, nextMid: false, color: null, undo: [], bus: false };
 let markersDirty = true, lastMarkerKey = '';
 
 function nodeNear(p) {
@@ -72,7 +72,7 @@ function curveOf(pts, cum, len) {
 }
 function clampN(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
-function addEdge(a, b, pts, color) {
+function addEdge(a, b, pts, color, bus) {
   const arr = pts.map(q => [q.x, q.y, q.z]);
   arr[0] = [a.p.x, a.p.y, a.p.z];
   arr[arr.length - 1] = [b.p.x, b.p.y, b.p.z];
@@ -82,7 +82,7 @@ function addEdge(a, b, pts, color) {
   }
   const len = cum[cum.length - 1];
   if (len < 0.5) return null;
-  const e = { id: S.seq++, a: a.id, b: b.id, pts: arr, cum, len, color };
+  const e = { id: S.seq++, a: a.id, b: b.id, pts: arr, cum, len, color, bus: !!bus };
   e.curve = curveOf(arr, cum, len);
   S.edges.set(e.id, e);
   a.out.push(e.id);
@@ -137,8 +137,9 @@ function saveSoon() { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 3
 function saveNow() {
   const data = {
     seq: S.seq, colorN: S.colorN, interval: S.interval, weights: S.weights,
-    nodes: [...S.nodes.values()].map(n => ({ id: n.id, p: [n.p.x, n.p.y, n.p.z], kmh: n.kmh, w: n.w })),
-    edges: [...S.edges.values()].map(e => ({ id: e.id, a: e.a, b: e.b, pts: e.pts, color: e.color })),
+    nodes: [...S.nodes.values()].map(n => ({ id: n.id, p: [n.p.x, n.p.y, n.p.z], kmh: n.kmh, w: n.w,
+      sp: n.sp ? { interval: n.sp.interval, busOn: n.sp.busOn, sw: n.sp.sw } : undefined })),
+    edges: [...S.edges.values()].map(e => ({ id: e.id, a: e.a, b: e.b, pts: e.pts, color: e.color, bus: !!e.bus })),
     customs: S.customs
   };
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
@@ -152,7 +153,7 @@ function loadNow() {
   S.weights = d.weights || {};
   S.customs = Array.isArray(d.customs) ? d.customs : [];
   for (const n of d.nodes || []) {
-    S.nodes.set(n.id, { id: n.id, p: new THREE.Vector3(n.p[0], n.p[1], n.p[2]), kmh: n.kmh || DEF_KMH, out: [], in: [], w: n.w || {} });
+    S.nodes.set(n.id, { id: n.id, p: new THREE.Vector3(n.p[0], n.p[1], n.p[2]), kmh: n.kmh || DEF_KMH, out: [], in: [], w: n.w || {}, sp: n.sp || null });
   }
   for (const e of d.edges || []) {
     const a = S.nodes.get(e.a), b = S.nodes.get(e.b);
@@ -162,7 +163,7 @@ function loadNow() {
       cum[i] = cum[i - 1] + Math.hypot(e.pts[i][0] - e.pts[i - 1][0], e.pts[i][1] - e.pts[i - 1][1], e.pts[i][2] - e.pts[i - 1][2]);
     }
     const len = cum[cum.length - 1];
-    const ed = { id: e.id, a: e.a, b: e.b, pts: e.pts, cum, len, color: e.color || '#ffffff' };
+    const ed = { id: e.id, a: e.a, b: e.b, pts: e.pts, cum, len, color: e.color || '#ffffff', bus: !!e.bus };
     ed.curve = curveOf(ed.pts, cum, len);
     S.edges.set(ed.id, ed);
     a.out.push(ed.id);
@@ -209,7 +210,7 @@ function defaultSpecs() {
       { w: 0.9, h: 0.9, d: 1.4, x: 0, y: 0.6, z: -0.4, c: RGB('#f2f2f2') },
       { w: 0.9, h: 0.7, d: 0.6, x: 0, y: 0.45, z: 0.7, c: RGB('#d64545') },
       wheel(0.45, 0.7), wheel(-0.45, 0.7), wheel(0.45, -0.2), wheel(-0.45, -0.2), wheel(0.45, -0.7), wheel(-0.45, -0.7)] },
-    { id: 'd_bus', name: 'バス', len: 2.6, front: 1.5, back: 0.6, boxes: [
+    { id: 'd_bus', name: 'バス', len: 2.6, front: 1.5, back: 0.6, bus: true, boxes: [
       { w: 0.9, h: 1.2, d: 2.4, x: 0, y: 0.7, z: 0, c: RGB('#f2c230') },
       { w: 0.92, h: 0.4, d: 2.0, x: 0, y: 1.05, z: 0, c: RGB('#2c3e50') },
       wheel(0.45, 0.8), wheel(-0.45, 0.8), wheel(0.45, -0.8), wheel(-0.45, -0.8)] }
@@ -222,14 +223,15 @@ function removeVariant(id) {
   variants.delete(id);
 }
 function makeVariant(id, name, len, front, back, parts, std) {
-  const v = { id, name, len, front, back, parts, ims: [], std: !!std };
+  const v = { id, name, len, front, back, parts, ims: [], std: !!std, bus: false };
   variants.set(id, v);
   return v;
 }
 function buildDefaults() {
   for (const sp of defaultSpecs()) {
-    makeVariant(sp.id, sp.name, sp.len, sp.front, sp.back,
+    const dv = makeVariant(sp.id, sp.name, sp.len, sp.front, sp.back,
       [{ geo: mergeBoxes(sp.boxes), mat: new THREE.MeshLambertMaterial({ vertexColors: true }) }], true);
+    dv.bus = !!sp.bus;
   }
 }
 // 自分の車（OBJ / FBX ＋ テクスチャ）。長い方向を前後（Z）にそろえ、指定の長さに合わせる
@@ -329,7 +331,9 @@ async function buildCustom(rec) {
   for (const p of parts) p.geo.applyMatrix4(M);
   // 同じ名前の車を作り直すときは、古い描画物を外す
   removeVariant('c_' + rec.id);
-  return makeVariant('c_' + rec.id, rec.name, rec.len * (rec.scale || 1), rec.front, rec.back, parts, false);
+  const cv = makeVariant('c_' + rec.id, rec.name, rec.len * (rec.scale || 1), rec.front, rec.back, parts, false);
+  cv.bus = !!rec.bus;
+  return cv;
 }
 async function buildAllCustoms() {
   for (const rec of S.customs) {
@@ -399,7 +403,7 @@ function tapGround() {
   const created = [];
   const a = TP.pend.node != null ? S.nodes.get(TP.pend.node) : (() => { const n = addNode(TP.pend.p); created.push(n.id); return n; })();
   const b = to.node != null ? S.nodes.get(to.node) : (() => { const n = addNode(to.p); created.push(n.id); return n; })();
-  const e = addEdge(a, b, samples.map(s => s.mid), TP.color);
+  const e = addEdge(a, b, samples.map(s => s.mid), TP.color, TP.bus);
   if (!e) { for (const id of created) S.nodes.delete(id); toast2('ルートが短すぎます'); return; }
   TP.undo.push({ edge: e.id, nodes: created });
   TP.pend = { node: b.id, p: b.p.clone() };       // 続けて伸ばせる
@@ -445,33 +449,43 @@ function edgeSpeed(e) {
   const a = S.nodes.get(e.a);
   return kmhToBps(a ? a.kmh : DEF_KMH) * e.curve;
 }
-function spawnOne() {
-  const starts = [...S.nodes.values()].filter(n => n.in.length === 0 && n.out.length > 0);
-  if (!starts.length) return;
-  const ready = [...variants.values()];
+// 出現地点（車が出てくる入り口）ごとの設定。未設定の地点は、今までの全体の設定を使う
+function nodeSp(n) {
+  if (!n.sp) n.sp = { interval: S.interval, busOn: true, sw: {}, acc: 0 };
+  return n.sp;
+}
+function spawnOne(n) {
+  const sp = nodeSp(n);
+  const ready = [...variants.values()].filter(v => sp.busOn || !v.bus);
   if (!ready.length) return;
   if (S.cars.length >= MAX_CARS) return;
-  const n = starts[Math.floor(Math.random() * starts.length)];
-  // 出現の重み（種類ごとの %）
+  // 出現の重み（この地点の設定。なければ全体の設定）
+  const wOf = v => sp.sw[v.id] != null ? sp.sw[v.id] : (S.weights[v.id] == null ? 1 : S.weights[v.id]);
   let tot = 0;
-  const ws = ready.map(v => { const w = S.weights[v.id] == null ? 1 : S.weights[v.id]; tot += w; return w; });
+  const ws = ready.map(v => { const w = wOf(v); tot += w; return w; });
   let r = Math.random() * tot, vi = 0;
   for (; vi < ws.length - 1; vi++) { if (r < ws[vi]) break; r -= ws[vi]; }
   const v = ready[vi];
-  const eid = pickOut(n);
+  const eid = pickOut(n, !!v.bus);
+  if (!eid) return;                                  // 一般車が出られる道がない（専用ラインだけ）
   const e = S.edges.get(eid);
   if (!e) return;
   // 出た直後に、同じ区間に車がいれば出さない
   for (const c of S.cars) if (c.e === eid && c.s < v.len + 0.8) return;
   S.cars.push({ vid: v.id, e: eid, s: 0, sp: 0, blocked: false, dead: false });
 }
-function pickOut(node) {
+// 次に進む区間を、重みで選ぶ。バスは、専用ラインがあればそれを優先。一般車は、専用ラインを通らない
+function pickOut(node, bus) {
+  const ok = node.out.filter(id => { const e = S.edges.get(id); return !!e && (bus || !e.bus); });
+  let pool = ok;
+  if (bus) { const lane = ok.filter(id => S.edges.get(id).bus); if (lane.length) pool = lane; }
+  if (!pool.length) return null;
   let tot = 0;
-  const ws = node.out.map(id => { const w = node.w[id] == null ? 1 : node.w[id]; tot += w; return w; });
-  if (tot <= 0) return node.out[0];
+  const ws = pool.map(id => { const w = node.w[id] == null ? 1 : node.w[id]; tot += w; return w; });
+  if (tot <= 0) return pool[0];
   let r = Math.random() * tot;
-  for (let i = 0; i < node.out.length; i++) { if (r < ws[i]) return node.out[i]; r -= ws[i]; }
-  return node.out[node.out.length - 1];
+  for (let i = 0; i < pool.length; i++) { if (r < ws[i]) return pool[i]; r -= ws[i]; }
+  return pool[pool.length - 1];
 }
 function simulate(dt) {
   // 区間ごとの車（先頭が小さい s の順＝後ろから）
@@ -526,7 +540,10 @@ function simulate(dt) {
           const dn = ie.len - o.s;
           const ov = V(o.vid);
           const oBack = ov ? ov.back : 0.4;
-          if (dn < dc && dn < myFront + oBack + 1.2) { blocked = true; break; }
+          const oBus = !!(ov && ov.bus), myBus = !!(v && v.bus);
+          // 一般車は、もう交差点に入っている車は譲らない（譲り合いで止まるのを防ぐ）。近づいてくるバスには譲る
+          const extra = (!myBus && oBus && dc > 1.5) ? 4 : 0;
+          if (dn < dc + extra && dn < myFront + oBack + 1.2) { blocked = true; break; }
         }
         if (blocked) break;
       }
@@ -541,7 +558,7 @@ function simulate(dt) {
     while (c.s >= cur.len && !c.dead) {
       const nd = S.nodes.get(cur.b);
       if (!nd || !nd.out.length) { c.dead = true; break; }        // ルートの終点に着いたら消す
-      const next = S.edges.get(pickOut(nd));
+      const next = S.edges.get(pickOut(nd, !!(v && v.bus)));
       if (!next) { c.dead = true; break; }
       c.s -= cur.len;                                             // 次の区間へ、はみ出した分を持ち越す
       c.e = next.id;
@@ -720,6 +737,7 @@ hud.innerHTML = `
     <button class="tbtn" data-a="mid">中間点</button>
     <button class="tbtn" data-a="stop">ここで止める</button>
     <button class="tbtn" data-a="undo">1つ戻す</button>
+    <button class="tbtn" data-a="busline">バスライン：OFF</button>
     <button class="tbtn" data-a="set">車・出現の設定</button>
   </div>
   <div class="info" id="trInfo"></div>`;
@@ -732,6 +750,11 @@ hud.addEventListener('click', e => {
   else if (a === 'stop') { TP.pend = null; TP.mid = null; TP.nextMid = false; TP.color = null; toast2('ルートの途中を止めました'); }
   else if (a === 'undo') undoLast();
   else if (a === 'set') openSetPanel();
+  else if (a === 'busline') {
+    TP.bus = !TP.bus;
+    b.textContent = 'バスライン：' + (TP.bus ? 'ON' : 'OFF');
+    toast2(TP.bus ? 'これから引く区間は、バス専用ラインになります（一般車は通れません）' : 'これから引く区間は、通常の道路になります');
+  }
 });
 function updateHud() {
   const show = holding() && started && !menuOpen && !paused;
@@ -767,6 +790,18 @@ panel.addEventListener('click', e => { if (e.target === panel) closeP(); });
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // 繋ぎ目の設定（速度・分岐の確率・そこから伸ばす・消す）
+// 出現地点の設定（間隔・バスを出すか・車の種類ごとの重み）
+function startHtml(n) {
+  const sp = nodeSp(n);
+  const rows = [...variants.values()].map(v => {
+    const val = sp.sw[v.id] != null ? sp.sw[v.id] : (S.weights[v.id] == null ? 1 : S.weights[v.id]);
+    return `<div class="rowv">${esc(v.name)}${v.bus ? '（バス）' : ''} の重み <input type="number" min="0" step="1" value="${val}" data-spw="${v.id}" style="width:64px"></div>`;
+  }).join('');
+  return `<h3>この出現地点の設定</h3>
+    <div class="rowv">出現の間隔（秒）<input type="number" min="0.5" step="0.5" value="${sp.interval}" data-spi="1" style="width:70px"></div>
+    <div class="rowv"><label><input type="checkbox" data-spb="1" ${sp.busOn ? 'checked' : ''}> バスを出す</label></div>
+    ${rows}`;
+}
 function openNodePanel(id) {
   const n = S.nodes.get(id);
   if (!n) return;
@@ -776,13 +811,15 @@ function openNodePanel(id) {
     const pct = Math.round((n.w[eid] == null ? 1 : n.w[eid]) / sum * 100);
     return `<div class="rowv">→ 区間${i + 1}（${Math.round(e.len)}マス）
       <span style="color:${e.color}">■</span>
-      重み <input type="number" min="0" step="1" value="${n.w[eid] == null ? 1 : n.w[eid]}" data-w="${eid}" style="width:64px">
+      ${e.bus ? '<b style="color:#c2185b">【バス専用】</b>' : ''} 重み <input type="number" min="0" step="1" value="${n.w[eid] == null ? 1 : n.w[eid]}" data-w="${eid}" style="width:64px">
       <span>約 ${pct}%</span></div>`;
   }).join('');
+  const startSec = (n.in.length === 0 && n.out.length) ? startHtml(n) : '';
   openP('node', `
     <h2>繋ぎ目の設定</h2>
     <div class="rowv">ここから先の速さ（km/h）<input type="number" min="5" max="120" step="1" value="${n.kmh}" id="trKmh" style="width:80px"></div>
     <p class="note">カーブが急なところでは、自動で少しだけ減速します。</p>
+    ${startSec}
     ${n.out.length >= 2 ? `<h3>分岐の確率（重みの比で決まります）</h3>${outs}` : (n.out.length ? `<h3>この先</h3>${outs}` : '<p class="note">この繋ぎ目から先には、まだルートがありません。</p>')}
     <div class="rowv" style="margin-top:10px">
       <button class="btn" data-a="extend">ここから別方向へ伸ばす</button>
@@ -799,6 +836,13 @@ function openNodePanel(id) {
   panel.onchange = e => {
     if (e.target.id === 'trKmh') { n.kmh = clampN(Number(e.target.value) || DEF_KMH, 5, 120); saveSoon(); }
     if (e.target.dataset.w) { n.w[e.target.dataset.w] = Math.max(0, Number(e.target.value) || 0); saveSoon(); openNodePanel(n.id); }
+    if (e.target.dataset.spi || e.target.dataset.spb || e.target.dataset.spw) {
+      const sp = nodeSp(n);
+      if (e.target.dataset.spi) sp.interval = clampN(Number(e.target.value) || S.interval, 0.5, 600);
+      if (e.target.dataset.spb) sp.busOn = e.target.checked;
+      if (e.target.dataset.spw) sp.sw[e.target.dataset.spw] = Math.max(0, Number(e.target.value) || 0);
+      saveSoon(); openNodePanel(n.id);
+    }
   };
 }
 
@@ -811,7 +855,7 @@ function openSetPanel() {
     return `<div class="rowv">
       <b>${esc(v.name)}</b>${custom ? '（自分の車）' : '（標準）'}
       出現の重み <input type="number" min="0" step="1" value="${S.weights[v.id] == null ? 1 : S.weights[v.id]}" data-wt="${v.id}" style="width:60px">
-      ${custom ? `判定 前<input type="number" min="0" step="0.1" value="${v.front}" data-df="${rec.id}" style="width:56px"> 後<input type="number" min="0" step="0.1" value="${v.back}" data-db="${rec.id}" style="width:56px">
+      ${custom ? `<label><input type="checkbox" data-bus="${rec.id}" ${v.bus ? 'checked' : ''}> バス</label> 判定 前<input type="number" min="0" step="0.1" value="${v.front}" data-df="${rec.id}" style="width:56px"> 後<input type="number" min="0" step="0.1" value="${v.back}" data-db="${rec.id}" style="width:56px">
       スケール<input type="number" min="0.1" max="10" step="0.1" value="${rec.scale || 1}" data-sc="${rec.id}" style="width:60px">倍
       <button class="btn danger" data-del="${rec.id}">削除</button>` : `判定 前${v.front} 後${v.back}`}
     </div>`;
@@ -826,6 +870,7 @@ function openSetPanel() {
     ${rows}
     <h3>自分の車を追加</h3>
     <div class="rowv">名前 <input id="trNm" value="マイカー" style="width:120px"></div>
+    <div class="rowv"><label><input type="checkbox" id="trBus"> バス（ONにすると、バスとして判定・出現します）</label></div>
     <div class="rowv">長さ（マス）<input id="trLn" type="number" step="0.1" value="2" style="width:70px">
       スケール倍率 <input id="trSc" type="number" min="0.1" max="10" step="0.1" value="1" style="width:60px"></div>
     <div class="rowv">判定 前 <input id="trFr" type="number" step="0.1" value="1" style="width:60px"> 後 <input id="trBk" type="number" step="0.1" value="0.5" style="width:60px"></div>
@@ -851,6 +896,10 @@ function openSetPanel() {
         toast2('スケールを反映しています…');
         buildCustom(rec).then(() => toast2('スケールを変更しました')).catch(() => toast2('読み込めませんでした'));
       }
+    }
+    if (t.dataset.bus) {
+      const rec = S.customs.find(c => c.id === Number(t.dataset.bus));
+      if (rec) { rec.bus = t.checked; const v = variants.get('c_' + rec.id); if (v) v.bus = t.checked; saveSoon(); }
     }
     if (t.dataset.df || t.dataset.db) {
       const id = Number(t.dataset.df || t.dataset.db);
@@ -890,6 +939,7 @@ function openSetPanel() {
       const id = Date.now() % 1000000000;
       const rec = {
         id, name: document.getElementById('trNm').value || 'マイカー',
+        bus: document.getElementById('trBus').checked,
         len: clampN(Number(document.getElementById('trLn').value) || 2, 0.8, 6),
         scale: clampN(Number(document.getElementById('trSc').value) || 1, 0.1, 10),
         front: Math.max(0, Number(document.getElementById('trFr').value) || 0),
@@ -972,8 +1022,12 @@ function frame(now) {
   if (fm === 'remote') applyRemoteCars();                 // ほかの人が計算している車は、位置だけ受け取って表示する
   else if (started && !paused) {
     simulate(dt);
-    S.spawnAcc += dt;
-    if (S.spawnAcc >= S.interval) { S.spawnAcc = 0; spawnOne(); }
+    for (const n of S.nodes.values()) {                       // 出現地点ごとに、それぞれの間隔で出す
+      if (n.in.length || !n.out.length) continue;
+      const sp = nodeSp(n);
+      sp.acc = (sp.acc || 0) + dt;
+      if (sp.acc >= sp.interval) { sp.acc = 0; spawnOne(n); }
+    }
     if (fm === 'owner') VoxelFrame.publish('traffic', () => S.cars.map(packCar));
   }
   renderCars();
