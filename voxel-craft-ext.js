@@ -443,10 +443,11 @@ function autoScaleFor(raw) {
 function placeModel(raw, scale, place) {
   const outer = new THREE.Group();
   raw.scale.setScalar(scale);
-  // Blockbenchの位置のまま：ブロックの角（0〜16px＝0〜1ブロック）を、ブロックの角に合わせる。
-  // 出力の原点はブロックの中心（底面）なので、角の分だけずらす。中心に寄せない
+  // Blockbenchの位置のまま：Blockbenchの原点（0,0,0）をブロックの中心（底面）に合わせる。
+  // 道路・線路のBlockbench位置モードと同じ扱い（ずらさない）。
+  // 以前は角（-0.5,-0.5）へずらしていたため、原点中心に作ったモデルがブロックの端にずれていた
   if (place === 'raw') {
-    raw.position.set(-0.5, 0, -0.5);
+    raw.position.set(0, 0, 0);
     outer.add(raw);
     outer.updateMatrixWorld(true);
     return outer;
