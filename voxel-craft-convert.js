@@ -38,6 +38,9 @@
     // 電車の窓口：保存された車両（blocks の文字列）を読み取る（テクスチャは別に読み込んでから渡す）
     parseBlocks,
     buildRoot,
+    // 船の窓口：範囲のブロックを集める（三角形のまとまり）と、その入れ物
+    gather: gatherRange,
+    newBuckets,
     _pure: { qrot, qmul, normalize, buildObj, buildMtl, cubeFaceTris }
   };
 

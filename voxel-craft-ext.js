@@ -1,7 +1,7 @@
 /* キーボード操作（voxel-craft-keys.js）を、この場所と同じ場所から読み込む（読み込み忘れを防ぐ） */
 (function () {
   const here = document.currentScript && document.currentScript.src ? document.currentScript.src : location.href;
-  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js'], ['VoxelEdit', 'voxel-craft-edit.js'], ['VoxelConvert', 'voxel-craft-convert.js'], ['VoxelHelp', 'voxel-craft-help.js']]) {
+  for (const [flag, file] of [['__vcKeys', 'voxel-craft-keys.js'], ['__vcPhone', 'voxel-craft-phone.js'], ['VoxelEconomy', 'voxel-craft-economy.js'], ['VoxelProfit', 'voxel-craft-profit.js'], ['VoxelRoute', 'voxel-craft-route.js'], ['VoxelEdit', 'voxel-craft-edit.js'], ['VoxelConvert', 'voxel-craft-convert.js'], ['VoxelHelp', 'voxel-craft-help.js'], ['VoxelShip', 'voxel-craft-ship.js']]) {
     if (window[flag] || document.querySelector('script[src*="' + file + '"]')) continue;
     const s = document.createElement('script');
     s.src = new URL(file, here).href;
@@ -29,7 +29,7 @@
 const EXT_KEY = 'voxelcraft_ext_v1';
 // ブロックIDは2バイト（ワールドのマスを Uint16 で保存）。カスタムは 100〜65535 を使える
 const CUSTOM_BASE = 100, CUSTOM_MAX = 65535;
-const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55, T_TRAFFIC = 56, T_CROWD = 57, T_SOUND = 58, T_PHONE = 59;
+const T_WAND = 50, T_DROPPER = 51, T_FILL = 52, T_COPY = 53, T_PASTE = 54, T_PASTE_ROT = 55, T_TRAFFIC = 56, T_CROWD = 57, T_SOUND = 58, T_PHONE = 59, T_SHIP_MAKER = 60;
 const TOOLS = {
   50: { name: 'ステッキ', icon: '🪄', desc: 'タップで範囲の始点・終点を指定（3回目からは繰り返し）' },
   51: { name: 'スポイト', icon: '🧪', desc: 'ブロックをタップして登録（空気も登録できます）' },
@@ -40,9 +40,10 @@ const TOOLS = {
   56: { name: '自動車交通制御', icon: '🚗', desc: 'ルートを引く・分岐・速度・車の設定（ルートマーカーは持っている間だけ見えます）' },
   57: { name: '人混みマネージャー', icon: '👥', desc: '範囲を選んで人混みを作る（持っている間だけ範囲が見えます）' },
   58: { name: '音声ブロック', icon: '🔊', desc: '地面をタップで置きます。視点を合わせると「設定」が出ます（長押しで削除）' },
-  59: { name: 'マイ端末', icon: '📱', desc: '持っている間、「端末を開く」ボタンで端末のメニューを開けます' }
+  59: { name: 'マイ端末', icon: '📱', desc: '持っている間、「端末を開く」ボタンで端末のメニューを開けます' },
+  60: { name: '船メーカー', icon: '⛵', desc: 'ステッキで範囲を選び「船にする」。海に浮かべて、X キーで乗ります' }
 };
-const isTool = id => id >= T_WAND && id <= T_PHONE;
+const isTool = id => (id >= T_WAND && id <= T_PHONE) || id === T_SHIP_MAKER;
 const AIR_ID = 0;
 const ORIENT_NAMES = { fixed: '向き固定（ノーマル）', four: '4方向（かまど風）', free: '自由（原木・ボタン風）' };
 
@@ -1758,6 +1759,7 @@ window.stopAct = function (kind) {
 function toolPrimary(id) {
   if (id === T_WAND) return wandTap();
   if (id === T_DROPPER) return dropperTap();
+  if (id === T_SHIP_MAKER) { if (window.VoxelShip) VoxelShip.tap(); return; }
   toast(TOOLS[id].name + '：' + TOOLS[id].desc);
 }
 
@@ -2506,7 +2508,7 @@ function renderToolsSection() {
   const show = ext.curCat === '全て' || ext.curCat === '道具';
   sec.style.display = show ? 'block' : 'none';
   if (!show) return;
-  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE].map(id => `
+  const tools = [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE, T_SHIP_MAKER].map(id => `
     <div class="ext-item">
       <div style="font-size:30px;line-height:72px">${TOOLS[id].icon}</div>
       <div>${TOOLS[id].name}</div>
@@ -4338,7 +4340,7 @@ function bagNameOf(id) {
 function bagCatalog(cat) {
   const out = [];
   if (cat === '全て' || cat === '標準') for (const id of DEFAULT_IDS) out.push({ id, name: BLOCK_INFO[id].name, cat: '標準' });
-  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
+  if (cat === '全て' || cat === '道具') for (const id of [T_WAND, T_DROPPER, T_FILL, T_COPY, T_PASTE, T_PASTE_ROT, T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE, T_SHIP_MAKER]) out.push({ id, name: TOOLS[id].name, cat: '道具' });
   for (const d of ext.defs) if (cat === '全て' || d.category === cat) out.push({ id: d.id, name: d.name, cat: d.category });
   return out;
 }
@@ -4474,6 +4476,7 @@ function init() {
   BLOCK_INFO[T_CROWD] = { name: '人混みマネージャー', color: '#445566' };
   BLOCK_INFO[T_SOUND] = { name: '音声ブロック', color: '#5a4a22' };
   BLOCK_INFO[T_PHONE] = { name: 'マイ端末', color: '#2a313c' };
+  BLOCK_INFO[T_SHIP_MAKER] = { name: '船メーカー', color: '#2d4a66' };
   hookSettings();
   wire();
   syncTurboUI();
@@ -4581,7 +4584,7 @@ async function applyRemoteExt(text) {
   return 'applied';
 }
 window.VoxelExt = {
-  T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
+  T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE, T_SHIP_MAKER, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
   keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp, setPlaceHook,
   applyRemoteExt, hydrated: () => hydrateReady, makeModelInstance,
   // ステッキで始点と終点を選び終えているときの範囲（利益地点の設定に使う）。選んでいなければ null
