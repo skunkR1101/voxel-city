@@ -13,6 +13,7 @@
 'use strict';
 
 const LIB_KEY = 'voxelcraft_train_v1';
+const LIB_BAK_KEY = 'voxelcraft_train_bak_v1';   // 車両の数が減る保存の直前の内容（予備）
 const ROAD_KEY = 'voxelcraft_road_v1';
 const GAP = 0.4;
 const DEG = Math.PI / 180;
@@ -100,7 +101,15 @@ function saveLib() {
       const cars = [];
       for (const c of lib.cars) cars.push(await slimOf(c));
       if (seq !== libSeq) return true;        // 後から新しい保存があれば、そちらを書く
-      localStorage.setItem(LIB_KEY, JSON.stringify({ cars: cars.concat(pendingRaw), comp: lib.comp, maxKmh: lib.maxKmh }));
+      const next = JSON.stringify({ cars: cars.concat(pendingRaw), comp: lib.comp, maxKmh: lib.maxKmh });
+      // 車両の数が減るときは、書き換える前の内容を予備に残す（うっかり消えたときに戻せるように）
+      const prev = localStorage.getItem(LIB_KEY);
+      try {
+        const pn = prev ? ((JSON.parse(prev).cars || []).length) : 0;
+        const nn = cars.length + pendingRaw.length;
+        if (prev && nn < pn) localStorage.setItem(LIB_BAK_KEY, prev);
+      } catch (e) {}
+      localStorage.setItem(LIB_KEY, next);
       return true;
     } catch (e) {
       tmsg('保存できませんでした（' + (e && e.message ? e.message : '保存領域が足りません') + '）');
@@ -125,7 +134,11 @@ async function loadLib() {
   built.clear();
   window.dispatchEvent(new Event('vc-train-lib'));
   if (pend.length && retryN++ < 200) setTimeout(() => { loadLib(); }, 1500);   // 素材が届くのを待って、もう一度作る
-  else retryN = 0;
+  else {
+    // 素材が読めないまま終わった車両は、消えたように見えるので知らせる（データは消さずに残す）
+    if (pend.length) tmsg('読み込めない車両が' + pend.length + '件あります（素材が見つかりません）。データは残っています');
+    retryN = 0;
+  }
 }
 // ============================================================
 // 読み込みユーティリティ

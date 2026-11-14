@@ -113,10 +113,15 @@ function writeStore(key, json) {
   VoxelExt.blobPut('idb:' + key, json).catch(e => console.error('保存できませんでした', e));
 }
 async function readStore(key) {
-  let json = null;
-  try { json = await VoxelExt.blobGet('idb:' + key); } catch (e) {}
-  if (!json) json = localStorage.getItem(key);
-  return json;
+  // 2か所（IndexedDB と localStorage）に同じ記録がある。古い空の方（"[]"など）で、新しい作業が隠れないように、
+  // 件数の多い方を使う（同じなら localStorage を使う）
+  let a = null, b = null;
+  try { a = await VoxelExt.blobGet('idb:' + key); } catch (e) {}
+  try { b = localStorage.getItem(key); } catch (e) {}
+  if (!a) return b;
+  if (!b || a === b) return a;
+  const n = t => { try { const v = JSON.parse(t); return Array.isArray(v) ? v.length : -1; } catch (e) { return -1; } };
+  return n(a) > n(b) ? a : b;
 }
 let diagLoaded = false;
 // この端末だけの斜めブロック（保存する）。部屋にいる間は部屋の記録だけを画面に出し、この端末のものは隠す（傾きブロックと同じ考え方）
@@ -471,6 +476,7 @@ async function tlLoadLocal() {
     if (!tlAddVisual(r)) tlWaiting.push(r);
   }
   tlLocalReady = true;
+  tlSaveLocal();                                // 読み込み中に置いたものも、合わせて保存し直す
 }
 function tlSwitchScope(s) {
   for (const r of [...tlRecs.values()]) if (r.src !== s) tlDropRec(r);
