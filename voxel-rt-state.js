@@ -15,7 +15,7 @@ const L = window.VoxelRTLogic;
 const KEYS = [
   'voxelcraft_road_v1', 'voxelcraft_dia_v1', 'voxelcraft_station_v1', 'voxelcraft_train_v1',
   'voxelcraft_traffic_v1', 'voxelcraft_crowd_v1', 'voxelcraft_ext_v1', 'voxelcraft_bag_v1',
-  'voxelcraft_defdel_v1', 'voxelcraft_tilt_v1', 'voxelcraft_bstate_v1'
+  'voxelcraft_defdel_v1', 'voxelcraft_tilt_v1', 'voxelcraft_bstate_v1', 'voxelcraft_ship_v1'
 ];
 const POLL_MS = 2000;
 const JOIN_CHECK_MS = 4000;
@@ -186,7 +186,7 @@ function joinCheck(room) {
 
 // 画面を開いたまま、相手の変更が届いたとき：ボタンで反映する（画面は自動では変えない）
 // 車両（train）とダイヤ（dia）は、相手の変更を、確認なしでそのまま反映する（素材がそろってから）
-const AUTO = { voxelcraft_train_v1: 'train', voxelcraft_dia_v1: 'dia' };
+const AUTO = { voxelcraft_train_v1: 'train', voxelcraft_dia_v1: 'dia', voxelcraft_ship_v1: 'ship' };
 function autoApply(room) {
   for (const k of Object.keys(AUTO)) {
     const rv = kvValue(room, k);
