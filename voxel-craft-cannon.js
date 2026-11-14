@@ -301,7 +301,7 @@
   function frame(now) {
     const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
     try {
-      if (window.VoxelShip && S()._pure && window.scene) {
+      if (window.VoxelShip && S()._pure && typeof scene !== 'undefined') {
         if (aim) aimTick(dt);
         syncGroups(dt);
         shellsTick(dt);

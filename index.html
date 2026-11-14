@@ -1948,7 +1948,7 @@ function updateAudio(dt) {
 // ============================================================
 // レイキャスト（DDA）と破壊・設置
 // ============================================================
-function raycastBlock(maxDist) {
+function raycastBlock(maxDist, waterSolid) {
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
   const ox = camera.position.x, oy = camera.position.y, oz = camera.position.z;
@@ -1963,7 +1963,7 @@ function raycastBlock(maxDist) {
   let nx = 0, ny = 0, nz = 0, t = 0;
   for (let i = 0; i < 300 && t < maxDist; i++) {
     const b = getBlock(x, y, z);
-    if (b !== AIR && b !== WATER) return { x, y, z, nx, ny, nz, b };
+    if (b !== AIR && (b !== WATER || waterSolid)) return { x, y, z, nx, ny, nz, b };
     if (tX < tY && tX < tZ) { t = tX; tX += dX; x += sx; nx = -sx; ny = 0; nz = 0; }
     else if (tY < tZ) { t = tY; tY += dY; y += sy; nx = 0; ny = -sy; nz = 0; }
     else { t = tZ; tZ += dZ; z += sz; nx = 0; ny = 0; nz = -sz; }
@@ -1971,7 +1971,7 @@ function raycastBlock(maxDist) {
   return null;
 }
 function updateTarget() {
-  target = raycastBlock(7);
+  target = raycastBlock(7, HOTBAR[selIdx] === WATER);
   if (target) {
     highlight.visible = true;
     highlight.position.set(target.x + 0.5, target.y + 0.5, target.z + 0.5);

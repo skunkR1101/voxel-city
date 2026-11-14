@@ -394,7 +394,6 @@ function helmTick(dt) {
   advanceShip(s, dt, thr, rud, blockedNow);
   s.roll += (-s.turnRate * 0.25 - s.roll) * Math.min(1, dt * 2);
   updateRoot(s);
-  player.yaw = s.yaw;
   if (helm.seat) { const w = seatWorld(s, helm.seat); player.pos.set(w.x, w.y, w.z); }
   else player.pos.set(s.px, s.py + s.maxTop + 0.2, s.pz);
   player.vel.set(0, 0, 0);

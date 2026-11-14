@@ -1477,7 +1477,7 @@ function facePoint(h) {
 }
 
 function pickTarget() {
-  const v = origRaycast(7);
+  const v = origRaycast(7, HOTBAR[selIdx] === WATER);
   let vd = Infinity;
   if (v) vd = Math.hypot(v.x + 0.5 - camera.position.x, v.y + 0.5 - camera.position.y, v.z + 0.5 - camera.position.z);
 
