@@ -240,7 +240,11 @@ function toast(t) {
 }
 function startSingle(fresh) {
   const v = document.getElementById('wsSeed').value;
-  if (fresh) applySeed(v, true);
+  if (fresh) {
+    applySeed(v, true);
+    // 新しい世界を作るときだけ、保存された傾きブロック（0.5マスなど）も消す
+    if (window.VoxelDiag && VoxelDiag.wipeStoredTilts) VoxelDiag.wipeStoredTilts();
+  }
   hideTitle();
   startGame();
 }

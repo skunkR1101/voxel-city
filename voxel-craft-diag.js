@@ -504,12 +504,16 @@ setInterval(() => {
   tlRetry();
 }, 500);
 // 新しい世界を作ったときは、この端末のローカルの傾きブロックも消す
+// 注意：部屋に入るときも「新しい世界」の合図が出る（保存は消さない）。
+// 画面から外したものは、部屋を出たときに保存から読み直す。保存を消すのは、新しい世界を作るときだけ（wipeStoredTilts）
 window.addEventListener('voxelworld:fresh', () => {
-  if (tlScopeNow() !== 'local') return;
+  for (const r of [...tlRecs.values()]) if (r.src === 'local') tlDropRec(r);
+});
+function wipeStoredTilts() {
   for (const r of [...tlRecs.values()]) if (r.src === 'local') tlDropRec(r);
   tlLocalReady = true;
   writeStore(TL_KEY, '[]');
-});
+}
 
 // ============================================================
 // 7. 設定画面の項目（角度）
@@ -554,6 +558,7 @@ window.VoxelDiag = {
     move: tlMove, place: tlPlaceEnt,
     remove: key => tlRemove(key, true)
   },
-  dropTilt: ent => { if (ent.tl) tlRemove(ent.tl, true); else removeTilt(ent); }   // 元に戻す用
+  dropTilt: ent => { if (ent.tl) tlRemove(ent.tl, true); else removeTilt(ent); },   // 元に戻す用
+  wipeStoredTilts                                                  // 新しい世界を作るときだけ、保存された傾きブロックを消す
 };
 })();
