@@ -17,6 +17,7 @@ if (!VX || !VC || !VC.gather || typeof VX.T_SHIP_MAKER !== 'number') {
 }
 
 const T_SHIP = VX.T_SHIP_MAKER;
+const T_CANNON_ITEM = typeof VX.T_CANNON === 'number' ? VX.T_CANNON : -1;
 const META_KEY = 'voxelcraft_ship_v1';
 const SHAPE_PREFIX = 'shipblk:';
 const RETRY_MS = 3000, RETRY_MAX = 10;
@@ -75,6 +76,9 @@ function footprintHits(perim, px, py, pz, yaw, blocked) {
   return false;
 }
 
+// 船の進む向き（正面の設定を足す。正面 0＝奥(-z)、1＝西(-x)、2＝手前(+z)、3＝東(+x)）
+function fwdAngle(s) { return s.yaw + ((s.front || 0) * Math.PI / 2); }
+
 // 1回分の運転。thr：+1 前進・-1 後進・0 なし、rud：+1 右・-1 左・0 まっすぐ
 // 船の前は (-sin yaw, -cos yaw)。右に切る＝向きの角度（yaw）が減る
 function stepShip(s, dt, thr, rud, blocked) {
@@ -93,7 +97,8 @@ function stepShip(s, dt, thr, rud, blocked) {
 
   // 進む：ぶつかったら壁沿いに滑る。どちらにも進めなければ止まって跳ね返る
   const d = s.v * dt;
-  const fx = -Math.sin(s.yaw) * d, fz = -Math.cos(s.yaw) * d;
+  const fa = fwdAngle(s);
+  const fx = -Math.sin(fa) * d, fz = -Math.cos(fa) * d;
   let bumped = false;
   if (Math.abs(d) > 0) {
     if (!footprintHits(s.perim, s.px + fx, s.py, s.pz + fz, s.yaw, blocked)) { s.px += fx; s.pz += fz; }
@@ -134,6 +139,35 @@ function seatWorld(s, seat) {
   return { x: s.px + c * lx + sn * lz, y: s.py + seat.y + 1, z: s.pz - sn * lx + c * lz };
 }
 
+// 世界の1マス（x,y,z）が、船のどこかのマスに入っているか
+function shipSolidAt(s, x, y, z) {
+  const dx = x + 0.5 - s.px, dz = z + 0.5 - s.pz;
+  const c = Math.cos(s.yaw), sn = Math.sin(s.yaw);
+  const lx = c * dx - sn * dz, lz = sn * dx + c * dz;
+  const kx = Math.floor(lx - s.ox) + s.ox, kz = Math.floor(lz - s.oz) + s.oz;
+  return s.cellKeys.has(kx + ',' + (y - s.py) + ',' + kz);
+}
+function shipsCollideBox(px, py, pz) {
+  if (!ships.length) return false;
+  const x0 = Math.floor(px - HW), x1 = Math.floor(px + HW - 1e-6);
+  const y0 = Math.floor(py), y1 = Math.floor(py + PH - 1e-6);
+  const z0 = Math.floor(pz - HW), z1 = Math.floor(pz + HW - 1e-6);
+  for (const s of ships) {
+    if (Math.hypot(s.px - px, s.pz - pz) > s.radius + 2) continue;
+    for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+      if (shipSolidAt(s, x, y, z)) return true;
+    }
+  }
+  return false;
+}
+const origBoxCollides = window.boxCollides;
+if (typeof origBoxCollides === 'function') {
+  window.boxCollides = function (px, py, pz) {
+    if (origBoxCollides(px, py, pz)) return true;
+    return shipsCollideBox(px, py, pz);
+  };
+}
+
 // ============================================================
 // 状態
 // ============================================================
@@ -150,7 +184,9 @@ let board_ = null;         // 「乗る」ボタン
 let bar = null;            // ホットバーの上の帯
 let pendingSeats = [];     // 選んでいる範囲の座席（まだ船になっていない）
 let pendingKey = '';       // どの範囲の座席か
-let tapMode = 'seat';      // タップの種類：'seat'（座席）／'helm'（操縦席）
+let tapMode = 'seat';      // タップの種類：'seat'（座席）／'helm'（操縦席）／'cannon'（大砲）
+const KIND_NAME = { seat: '座席', helm: '操縦席', cannon: '大砲' };
+const KIND_NEXT = { seat: 'helm', helm: 'cannon', cannon: 'seat' };
 
 const waterFloat = draft => SEA + 1 - draft;   // 海面（SEA の上）から draft マス下に底を置く
 const shapeKey = rec => (rec.shape && rec.shape.__blob) || (SHAPE_PREFIX + rec.id);
@@ -210,7 +246,10 @@ async function buildShip(rec) {
   for (const c of cellList) maxTop = Math.max(maxTop, c.y + 1);
   const s = {
     rec, root, perim: buildCols(cellList), maxTop, cls: rec.cls, draft: rec.draft,
-    seats: rec.seats || [],
+    seats: rec.seats || [], cannons: rec.cannons || [], front: rec.front || 0,
+    cellKeys: new Set(cellList.map(c => c.x + ',' + c.y + ',' + c.z)),
+    ox: ((cellList.length ? cellList[0].x : 0) % 1 + 1) % 1, oz: ((cellList.length ? cellList[0].z : 0) % 1 + 1) % 1,
+    radius: cellList.reduce((m, c) => Math.max(m, Math.hypot(c.x + 0.5, c.z + 0.5)), 0) + 1,
     px: rec.px, pz: rec.pz, yaw: rec.yaw || 0, py: waterFloat(rec.draft),
     v: 0, turnRate: 0, roll: 0, t: 0, target: null, sendT: 0
   };
@@ -250,6 +289,8 @@ function reloadShips() {
     const r = byId.get(s.rec.id);
     s.rec = r;
     s.seats = r.seats || [];
+    s.cannons = r.cannons || [];
+    s.front = r.front || 0;
     const moving = (helm && helm.ship === s) || (seated && seated.ship === s);
     if (!moving && s.cls !== r.cls) s.cls = r.cls;
     if (!moving && s.draft !== r.draft) { s.draft = r.draft; s.py = waterFloat(r.draft); }
@@ -413,6 +454,7 @@ window.addEventListener('keydown', e => {
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
   if (typeof menuOpen !== 'undefined' && menuOpen) return;
+  if (window.VoxelCannon && VoxelCannon.isAiming && VoxelCannon.isAiming()) return;
   if (helm || seated) { dismount(); return; }
   boardCandidate(nearestBoardable());
 });
@@ -500,21 +542,21 @@ function ensureBar() {
     if (!b) return;
     const a = b.dataset.b;
     if (a === 'make') { ensurePanel(); makeFromSelection(); }
-    else if (a === 'mode') { tapMode = tapMode === 'seat' ? 'helm' : 'seat'; updateBar(true); say(tapMode === 'seat' ? 'タップで座席を追加します' : 'タップで操縦席を追加します'); }
+    else if (a === 'mode') { tapMode = KIND_NEXT[tapMode]; updateBar(true); say('タップで' + KIND_NAME[tapMode] + 'を追加します'); }
     else if (a === 'clear') { pendingSeats = []; pendingKey = ''; say('座席をクリアしました'); }
     else if (a === 'list') openPanel();
   });
 }
 function updateBar(force) {
   ensureBar();
-  const held = !helm && !seated && typeof HOTBAR !== 'undefined' && typeof selIdx !== 'undefined' && HOTBAR[selIdx] === T_SHIP;
+  const held = !helm && !seated && typeof HOTBAR !== 'undefined' && typeof selIdx !== 'undefined' && (HOTBAR[selIdx] === T_SHIP || HOTBAR[selIdx] === T_CANNON_ITEM);
   bar.style.display = held ? 'flex' : 'none';
   if (held) {
     const hb = document.getElementById('hotbar');
     const top = hb ? hb.getBoundingClientRect().top : window.innerHeight - 80;
     bar.style.top = Math.max(0, top - 50) + 'px';
     const m = bar.querySelector('[data-b="mode"]');
-    m.textContent = 'タップ：' + (tapMode === 'seat' ? '座席' : '操縦席');
+    m.textContent = 'タップ：' + KIND_NAME[tapMode];
     const n = pendingSeats.length;
     bar.querySelector('[data-b="clear"]').textContent = '座席クリア' + (n ? '（' + n + '）' : '');
   }
@@ -522,18 +564,19 @@ function updateBar(force) {
 setInterval(() => updateBar(false), 200);
 
 // 範囲内のブロックをタップ → 座席（操縦席）を追加／外す
-function seatTap() {
+function seatTap(forced) {
+  const kind = forced || tapMode;
   const r = VX.wandRange ? VX.wandRange() : null;
-  if (!r) { say('ステッキで範囲を選んでから、範囲内のブロックをタップすると座席になります'); return; }
+  if (!r) { say('ステッキで範囲を選んでから、範囲内のブロックをタップすると' + KIND_NAME[kind] + 'になります'); return; }
   const h = raycastBlock(7);
   if (!h) { say('範囲内のブロックをタップしてください'); return; }
   const inside = h.x >= r.min[0] && h.x <= r.max[0] && h.y >= r.min[1] && h.y <= r.max[1] && h.z >= r.min[2] && h.z <= r.max[2];
   if (!inside) { say('選んだ範囲の中のブロックをタップしてください'); return; }
   const key = r.min.join(',') + '|' + r.max.join(',');
   if (pendingKey !== key) { pendingSeats = []; pendingKey = key; }
-  const idx = pendingSeats.findIndex(p => p.x === h.x && p.y === h.y && p.z === h.z);
-  if (idx >= 0) { pendingSeats.splice(idx, 1); say('座席を外しました'); }
-  else { pendingSeats.push({ x: h.x, y: h.y, z: h.z, k: tapMode }); say((tapMode === 'seat' ? '座席' : '操縦席') + 'を追加しました（' + pendingSeats.length + '）'); }
+  const idx = pendingSeats.findIndex(p => p.x === h.x && p.y === h.y && p.z === h.z && p.k === kind);
+  if (idx >= 0) { pendingSeats.splice(idx, 1); say(KIND_NAME[kind] + 'を外しました'); }
+  else { pendingSeats.push({ x: h.x, y: h.y, z: h.z, k: kind }); say(KIND_NAME[kind] + 'を追加しました（' + pendingSeats.length + '）'); }
   updateBar(true);
 }
 
@@ -562,6 +605,8 @@ function ensurePanel() {
         <select id="shNewCls" style="padding:4px">${CLASSES.map((c, i) => `<option value="${i}" ${i === 1 ? 'selected' : ''}>${c.name}</option>`).join('')}</select></div>
       <div style="margin:6px 0">沈む深さ（下から何マス海に沈むか）
         <input id="shNewDraft" type="number" min="0" max="10" step="1" value="1" style="width:70px;padding:4px"></div>
+      <div style="margin:6px 0">正面（船が前に進む向き）
+        <select id="shNewFront" style="padding:4px">${FRONT_OPTS(0)}</select></div>
       <button data-s="make" style="padding:8px 14px;background:#2e7d4f;color:#fff;border:0;border-radius:8px">選んだ範囲を船にする</button>
     </div>
     <div style="border:1px solid #ddd;border-radius:8px;padding:8px;margin:8px 0">
@@ -595,7 +640,9 @@ function renderPanel() {
       <div><b>${esc(rec.name)}</b>${on ? '' : '<span style="color:#a33">（形のデータを読み込み中）</span>'}
         <span style="color:#666;font-size:12px">座席 ${nSeat}・操縦席 ${nHelm}</span></div>
       <div style="margin:4px 0">重さ <select data-f="cls" style="padding:2px">${CLASSES.map((c, i) => `<option value="${i}" ${i === rec.cls ? 'selected' : ''}>${c.name}</option>`).join('')}</select>
-        沈む深さ <input data-f="draft" type="number" min="0" max="10" step="1" value="${rec.draft}" style="width:60px;padding:2px"></div>
+        沈む深さ <input data-f="draft" type="number" min="0" max="10" step="1" value="${rec.draft}" style="width:60px;padding:2px">
+        正面 <select data-f="front" style="padding:2px">${FRONT_OPTS(rec.front || 0)}</select></div>
+      <div style="font-size:12px;color:#666">大砲 ${(rec.cannons || []).length}</div>
       <button data-s="save" data-id="${esc(rec.id)}" style="padding:2px 8px">設定を保存</button>
       <button data-s="seatsclear" data-id="${esc(rec.id)}" style="padding:2px 8px">座席を全部消す</button>
       <button data-s="restore" data-id="${esc(rec.id)}" style="padding:2px 8px">ブロックに戻す</button>
@@ -603,6 +650,9 @@ function renderPanel() {
     </div>`;
   }).join('');
 }
+
+const FRONT_NAMES = ['奥（北）', '左（西）', '手前（南）', '右（東）'];
+function FRONT_OPTS(sel) { return FRONT_NAMES.map((n, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${n}</option>`).join(''); }
 
 function readDraft(v) {
   const n = Math.round(Number(v));
@@ -616,6 +666,7 @@ async function makeFromSelection() {
   const name = (document.getElementById('shNew').value || '').trim() || '自作の船';
   const cls = Number(document.getElementById('shNewCls').value) || 0;
   const draft = readDraft(document.getElementById('shNewDraft').value);
+  const front = Number(document.getElementById('shNewFront').value) || 0;
 
   // 1. 範囲の中身と、底の高さ
   const cells = [];
@@ -658,10 +709,11 @@ async function makeFromSelection() {
   ]);
   // 座席（選んだ範囲のブロックの上）
   const key = r.min.join(',') + '|' + r.max.join(',');
-  const seats = pendingKey === key
+  const mine = pendingKey === key
     ? pendingSeats.filter(p => p.x >= r.min[0] && p.x <= r.max[0] && p.y >= r.min[1] && p.y <= r.max[1] && p.z >= r.min[2] && p.z <= r.max[2])
-        .map(p => ({ x: p.x - cx, y: p.y - base, z: p.z - cz, k: p.k === 'helm' ? 'helm' : 'seat' }))
     : [];
+  const seats = mine.filter(p => p.k !== 'cannon').map(p => ({ x: p.x - cx, y: p.y - base, z: p.z - cz, k: p.k === 'helm' ? 'helm' : 'seat' }));
+  const cannons = mine.filter(p => p.k === 'cannon').map(p => ({ x: p.x - cx, y: p.y - base, z: p.z - cz }));
 
   // 3. 海に浮かべられるか（選んだ範囲のブロックは、ぶつかる物に数えない）
   const perim = buildCols(localCells.map(c => ({ x: c[0], y: c[1], z: c[2] })));
@@ -670,7 +722,7 @@ async function makeFromSelection() {
 
   // 4. 先に保存する（保存できなければ、ブロックは消さない）
   const id = 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const rec = { id, name, cls, draft, px: cx, pz: cz, yaw: 0, seats, shape: { __blob: SHAPE_PREFIX + id } };
+  const rec = { id, name, cls, draft, front, px: cx, pz: cz, yaw: 0, seats, cannons, shape: { __blob: SHAPE_PREFIX + id } };
   const payload = JSON.stringify({ data, cells: localCells, savedCells, savedTilts });
   try { await VX.blobPut(SHAPE_PREFIX + id, payload); }
   catch (e) { setMsg('保存できませんでした（容量がいっぱいの可能性があります）'); return; }
@@ -757,15 +809,16 @@ async function saveEdit(id) {
   if (!box) return;
   const cls = Number(box.querySelector('[data-f="cls"]').value) || 0;
   const draft = readDraft(box.querySelector('[data-f="draft"]').value);
+  const front = Number(box.querySelector('[data-f="front"]').value) || 0;
   const s = ships.find(x => x.rec === rec);
   if (s) {
     const py = waterFloat(draft);
     if (!(helm && helm.ship === s) && footprintHits(s.perim, s.px, py, s.pz, s.yaw, blockedFor(null))) {
       setMsg('この深さだと陸に重なるため、変えられません'); return;
     }
-    s.cls = cls; s.draft = draft; s.py = py;
+    s.cls = cls; s.draft = draft; s.py = py; s.front = front;
   }
-  rec.cls = cls; rec.draft = draft;
+  rec.cls = cls; rec.draft = draft; rec.front = front;
   if (!writeMeta()) { setMsg('保存できませんでした'); return; }
   setMsg('');
   say('船の設定を保存しました');
@@ -804,10 +857,15 @@ metaBroken = metaNow === null;
 loadAll();
 
 window.VoxelShip = {
-  tap: seatTap,                  // 道具を持ってタップしたとき：範囲内なら座席を追加
+  tap: () => seatTap(),          // 船メーカーを持ってタップしたとき：範囲内なら座席などを追加
+  tapAs: kind => seatTap(kind),  // 大砲を持ってタップしたとき：範囲内なら大砲を追加
   openPanel,
   board: () => boardCandidate(nearestBoardable()),
   count: () => ships.length,
-  _pure: { CLASSES, buildCols, footprintHits, stepShip, advanceShip, seatWorld, resolveOverlap }
+  ships: () => ships,
+  fwdAngle,
+  shipAt: (x, y, z) => ships.find(s => shipSolidAt(s, x, y, z)) || null,
+  isBusy: () => !!(helm || seated),
+  _pure: { CLASSES, buildCols, footprintHits, stepShip, advanceShip, seatWorld, resolveOverlap, shipSolidAt, fwdAngle }
 };
 })();
