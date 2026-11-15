@@ -355,13 +355,14 @@ const TL_KEY = 'voxelcraft_tilt_v1';
 const tlRecs = new Map();     // キー -> 記録 { key, id, h, c, q, st, ts, src, ent }
 const tlWaiting = [];         // 定義がまだ届いていない記録
 let tlScope = null;
+const tlLocRecs = new Map();   // この端末の傾きブロック（保存の元）。部屋にいる間に画面から外しても、ここは消さない
 function tlNewKey() { return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function tlScopeNow() { return LIVE.roomId() || 'local'; }
 function tlStrip(r) { return { key: r.key, id: r.id, h: r.h, c: r.c, q: r.q, st: r.st, ts: r.ts, s: r.s }; }
 let tlLocalReady = false;
 function tlSaveLocal() {
   if (!tlLocalReady) return;
-  writeStore(TL_KEY, JSON.stringify([...tlRecs.values()].filter(r => r.src === 'local').map(tlStrip)));
+  writeStore(TL_KEY, JSON.stringify([...tlLocRecs.values()].map(tlStrip)));
 }
 function tlAddVisual(r) {
   const id = r.h ? VoxelCustom.localIdFor(r.h) : r.id;
@@ -416,7 +417,7 @@ function tlRemove(key, notify) {
   if (!r) return;
   const wasLocal = r.src === 'local';
   tlDropRec(r);
-  if (wasLocal) tlSaveLocal();
+  if (wasLocal) { tlLocRecs.delete(key); tlSaveLocal(); }
   else if (notify) { tlTombs.set(key, { ts: LIVE.nowTs(), room: r.src }); LIVE.send('tl:' + key, undefined, true); }
 }
 // 部屋の記録を一つ反映する（新しい方が勝つ。部屋で壊したものは、相手が後から置き直すまで戻さない）
@@ -469,7 +470,7 @@ function tlAdopt(ent) {
   r.ent = ent;
   r.sig = tlSig(r);
   tlRecs.set(r.key, r);
-  if (scope === 'local') tlSaveLocal();
+  if (scope === 'local') { tlLocRecs.set(r.key, r); tlSaveLocal(); }
   else {
     r.own = true; r.room = scope;                     // 通信が切れていたら、つながった時に tlSync が送り直す
     LIVE.send('tl:' + r.key, tlStrip(r));
@@ -483,18 +484,21 @@ async function tlLoadLocal() {
   try { list = JSON.parse((await readStore(TL_KEY)) || '[]'); }
   catch (e) { console.error('傾きブロックの保存データを読めませんでした', e); return; }
   for (const v of list) {
-    if (!v || typeof v.key !== 'string' || tlRecs.has(v.key)) continue;
+    if (!v || typeof v.key !== 'string' || tlLocRecs.has(v.key)) continue;
     const r = { ...v, src: 'local', ent: null };
-    tlRecs.set(r.key, r);
-    if (!tlAddVisual(r)) tlWaiting.push(r);
+    tlLocRecs.set(r.key, r);
+    if (tlScopeNow() === 'local' && !tlRecs.has(r.key)) { tlRecs.set(r.key, r); if (!tlAddVisual(r)) tlWaiting.push(r); }
   }
   tlLocalReady = true;
   tlSaveLocal();                                // 読み込み中に置いたものも、合わせて保存し直す
 }
 function tlSwitchScope(s) {
-  for (const r of [...tlRecs.values()]) if (r.src !== s) tlDropRec(r);
+  for (const r of [...tlRecs.values()]) if (r.src !== s) tlDropRec(r);   // 画面から外すだけ（保存の元 tlLocRecs は残す）
   tlScope = s;
-  if (s === 'local') tlLoadLocal();
+  if (s === 'local') {
+    for (const r of tlLocRecs.values()) if (!tlRecs.has(r.key)) { r.ent = null; tlRecs.set(r.key, r); if (!tlAddVisual(r)) tlWaiting.push(r); }
+    tlLoadLocal();
+  }
 }
 function tlRetry() {
   for (let n = tlWaiting.length - 1; n >= 0; n--) {
@@ -525,6 +529,7 @@ window.addEventListener('voxelworld:fresh', () => {
 });
 function wipeStoredTilts() {
   for (const r of [...tlRecs.values()]) if (r.src === 'local') tlDropRec(r);
+  tlLocRecs.clear();
   tlLocalReady = true;
   writeStore(TL_KEY, '[]');
 }
