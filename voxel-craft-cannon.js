@@ -205,7 +205,9 @@
   }
   function stopAim() {
     if (!aim) return;
-    player.pos.copy(aim.saved.pos);
+    const c = aim.s.cannons && aim.s.cannons[aim.idx];
+    const spot = c && S().standSpot ? S().standSpot(aim.s, c) : null;
+    player.pos.copy(spot || aim.saved.pos);
     player.vel.set(0, 0, 0);
     viewMode = aim.saved.view;
     aim = null;

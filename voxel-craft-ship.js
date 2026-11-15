@@ -20,7 +20,7 @@ const T_SHIP = VX.T_SHIP_MAKER;
 const T_CANNON_ITEM = typeof VX.T_CANNON === 'number' ? VX.T_CANNON : -1;
 const META_KEY = 'voxelcraft_ship_v1';
 const SHAPE_PREFIX = 'shipblk:';
-const RETRY_MS = 3000, RETRY_MAX = 10;
+const RETRY_MS = 3000, RETRY_MAX = Infinity;   // 船の形が届くまで、何度でも試す（届かない理由は console に出す）
 const HULL_BOARD_DIST = 6;     // 座席が無い船は、船の近く（この距離）で操縦席として乗れる
 const SEAT_DIST = 2.5;         // 座席・操縦席は、この距離まで近づくと乗れる
 const MOVE_SEND_MS = 100;
@@ -237,7 +237,7 @@ async function loadShape(rec) {
 
 async function buildShip(rec) {
   const shape = await loadShape(rec);
-  if (!shape) return null;
+  if (!shape) { console.warn('[船] 形のデータがまだ届いていません:', shapeKey(rec)); return null; }
   const texMap = {};
   for (const tk of Object.keys(shape.data.texs || {})) texMap[tk] = await loadTex(shape.data.texs[tk]);
   const root = VC.buildRoot(shape.data, texMap);
@@ -258,7 +258,13 @@ async function buildShip(rec) {
   return s;
 }
 
+let loadingNow = false;
 async function loadAll() {
+  if (loadingNow) return;
+  loadingNow = true;
+  try { await loadAllInner(); } finally { loadingNow = false; }
+}
+async function loadAllInner() {
   pendingCount = 0;
   for (const rec of metas) {
     if (ships.some(s => s.rec === rec)) continue;
@@ -266,9 +272,10 @@ async function loadAll() {
     try { s = await buildShip(rec); } catch (e) { console.error(e); }
     if (s) ships.push(s); else pendingCount++;
   }
-  if (pendingCount && retryN++ < RETRY_MAX) setTimeout(loadAll, RETRY_MS);
-  else if (pendingCount) say('読み込めない船が' + pendingCount + '隻あります（形のデータが届いていません）。データは残っています');
-  else retryN = 0;
+  if (pendingCount) {
+    if (++retryN === 20) say('読み込めない船が' + pendingCount + '隻あります（形のデータが届いていません）。データは残っています。読み直し中です');
+    if (retryN < RETRY_MAX) setTimeout(loadAll, RETRY_MS);
+  } else retryN = 0;
 }
 
 // 部屋の仲間が船を作った・消した・設定を変えたとき
@@ -347,6 +354,23 @@ function sit(s, seat) {
   say('座席に座りました（X キーで降ります）');
 }
 
+// 座席・操縦席・大砲のそばで、立てる甲板の場所（降りたとき、その場所に立つ）。無ければ null
+const STAND_OFFS = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
+function standSpot(s, seat) {
+  if (!seat) return null;
+  const w = seatWorld(s, seat);
+  const fy = Math.floor(w.y) - 1;
+  for (const [dx, dz] of STAND_OFFS) {
+    const x = w.x + dx, z = w.z + dz;
+    const fx = Math.floor(x), fz = Math.floor(z);
+    const onDeck = shipSolidAt(s, fx, fy, fz) || isSolid(getBlock(fx, fy, fz));
+    if (!onDeck) continue;
+    if (typeof boxCollides === 'function' && boxCollides(x, w.y + 0.02, z)) continue;
+    return new THREE.Vector3(x, w.y + 0.02, z);
+  }
+  return null;
+}
+
 function exitSpot(s) {
   let maxX = 0;
   for (const c of s.perim) maxX = Math.max(maxX, c.x + 1);
@@ -365,7 +389,7 @@ function dismount() {
   if (helm) {
     const h = helm, s = h.ship;
     helm = null;
-    player.pos.copy(exitSpot(s));
+    player.pos.copy(standSpot(s, h.seat) || exitSpot(s));
     player.vel.set(0, 0, 0);
     viewMode = h.savedView;
     player.pitch = h.savedPitch;
@@ -374,7 +398,7 @@ function dismount() {
   } else if (seated) {
     const h = seated, s = h.ship;
     seated = null;
-    player.pos.copy(exitSpot(s));
+    player.pos.copy(standSpot(s, h.seat) || exitSpot(s));
     player.vel.set(0, 0, 0);
     viewMode = h.savedView;
     player.pitch = h.savedPitch;
@@ -855,7 +879,15 @@ metas = metaNow || [];
 metaBroken = metaNow === null;
 loadAll();
 
+// ゲームが始まった後・カスタムモデルの準備ができた後にも、船の読み込みをやり直す（前回の読み込みが間に合わなかった分）
+if (typeof window.startGame === 'function') {
+  const origStartGame = window.startGame;
+  window.startGame = function () { const r = origStartGame.apply(this, arguments); setTimeout(loadAll, 300); return r; };
+}
+if (window.VoxelCustom && VoxelCustom.onAdopt) VoxelCustom.onAdopt(() => { if (pendingCount) loadAll(); });
+
 window.VoxelShip = {
+  standSpot: (s, seat) => standSpot(s, seat),
   tap: () => seatTap(),          // 船メーカーを持ってタップしたとき：範囲内なら座席などを追加
   tapAs: kind => seatTap(kind),  // 大砲を持ってタップしたとき：範囲内なら大砲を追加
   openPanel,

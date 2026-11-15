@@ -308,12 +308,25 @@ LIVE.onOp('dg', rec => {
   dgApply(String(rec.key).slice(3), { v: rec.v, del: !!rec.del, ts: rec.ts || 0 }, s);
 });
 
+// 届くのを待っている理由を、15秒ごとに console に出す（原因の確認用）
+let lastWaitLog = 0;
+function logWaitingReasons(tag, list) {
+  const now = Date.now();
+  if (!list.length || now - lastWaitLog < 15000) return;
+  lastWaitLog = now;
+  for (const r of list.slice(0, 5)) {
+    const id = r.h ? VoxelCustom.localIdFor(r.h) : r.id;
+    const rt = id != null && id >= CUSTOM_BASE ? defRT.get(id) : null;
+    console.warn('[' + tag + '] 待機中:', r.key, { id, hashFound: r.h ? id != null : 'n/a', defReady: rt ? !!rt.ready : 'n/a' });
+  }
+}
 function retryWaiting() {
   for (let n = waiting.length - 1; n >= 0; n--) {
     const r = waiting[n];
     if (recs.get(r.key) !== r) { waiting.splice(n, 1); continue; }
     if (tryVisual(r)) waiting.splice(n, 1);
   }
+  logWaitingReasons('斜めブロック', waiting);
 }
 VoxelCustom.onAdopt(retryWaiting);
 setInterval(retryWaiting, 1000);
@@ -489,6 +502,7 @@ function tlRetry() {
     if (tlRecs.get(r.key) !== r) { tlWaiting.splice(n, 1); continue; }
     if (tlAddVisual(r)) tlWaiting.splice(n, 1);
   }
+  logWaitingReasons('傾きブロック', tlWaiting);
 }
 // 相手の置いたもの（部屋の保存データを読み込んだときも、ここに届く）
 LIVE.onOp('tl', rec => {
