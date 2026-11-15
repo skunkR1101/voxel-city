@@ -286,6 +286,7 @@ function sendDef(d) {
 // 全部そろった端末だけが、その音声を使えるようになる。通信が切れていた分は、つながった時にもう一度送る。
 const FILE_PART = 40000;             // 1つの記録の大きさ（文字数）
 const fileSent = new Map();          // id -> { ver, n }：この端末が送った音声
+const fileSentAt = new Map();        // id -> 送った時刻（同じ版を何度も送り直さない）
 const fileIn = new Map();            // id -> { ver, n, name, type, parts: Map(版 -> Map(番号 -> 文字)) }
 const fileDone = new Map();          // id -> 使えるようにした版
 const fileBusy = new Set();
@@ -322,6 +323,7 @@ async function sendFile(d) {
     const old = fileSent.get(d.id);
     if (old && old.ver !== ver) for (let i = 0; i < old.n; i++) LIVE.send('sndc:' + d.id + ':' + old.ver + ':' + i, undefined, true);
     fileSent.set(d.id, { ver, n });
+    fileSentAt.set(d.id, Date.now());
   } finally { fileBusy.delete(d.id); }
 }
 // 部屋に、この端末の音声が無ければ送る（つながった時・音声を変えた時）
@@ -333,6 +335,8 @@ function ensureFiles() {
     if (d.src !== 'local' || !d.fileName) continue;
     const m = kv.get('sndf:' + d.id);
     if (m && !m.del && m.v && m.v.ver === fileVerOf(d)) continue;
+    const sent = fileSent.get(d.id);
+    if (sent && sent.ver === fileVerOf(d) && Date.now() - (fileSentAt.get(d.id) || 0) < 60000) continue;
     sendFile(d).catch(() => {});
   }
 }

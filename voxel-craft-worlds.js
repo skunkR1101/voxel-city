@@ -101,6 +101,7 @@ function curId() { try { return localStorage.getItem(CUR_KEY) || ''; } catch (e)
 function setCur(id) { try { if (id) localStorage.setItem(CUR_KEY, id); else localStorage.removeItem(CUR_KEY); } catch (e) {} }
 
 // 今開いているワールドを、その番号の場所へ保存する
+let lastThumbAt = 0;
 async function snapshotCurrent() {
   const id = curId();
   if (!id || !window.VoxelWorld) return;
@@ -115,7 +116,8 @@ async function snapshotCurrent() {
   if (m) {
     m.savedAt = savedAt;
     if (pos) m.pos = pos;
-    if (playing) { const t = captureThumb(); if (t) m.thumb = t; }
+    // 画像の作り直しは重いので（iPad などで固まる原因になる）、10分に1回まで
+    if (playing && Date.now() - lastThumbAt > 10 * 60 * 1000) { lastThumbAt = Date.now(); const t = captureThumb(); if (t) m.thumb = t; }
     await put('index', idx);
   }
 }
@@ -298,7 +300,7 @@ function buildListButton() {
   document.body.appendChild(b);
   setInterval(() => { b.style.display = isPlaying() ? 'block' : 'none'; }, 500);
 }
-setInterval(() => { if (isPlaying() && curId()) snapshotCurrent().catch(() => {}); }, 60000);
+setInterval(() => { if (isPlaying() && curId()) snapshotCurrent().catch(() => {}); }, 120000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') snapshotCurrent().catch(() => {}); });
 window.addEventListener('pagehide', () => { snapshotCurrent().catch(() => {}); });
 

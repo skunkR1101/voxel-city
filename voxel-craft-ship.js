@@ -584,7 +584,7 @@ function updateBar(force) {
     bar.querySelector('[data-b="clear"]').textContent = '座席クリア' + (n ? '（' + n + '）' : '');
   }
 }
-setInterval(() => updateBar(false), 200);
+setInterval(() => updateBar(false), 500);
 
 // 範囲内のブロックをタップ → 座席（操縦席）を追加／外す
 function seatTap(forced) {
