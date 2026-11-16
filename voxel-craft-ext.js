@@ -1615,7 +1615,11 @@ function makeTiltObject(id, st) {
       return { obj: o, isModel: true };
     }
     if (!rt.tex) return null;
-    const mat = new THREE.MeshLambertMaterial({ map: rt.tex, alphaTest: 0.3 });
+    // 見え方（くり抜き・半透過・発光）を、定義どおりに付ける（以前は全部くり抜きになっていた）
+    const look = rt.def.alpha;
+    const mat = new THREE.MeshLambertMaterial({ map: rt.tex, alphaTest: look === 'blend' ? 0 : 0.3 });
+    if (look === 'blend') { mat.transparent = true; mat.opacity = 0.5; mat.depthWrite = false; }
+    if (look === 'glow') { mat.emissive = new THREE.Color(0xffffff); mat.emissiveMap = rt.tex; mat.emissiveIntensity = 1; }
     if (rt.def.colorable && st && st.color) mat.color.set(st.color);
     const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat);
     m.castShadow = shaderOn; m.receiveShadow = shaderOn;

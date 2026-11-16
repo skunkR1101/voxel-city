@@ -587,7 +587,7 @@ function mergeKv(a, b) {
   return [...m.entries()];
 }
 // 1つのファイルが大きすぎると GitHub が受け付けないので、部屋のデータは数個のファイルに分けて置く
-const GH_PART_MAX = 1000000;  // 1ファイルあたりの上限（圧縮前の文字数の目安。圧縮すると小さくなる）
+const GH_PART_MAX = 700000;   // 1ファイルあたりの上限（UTF-8 のバイト数。GitHub の受付上限 1MB に、base64 の増え分も見込んで余裕をとる）
 function ghPathOf(id, k) {
   return 'rooms/' + encodeURIComponent(id) + (k ? '.p' + k : '') + '.json';
 }
@@ -899,11 +899,23 @@ function strHash32(str) {
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
   return h;
 }
+// 文字列の UTF-8 のバイト数（日本語は1文字3バイト。GitHub の上限はバイト数で決まる）
+function utf8Len(str) {
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
+}
 function pairInfo(e) {
   const c = pairCache.get(e[0]);
   if (c && c.v === e[1]) return c;
   const str = JSON.stringify(e);
-  const info = { v: e[1], n: str.length, h: strHash32(str) };
+  const info = { v: e[1], n: utf8Len(str), h: strHash32(str) };
   pairCache.set(e[0], info);
   return info;
 }

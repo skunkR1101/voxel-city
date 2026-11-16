@@ -166,12 +166,15 @@ function ensureGizmo() {
   if (!gizmoReady) gizmoReady = loadScript(GIZMO_URL).then(() => !!THREE.TransformControls, () => false);
   return gizmoReady;
 }
+// 大きさを測る。測ったあと、元の親（グループ）に戻す（戻さないと、車が空の場所に置かれて消えて見える）
 function measure(obj) {
+  const parent = obj.parent;
   const w = new THREE.Group();
   w.add(obj);
   w.updateMatrixWorld(true);
   const b = new THREE.Box3().setFromObject(w);
   w.remove(obj);
+  if (parent) parent.add(obj);
   return { size: b.getSize(new V3()), box: b };
 }
 
