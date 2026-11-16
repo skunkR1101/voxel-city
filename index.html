@@ -197,6 +197,10 @@
       シェーダー（影・光の差し込み・太陽のにじみ・波のある透明な水）
     </label>
     <label class="chk">
+      <input type="checkbox" id="perfChk" />
+      パフォーマンスモード（60FPSを優先：影・シェーダーを切り、描画距離を4チャンクまでにし、画面の解像度を自動で下げます）
+    </label>
+    <label class="chk">
       <input type="checkbox" id="autoJumpChk" />
       1マス段差でオートジャンプ
     </label>
@@ -265,12 +269,13 @@ const TCELL = 8;        // 木を配置する格子の一辺
 
 // 設定（localStorageに保存）
 const settings = {
-  rd: 6, sens: 1.0, shader: null, autoJump: true, flip: false, vol: 0.6,
+  rd: 6, sens: 1.0, shader: null, perf: false, autoJump: true, flip: false, vol: 0.6,
   time: 9.0, timeAuto: true, dayLen: 20
 };
 try {
   const s = JSON.parse(localStorage.getItem('voxelcraft_settings') || '{}');
   if (typeof s.rd === 'number') settings.rd = clamp(Math.round(s.rd), 2, 10);
+  if (typeof s.perf === 'boolean') settings.perf = s.perf;
   if (typeof s.sens === 'number') settings.sens = clamp(s.sens, 0.3, 2.5);
   if (typeof s.shader === 'boolean') settings.shader = s.shader;
   if (typeof s.autoJump === 'boolean') settings.autoJump = s.autoJump;
@@ -1249,10 +1254,11 @@ function buildMesh(e) {
   }
 }
 
+let meshHead = 0;   // 次に組み立てる位置（先頭を shift で削ると遅いので、位置で持つ）
 function processMeshQueue(budgetMs) {
   const t0 = performance.now();
-  while (meshQueue.length && performance.now() - t0 < budgetMs) {
-    const e = meshQueue.shift();
+  while (meshHead < meshQueue.length && performance.now() - t0 < budgetMs) {
+    const e = meshQueue[meshHead++];
     e.queued = false;
     if (!chunks.has(e.key)) continue;                         // 既に破棄済み
     if (!inRange(e.cx, e.cz, curPcx, curPcz, RD)) continue;   // 範囲外は後で再登録
@@ -2036,6 +2042,15 @@ function selectSlot(i) {
 // ============================================================
 // シェーダー切替・描画サイズ
 // ============================================================
+// ---- パフォーマンスモード：見た目・描画距離・解像度は一切変えず、制限を外す ----
+// ・描画の上限（60回/秒）を外す ・チャンクの組み立て時間を増やして読み込みを速くする
+let perfOn = false;
+window.VoxelPerf = { on: () => perfOn, fps: () => fpsSm };
+function setPerf(on) {
+  if (on === perfOn) return;
+  perfOn = on;
+  perfChk.checked = on;
+}
 function resizeRenderer() {
   const pr = Math.min(window.devicePixelRatio, shaderOn ? 2 : 1.25);
   renderer.setPixelRatio(pr);
@@ -2072,6 +2087,7 @@ function syncSettingsUI() {
   volRange.value = settings.vol;
   volVal.textContent = Math.round(settings.vol * 100) + '%';
   shaderChk.checked = shaderOn;
+  perfChk.checked = perfOn;
   autoJumpChk.checked = settings.autoJump;
   flipChk.checked = settings.flip;
   timeRange.value = settings.time;
@@ -2124,6 +2140,8 @@ shaderChk.addEventListener('change', () => {
   setShader(shaderChk.checked);
   saveSettings();
 });
+const perfChk = document.getElementById('perfChk');
+perfChk.addEventListener('change', () => { setPerf(perfChk.checked); settings.perf = perfChk.checked; saveSettings(); });
 autoJumpChk.addEventListener('change', () => {
   settings.autoJump = autoJumpChk.checked;
   saveSettings();
@@ -2400,7 +2418,7 @@ const FRAME_MIN_MS = 1000 / 60 - 2;
 let lastDrawAt = -1e9;
 function frame(now) {
   requestAnimationFrame(frame);
-  if (now - lastDrawAt < FRAME_MIN_MS) return;
+  if (!perfOn && now - lastDrawAt < FRAME_MIN_MS) return;   // パフォーマンスモードでは描画回数の上限を外す
   lastDrawAt = now;
   const dt = Math.min(0.05, (now - lastT) / 1000);
   lastT = now;
@@ -2427,7 +2445,8 @@ function frame(now) {
     scanT = 0;
     scanChunks(curPcx, curPcy, curPcz);
   }
-  processMeshQueue(paused || menuOpen ? 4 : 10);
+  // チャンクの組み立て：余裕があるときは多めに回して、読み込みを早くする（余裕が無いときは控えめに）
+  processMeshQueue(paused || menuOpen ? 4 : (perfOn ? 24 : 10));
 
   // 太陽の見え方（雲の代わりに地形の裏に隠れると消える）
   sunProbeT -= dt;
@@ -2481,8 +2500,10 @@ applySkin();
 selectSlot(0);
 updateSunDir();
 setShader(settings.shader);
+if (settings.perf) setPerf(true);
 requestAnimationFrame(frame);
 </script>
+
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
