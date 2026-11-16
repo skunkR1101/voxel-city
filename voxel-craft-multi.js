@@ -1021,9 +1021,15 @@ function ghProgEnd(msg, ok) {
   ghProgHideT = setTimeout(() => { el.style.display = 'none'; }, ok ? 1500 : 3500);
 }
 // 1つのファイルを書く（同時に複数書けるように、個別に動く）
-async function ghWriteFile(c, id, cur, o, path, step) {
-  let sha = cur.shas[path];
-  if (!sha) { const ex = await ghGetFile(c, path); sha = ex ? ex.sha : null; }
+// 古い巨大なファイル（1MBを超えるもの）は、上書きを受け付けてもらえないことがあるため、消してから書き直す
+async function ghDeleteFile(c, path, sha) {
+  const res = await fetch('https://api.github.com/repos/' + c.repo + '/contents/' + path,
+    { method: 'DELETE', headers: { ...ghHeaders(c), 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'replace ' + path, sha }) });
+  if (!res.ok && res.status !== 404) throw new Error(ghErrText(res.status));
+}
+async function ghWriteFile(c, id, cur, o, path, step, again) {
+  let sha = again ? null : cur.shas[path];
+  if (!sha && !again) { const ex = await ghGetFile(c, path); sha = ex ? ex.sha : null; }
   const body = {
     message: 'room ' + id + ' ' + new Date().toISOString(),
     content: b64Enc(new TextEncoder().encode(JSON.stringify(o))),
@@ -1050,6 +1056,7 @@ async function ghWriteFile(c, id, cur, o, path, step) {
     return out;
   }
   if (res.status === 409) return 'conflict';
+  if (res.status === 422 && sha && !again) { await ghDeleteFile(c, path, sha); return ghWriteFile(c, id, cur, o, path, step, true); }
   let msg = '';
   try { msg = (await res.json()).message || ''; } catch (e) {}
   throw new Error(ghErrText(res.status) + (msg ? '［GitHub: ' + msg + '］' : ''));
