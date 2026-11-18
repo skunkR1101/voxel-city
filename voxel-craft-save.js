@@ -89,7 +89,8 @@ function installHash(seed) {
 function regenerate() {
   for (const e of chunks.values()) disposeEntry(e);
   chunks.clear();
-  clearMeshQueue();
+  // 待ち行列を空にする（HTML 側の新しい関数があればそれを使う。古い HTML と組み合わさっても動くように）
+  if (typeof clearMeshQueue === 'function') clearMeshQueue(); else meshQueue.length = 0;
 }
 // fresh: 編集データも空にする（新しいワールド・参加時）
 function applySeed(v, fresh) {

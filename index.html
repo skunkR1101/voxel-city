@@ -1329,15 +1329,25 @@ function buildMesh(e) {
 }
 
 let meshHead = 0;   // 次に組み立てる位置（先頭を shift で削ると遅いので、位置で持つ）
+// 待ち行列を空にする（ワールド読み込み時など）。待ち中の印も外さないと、二度と組み立てられなくなる
+function clearMeshQueue() {
+  for (let i = meshHead; i < meshQueue.length; i++) meshQueue[i].queued = false;
+  meshQueue.length = 0;
+  meshHead = 0;
+}
 function processMeshQueue(budgetMs) {
   const t0 = performance.now();
+  if (meshHead > meshQueue.length) meshHead = 0;   // 別の場所で待ち行列が空にされたときの保険
   while (meshHead < meshQueue.length && performance.now() - t0 < budgetMs) {
     const e = meshQueue[meshHead++];
     e.queued = false;
-    if (!chunks.has(e.key)) continue;                         // 既に破棄済み
-    if (!inRange(e.cx, e.cz, curPcx, curPcz, RD)) continue;   // 範囲外は後で再登録
+    if (!chunks.has(e.key)) continue;
+    if (!inRange(e.cx, e.cz, curPcx, curPcz, RD)) continue;
     buildMesh(e);
   }
+  // 処理済みの部分をときどき詰める（配列が無限に伸びないように）
+  if (meshHead >= meshQueue.length) { meshQueue.length = 0; meshHead = 0; }
+  else if (meshHead > 1024) { meshQueue.splice(0, meshHead); meshHead = 0; }
 }
 
 // ============================================================
