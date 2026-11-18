@@ -214,6 +214,17 @@
           <option value="120">120 FPS</option>
         </select>
       </label>
+      <label class="chk">
+        <input type="checkbox" id="roadDistChk" />
+        線路・道路の描画距離を適用（オンにすると、下の数値で描きます）
+      </label>
+      <label>
+        線路・道路の描画距離（マス）
+        <input type="number" id="roadDistNum" min="16" max="512" step="16" style="width:100%;margin-top:6px;padding:6px;box-sizing:border-box;background:#2a3846;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:4px;" />
+      </label>
+      <p class="note">
+        オフのときは、描画距離の設定に合わせて描きます（描画距離6なら、線路・道路は約160マスまで描いていました）。
+      </p>
       <p class="note">
         ⚠ 自己責任の機能です。端末の性能や画面の更新周波数を超えるFPSは出ません。目標に届かないときは、描画の解像度を自動で下げて合わせます。発熱や電池消費が増えることがあります。
       </p>
@@ -312,7 +323,7 @@ const TCELL = 8;        // 木を配置する格子の一辺
 // 設定（localStorageに保存）
 const settings = {
   rd: 6, sens: 1.0, shader: null, perf: false, autoJump: true, flip: false, vol: 0.6,
-  time: 9.0, timeAuto: true, dayLen: 20, fpsBoost: 0
+  time: 9.0, timeAuto: true, dayLen: 20, fpsBoost: 0, roadDistOn: false, roadDist: 96
 };
 try {
   const s = JSON.parse(localStorage.getItem('voxelcraft_settings') || '{}');
@@ -327,6 +338,8 @@ try {
   if (typeof s.timeAuto === 'boolean') settings.timeAuto = s.timeAuto;
   if (typeof s.dayLen === 'number') settings.dayLen = [5, 10, 20, 40].includes(s.dayLen) ? s.dayLen : 20;
   if ([0, 60, 90, 120].includes(s.fpsBoost)) settings.fpsBoost = s.fpsBoost;
+  if (typeof s.roadDistOn === 'boolean') settings.roadDistOn = s.roadDistOn;
+  if (typeof s.roadDist === 'number') settings.roadDist = clamp(Math.round(s.roadDist), 16, 512);
 } catch (e) {}
 function saveSettings() {
   try { localStorage.setItem('voxelcraft_settings', JSON.stringify(settings)); } catch (e) {}
@@ -2150,6 +2163,9 @@ function syncSettingsUI() {
   shaderChk.checked = shaderOn;
   perfChk.checked = perfOn;
   boostSel.value = String(settings.fpsBoost || 0);
+  roadDistChk.checked = settings.roadDistOn;
+  roadDistNum.value = settings.roadDist;
+  roadDistNum.disabled = !settings.roadDistOn;
   autoJumpChk.checked = settings.autoJump;
   flipChk.checked = settings.flip;
   timeRange.value = settings.time;
@@ -2211,6 +2227,13 @@ shaderChk.addEventListener('change', () => {
 });
 const perfChk = document.getElementById('perfChk');
 const boostSel = document.getElementById('boostSel');
+const roadDistChk = document.getElementById('roadDistChk');
+const roadDistNum = document.getElementById('roadDistNum');
+roadDistChk.addEventListener('change', () => { settings.roadDistOn = roadDistChk.checked; saveSettings(); syncSettingsUI(); });
+roadDistNum.addEventListener('change', () => {
+  settings.roadDist = clamp(Math.round(Number(roadDistNum.value) || 96), 16, 512);
+  saveSettings(); syncSettingsUI();
+});
 boostSel.addEventListener('change', () => { setBoost(Number(boostSel.value)); saveSettings(); });
 perfChk.addEventListener('change', () => { setPerf(perfChk.checked); settings.perf = perfChk.checked; saveSettings(); });
 autoJumpChk.addEventListener('change', () => {

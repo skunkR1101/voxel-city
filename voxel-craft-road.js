@@ -885,6 +885,7 @@ function buildChunk(c) {
   const buckets = bucketize(c.pieces);
   if (buckets.incomplete) return false;   // まだ切り出しの途中（次のフレームで続き）
   c.meshes = [];
+  c.sphere = chunkSphere(c);
   for (const b of buckets.values()) {
     const r = vrt.get(b.vid);
     const mat = r.parts[b.k].mat;
@@ -905,6 +906,74 @@ function dropChunkMeshes(c) {
   for (const m of c.meshes) { scene.remove(m); m.dispose(); }
   c.meshes = null;
 }
+// ---- 画面の外の区画を描かない（見た目は変わらない）----
+// 区画を囲む球を作り、カメラにも影（太陽から見た範囲）にも入らない区画だけ描画を止める。
+// 影は、影を落とす側の範囲に入る区画は残すので、影の形も変わらない。
+const _cullFr = new THREE.Frustum();
+const _cullPM = new THREE.Matrix4();
+const _cullSph = new THREE.Sphere();
+const _cullSh = new THREE.Vector3();
+const CULL_PAD = 8;   // 1フレーム分の動きや更新の遅れを見込んで、少し大きめに囲む
+function variantRad(r) {
+  if (r.rad) return r.rad;
+  let m = 1;
+  for (const p of r.parts) {
+    if (!p.geo) continue;
+    if (!p.geo.boundingSphere) p.geo.computeBoundingSphere();
+    const s = p.geo.boundingSphere;
+    m = Math.max(m, s.center.length() + s.radius);
+  }
+  r.rad = m * 1.05 + 1;
+  return r.rad;
+}
+function chunkSphere(c) {
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  for (const pc of c.pieces) {
+    if (!isFinitePiece(pc)) continue;
+    const r = vrt.get(pc.v);
+    const pr = (r && r.isModel) ? variantRad(r) : Math.hypot(pc.w, 1, pc.l) + 2;
+    x0 = Math.min(x0, pc.x - pr); x1 = Math.max(x1, pc.x + pr);
+    y0 = Math.min(y0, pc.y - pr); y1 = Math.max(y1, pc.y + pr);
+    z0 = Math.min(z0, pc.z - pr); z1 = Math.max(z1, pc.z + pr);
+  }
+  if (x0 === Infinity) return null;
+  return {
+    x: (x0 + x1) / 2, y: (y0 + y1) / 2, z: (z0 + z1) / 2,
+    r: Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2 + CULL_PAD
+  };
+}
+function cullChunks() {
+  camera.updateMatrixWorld();
+  _cullPM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _cullFr.setFromProjectionMatrix(_cullPM);
+  const shOn = renderer.shadowMap.enabled && sun.castShadow;
+  const sc = sun.shadow.camera;
+  if (shOn) sc.updateMatrixWorld();
+  for (const c of chunks.values()) {
+    if (!c.meshes) continue;
+    const s = c.sphere;
+    let vis = true;
+    if (s) {
+      _cullSph.center.set(s.x, s.y, s.z);
+      _cullSph.radius = s.r;
+      vis = _cullFr.intersectsSphere(_cullSph);
+      if (!vis && shOn) {
+        // 影の範囲（太陽から見た正射影の箱と奥行き）に入るなら、カメラに映らなくても影のために残す
+        _cullSh.set(s.x, s.y, s.z).applyMatrix4(sc.matrixWorldInverse);
+        const rr = s.r;
+        vis = _cullSh.x + rr >= sc.left && _cullSh.x - rr <= sc.right &&
+              _cullSh.y + rr >= sc.bottom && _cullSh.y - rr <= sc.top &&
+              -_cullSh.z + rr >= sc.near && -_cullSh.z - rr <= sc.far;
+      }
+    }
+    for (const m of c.meshes) m.visible = vis;
+  }
+}
+// 区画を描く範囲（区画の数）。描画距離の設定を使うか、マス数で指定するかを切り替える
+function roadRegionsR() {
+  if (settings.roadDistOn) return Math.max(1, Math.ceil(settings.roadDist / RC));
+  return Math.ceil(((RD || 6) + 1) * CS / RC) + 1;
+}
 // 毎フレーム：描画距離の内側の区画だけ描く（1フレームに1区画ずつ作って滑らかに）
 function updateVisible() {
   cutFrame = { t0: performance.now(), n: 0 };
@@ -912,7 +981,7 @@ function updateVisible() {
 }
 function updateVisibleInner() {
   const pcx = Math.floor(player.pos.x / RC), pcz = Math.floor(player.pos.z / RC);
-  const R = Math.ceil(((RD || 6) + 1) * CS / RC) + 1;
+  const R = roadRegionsR();
   let budget = 1;
   for (const c of chunks.values()) {
     const inR = Math.abs(c.cx - pcx) <= R && Math.abs(c.cz - pcz) <= R;
@@ -1168,6 +1237,7 @@ function updateHud() {
 function roadFrame() {
   requestAnimationFrame(roadFrame);
   updateVisible();
+  cullChunks();
   const active = !!rs.mode && started && !menuOpen && !paused && !rdOpen;
   updateMidBtn();
   if (!active) {
