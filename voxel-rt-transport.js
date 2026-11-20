@@ -37,7 +37,22 @@ function iceConfig() {
 }
 
 // PeerJS の接続を、core が使う形（peer・open・send・on・close）に包む
+// 接続の様子を、画面の診断ログ（VoxelDebug）に残す（原因の特定用。通信の動きは変えない）
+function tlog(m) { try { if (window.VoxelDebug) VoxelDebug.log('通信（部屋）', m); } catch (e) {} }
+function watchIce(c, name) {
+  try {
+    const pc = c.peerConnection;
+    if (!pc || !pc.addEventListener) return;
+    pc.addEventListener('iceconnectionstatechange', () => tlog('相手 ' + name + ' の経路：' + pc.iceConnectionState));
+  } catch (e) {}
+}
 function wrapConn(c, name) {
+  try {
+    watchIce(c, name);
+    c.on('open', () => tlog('相手 ' + name + ' とつながりました'));
+    c.on('close', () => tlog('相手 ' + name + ' とのつながりが切れました'));
+    c.on('error', e => tlog('相手 ' + name + ' との通信エラー：' + ((e && e.type) || e)));
+  } catch (e) {}
   return {
     peer: name,
     get open() { return !!c.open; },
@@ -68,29 +83,32 @@ function createTransport() {
           done = true;
           try { p.destroy(); } catch (e) {}
           t.lastError = '仲介サービスに接続できません（時間切れ）';
+          tlog('席 ' + (k + 1) + ' の取得が時間切れになりました（仲介サービスに届かない可能性）');
           rej(new Error(t.lastError));
         }, CLAIM_TIMEOUT_MS);
         const p = new window.Peer(id, { debug: 0, config: iceConfig() });
+        tlog('席 ' + (k + 1) + ' を取りに行きます（' + roomId + '）');
         p.on('open', () => {
           if (done) return;
           done = true; clearTimeout(timer);
           t.peer = p; t.myId = id;
+          tlog('席 ' + (k + 1) + ' を取りました');
           // 席を取ったあとは、相手からの接続を受け付ける
           p.on('connection', c => {
             const w = wrapConn(c, stripPrefix(c.peer));
             if (t._onConn) t._onConn(w); else t._pending.push(w);
           });
-          p.on('disconnected', () => { setTimeout(() => { try { p.reconnect(); } catch (e) {} }, 3000); });
+          p.on('disconnected', () => { tlog('仲介サービスから切れました（再接続します）'); setTimeout(() => { try { p.reconnect(); } catch (e) {} }, 3000); });
           // 相手が見つからない等のエラーは、そのつど自動で再試行されるので、ここでは記録だけ
-          p.on('error', e => { t.lastError = (e && e.type) || 'error'; });
+          p.on('error', e => { t.lastError = (e && e.type) || 'error'; tlog('通信エラー：' + t.lastError); });
           res(true);
         });
         p.on('error', e => {
           if (done) return;
           done = true; clearTimeout(timer);
           try { p.destroy(); } catch (x) {}
-          if (e && e.type === 'unavailable-id') res(false);
-          else { t.lastError = (e && e.type) || 'error'; rej(new Error(t.lastError)); }
+          if (e && e.type === 'unavailable-id') { tlog('席 ' + (k + 1) + ' はほかの人が使っています'); res(false); }
+          else { t.lastError = (e && e.type) || 'error'; tlog('席 ' + (k + 1) + ' を取れませんでした：' + t.lastError); rej(new Error(t.lastError)); }
         });
       });
     },
