@@ -76,6 +76,19 @@ function stepOut() {
   try { rm.set(key, value); } catch (e) { console.error(e); }
   outTimer = setTimeout(stepOut, PACE_MS);
 }
+// 統一のとき：指定した素材を、今この端末が持っている中身で全部送り直す（部屋の古い部分と混ざらないように）
+function resendBlobs(room, keys) {
+  if (!window.VoxelExt || !VoxelExt.blobGet) return Promise.resolve();
+  const jobs = keys.map(key => Promise.resolve(VoxelExt.blobGet(key)).then(text => {
+    if (rm !== room || typeof text !== 'string') return;
+    const f = fpOf(text);
+    sentFp.set(key, f);
+    const n = Math.max(1, Math.ceil(text.length / PART));
+    for (let i = 0; i < n; i++) outQ.push(['wb:' + enc(key) + '#' + i, text.slice(i * PART, (i + 1) * PART)]);
+    outQ.push(['wb:' + enc(key) + '#n', { n, fp: f }]);
+  }, () => {}));
+  return Promise.all(jobs).then(() => pump());
+}
 // 中身を、部屋の記録に分けて入れる（同じ中身は一度だけ）
 function sendBlobRefs(room, str) {
   if (!window.VoxelExt || !VoxelExt.blobGet) return;
@@ -348,5 +361,5 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else startUp();
 
 window.VoxelRTState = { KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length,
-  forgetSent: () => sentFp.clear(), blobProgress, askResend, missingLocalBlobs };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
+  forgetSent: () => sentFp.clear(), blobProgress, askResend, missingLocalBlobs, resendBlobs };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
 })();

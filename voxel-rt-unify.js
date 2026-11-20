@@ -146,6 +146,16 @@ async function press() {
     const save = VoxelWorld.buildSave();
     const ws = {};
     for (const k of KEYS) ws[k] = missing.size ? dropMissingRefs(getLocal(k), missing) : getLocal(k);
+    // 統一の前に、参照している素材を全部、今の中身で送り直す（部屋の古い部分と混ざった状態で統一しないため）
+    if (window.VoxelRTState && VoxelRTState.resendBlobs) {
+      const refKeys = new Set();
+      for (const k of KEYS) if (typeof ws[k] === 'string') for (const key of VoxelRTState.refsOf(ws[k])) refKeys.add(key);
+      await VoxelRTState.resendBlobs(room, [...refKeys]);
+      for (let i = 0; i < 1500 && VoxelRTState.pending() > 0; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        if (rm !== room) return;
+      }
+    }
     const payload = JSON.stringify({
       format: 'vcrt-unify-1', seed: save.seed ?? null,
       edits: (save.base && save.base.edits) || [], sounds: save.sounds || [], ws
@@ -195,17 +205,28 @@ function readPayload(room, gen) {
   return fpOf(s) === gen.fp ? s : null;
 }
 // 中身がそろっていれば、統一データを返す（まだなら null）
-function readyFor(room, gen) {
+// 統一データの解析結果を、同じ統一のあいだは使い回す（数MBのデータを毎回つなぎ直さないため）
+let uniCache = { id: null, fp: null, data: null };
+let forcedGenId = null;   // 強制の書き直しは、統一ごとに一度だけ
+function uniData(room, gen) {
+  if (uniCache.id === gen.id && uniCache.fp === gen.fp && uniCache.data) return uniCache.data;
   const text = readPayload(room, gen);
   if (text === null) return null;
   let data;
   try { data = JSON.parse(text); } catch (e) { return null; }
   if (!data || data.format !== 'vcrt-unify-1' || !data.ws) return null;
+  uniCache = { id: gen.id, fp: gen.fp, data };
+  return data;
+}
+function readyFor(room, gen) {
+  const data = uniData(room, gen);
+  if (!data) return null;
   const diffs = {};
   for (const k of KEYS) if (typeof data.ws[k] === 'string') diffs[k] = data.ws[k];
   if (window.VoxelRTState) {
     // 統一の中身は、この端末の同じ名前の中身より優先して書き直す（名前が同じでも別の中身のことがあるため）
-    VoxelRTState.assembleBlobs(room, true);
+    if (forcedGenId !== gen.id) { forcedGenId = gen.id; VoxelRTState.assembleBlobs(room, true); }
+    else VoxelRTState.assembleBlobs(room, false);
     if (!VoxelRTState.allReady(room, diffs)) return null;
   }
   return data;
@@ -359,11 +380,8 @@ function receiveStatus(room, gen) {
   let have = 0;
   for (let i = 0; i < gen.n; i++) if (typeof kvGet(room, 'uni:' + gen.id + ':p' + i) === 'string') have++;
   if (have < gen.n) return { pct: 30 * have / Math.max(1, gen.n), text: `統一データを受け取っています（${have} / ${gen.n} 通）`, missing: [] };
-  const text = readPayload(room, gen);
-  if (text === null) return { pct: 30, text: '統一データを確認しています…', missing: [] };
-  let data = null;
-  try { data = JSON.parse(text); } catch (e) { data = null; }
-  if (!data || !data.ws) return { pct: 30, text: '統一データを読み取れません（統一し直してもらってください）', missing: [] };
+  const data = uniData(room, gen);
+  if (!data) return { pct: 30, text: '統一データを確認しています…', missing: [] };
   const diffs = {};
   for (const k of KEYS) if (typeof data.ws[k] === 'string') diffs[k] = data.ws[k];
   const p = VoxelRTState.blobProgress(room, diffs);
