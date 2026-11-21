@@ -21,7 +21,7 @@
 
   // 通る点（[{x,z,y}, ...]）を、なめらかな曲線（Catmull-Rom）で結び、1マスごとの等間隔の点に分ける
   // 戻り値：path（各点 {x,z,s}：s は始点からの長さ）と、元の点ごとの長さ位置 ctrlS
-  function resamplePath(points) {
+  function resamplePath(points, step = 1) {
     if (points.length < 2) throw new Error('経路の点が2つ以上必要です');
     const P = points, N = 24;
     const dense = [];
@@ -43,15 +43,16 @@
     // 1マスごとに取り直す
     const path = [];
     let j = 0;
-    const count = Math.floor(total + 1e-9);
-    for (let i = 0; i <= count; i++) {
-      while (j < dense.length - 2 && cum[j + 1] < i) j++;
+    const count = Math.floor(total / step + 1e-9);
+    for (let k = 0; k <= count; k++) {
+      const target = k * step;
+      while (j < dense.length - 2 && cum[j + 1] < target) j++;
       const A = dense[j], B = dense[j + 1];
       const seg = (cum[j + 1] - cum[j]) || 1e-9;
-      const t = Math.min(1, Math.max(0, (i - cum[j]) / seg));
-      path.push({ x: A.x + (B.x - A.x) * t, z: A.z + (B.z - A.z) * t, s: i });
+      const t = Math.min(1, Math.max(0, (target - cum[j]) / seg));
+      path.push({ x: A.x + (B.x - A.x) * t, z: A.z + (B.z - A.z) * t, s: target });
     }
-    if (total - count > 1e-6) path.push({ x: last.x, z: last.z, s: total });
+    if (total - count * step > 1e-6) path.push({ x: last.x, z: last.z, s: total });
     return { path, ctrlS, total };
   }
 
@@ -75,14 +76,22 @@
   function generate(opts) {
     const { clip, front = 0, includeAir = false, points, baseY, maxOps = 300000, isAir = null } = opts;
     const F = frameOf(clip, front);
-    const { path, ctrlS, total } = resamplePath(points);
+    const SUB = 0.25;                          // 経路の刻み（斜めでも隙間が空かないように細かく置く）
+    const { path, ctrlS, total } = resamplePath(points, SUB);
     if (total < 1) throw new Error('経路が短すぎます');
-    const ys = points.map(p => Number(p.y) || 0);
-    const y0 = ys[0];
-    const hasRamp = ys.some(v => v !== y0);
+    // 高さはタップした面の高さをそのまま使う（点に高さが無いときだけ baseY）
+    const ys = points.map(p => (typeof p.y === 'number' && isFinite(p.y)) ? p.y : baseY);
+    const hasRamp = ys.some(v => v !== ys[0]);
     const map = new Map();                     // "x,y,z" -> id
     const colLow = new Map();                  // "x,z" -> { minY, id }（その場所で一番低い固体）
     const half = (F.W - 1) / 2;
+    const put = (wx, wy, wz, id) => {
+      const key = wx + ',' + wy + ',' + wz;
+      map.set(key, id);
+      const ck = wx + ',' + wz;
+      const cur = colLow.get(ck);
+      if (!cur || wy < cur.minY) colLow.set(ck, { minY: wy, id });
+    };
     for (let i = 0; i < path.length; i++) {
       const a = path[i];
       const b = path[Math.min(i + 1, path.length - 1)];
@@ -91,21 +100,24 @@
       const tl = Math.hypot(tx, tz) || 1;
       tx /= tl; tz /= tl;
       const nx = -tz, nz = tx;
-      const yb = baseY + Math.round(heightAt(ctrlS, ys, a.s) - y0);   // この位置の断面の底の高さ
-      const l = i % F.L;
+      const yb = Math.round(heightAt(ctrlS, ys, a.s));   // この位置の断面の底の高さ（タップした面の高さ）
+      const l = Math.floor(a.s) % F.L;                   // 断面の「長さ」の位置（経路1マスごとに1つ進む）
       for (let u = 0; u < F.W; u++) {
         const du = u - half;
         const wx = Math.round(a.x + nx * du);
         const wz = Math.round(a.z + nz * du);
         for (let y = 0; y < F.H; y++) {
           const id = F.at(u, y, l);
-          const wy = yb + y;
-          const key = wx + ',' + wy + ',' + wz;
-          if (id === 0) { if (includeAir) map.set(key, 0); continue; }
-          map.set(key, id);
-          const ck = wx + ',' + wz;
-          const cur = colLow.get(ck);
-          if (!cur || wy < cur.minY) colLow.set(ck, { minY: wy, id });
+          if (id === 0) { if (includeAir) map.set(wx + ',' + (yb + y) + ',' + wz, 0); continue; }
+          put(wx, yb + y, wz, id);
+        }
+        // 幅の中間（隣との間）も、どちらかが固体なら埋める（斜めの隙間を防ぐ）
+        if (u + 1 < F.W) {
+          const mx = Math.round(a.x + nx * (du + 0.5)), mz = Math.round(a.z + nz * (du + 0.5));
+          for (let y = 0; y < F.H; y++) {
+            const id = F.at(u, y, l) || F.at(u + 1, y, l);
+            if (id) put(mx, yb + y, mz, id);
+          }
         }
       }
       if (map.size > maxOps) throw new Error('生成するブロックが多すぎます（' + maxOps + '個まで）');
