@@ -19,80 +19,118 @@
     return { W: sx, H: sy, L: sz, at: (u, y, l) => ids[u + l * sx + y * plane] };
   }
 
-  // 通る点（[{x,z}, ...]）を、なめらかな曲線（Catmull-Rom）で結び、1マスごとの等間隔の点に分ける
+  // 通る点（[{x,z,y}, ...]）を、なめらかな曲線（Catmull-Rom）で結び、1マスごとの等間隔の点に分ける
+  // 戻り値：path（各点 {x,z,s}：s は始点からの長さ）と、元の点ごとの長さ位置 ctrlS
   function resamplePath(points) {
     if (points.length < 2) throw new Error('経路の点が2つ以上必要です');
+    const P = points, N = 24;
     const dense = [];
-    const P = points;
-    for (let s = 0; s < P.length - 1; s++) {
-      const p0 = P[Math.max(0, s - 1)], p1 = P[s], p2 = P[s + 1], p3 = P[Math.min(P.length - 1, s + 2)];
-      const n = 24;
-      for (let k = 0; k < n; k++) {
-        const t = k / n, t2 = t * t, t3 = t2 * t;
+    for (let k = 0; k < P.length - 1; k++) {
+      const p0 = P[Math.max(0, k - 1)], p1 = P[k], p2 = P[k + 1], p3 = P[Math.min(P.length - 1, k + 2)];
+      for (let j = 0; j < N; j++) {
+        const t = j / N, t2 = t * t, t3 = t2 * t;
         const f = (a, b, c, d) => 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
         dense.push({ x: f(p0.x, p1.x, p2.x, p3.x), z: f(p0.z, p1.z, p2.z, p3.z) });
       }
     }
-    dense.push({ x: P[P.length - 1].x, z: P[P.length - 1].z });
-    // 弧の長さで、1マスごとに取り直す
-    const out = [{ x: dense[0].x, z: dense[0].z }];
-    let carry = 0;   // 次の点までの、まだ使っていない長さ
-    for (let i = 1; i < dense.length; i++) {
-      let a = dense[i - 1], b = dense[i];
-      let seg = Math.hypot(b.x - a.x, b.z - a.z);
-      let pos = 0;     // この区間の中での位置（長さ）
-      while (carry + (seg - pos) >= 1) {
-        const need = 1 - carry;
-        pos += need;
-        const t = pos / seg;
-        out.push({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t });
-        carry = 0;
-      }
-      carry += seg - pos;
+    const last = P[P.length - 1];
+    dense.push({ x: last.x, z: last.z });
+    // 累積の長さ
+    const cum = [0];
+    for (let i = 1; i < dense.length; i++) cum.push(cum[i - 1] + Math.hypot(dense[i].x - dense[i - 1].x, dense[i].z - dense[i - 1].z));
+    const total = cum[cum.length - 1];
+    const ctrlS = P.map((_, k) => (k < P.length - 1 ? cum[k * N] : total));
+    // 1マスごとに取り直す
+    const path = [];
+    let j = 0;
+    const count = Math.floor(total + 1e-9);
+    for (let i = 0; i <= count; i++) {
+      while (j < dense.length - 2 && cum[j + 1] < i) j++;
+      const A = dense[j], B = dense[j + 1];
+      const seg = (cum[j + 1] - cum[j]) || 1e-9;
+      const t = Math.min(1, Math.max(0, (i - cum[j]) / seg));
+      path.push({ x: A.x + (B.x - A.x) * t, z: A.z + (B.z - A.z) * t, s: i });
     }
-    return out;
+    if (total - count > 1e-6) path.push({ x: last.x, z: last.z, s: total });
+    return { path, ctrlS, total };
   }
 
+  // 元の点の高さを、長さの位置で直線につなぐ
+  function heightAt(ctrlS, ys, s) {
+    if (s <= ctrlS[0]) return ys[0];
+    for (let k = 0; k < ctrlS.length - 1; k++) {
+      if (s <= ctrlS[k + 1]) {
+        const span = ctrlS[k + 1] - ctrlS[k] || 1e-9;
+        return ys[k] + (ys[k + 1] - ys[k]) * ((s - ctrlS[k]) / span);
+      }
+    }
+    return ys[ys.length - 1];
+  }
+
+  const SUPPORT_DEPTH = 8;   // 坂の下の支え（空気のところだけ、この深さまで埋める）
+
   // 経路と断面から、生成するブロックを計算する
-  // opts: { clip:{sx,sy,sz,ids}, front:0-3, includeAir:bool, points:[{x,z}], baseY:整数, maxOps }
+  // opts: { clip:{sx,sy,sz,ids}, front:0-3, includeAir, points:[{x,z,y}], baseY, maxOps, isAir:(x,y,z)=>bool（支えを埋める判定。省略可） }
   // 戻り値：{ ops:[{x,y,z,id}], length, slices }   （id が 0 のものは「空気＝消す」）
   function generate(opts) {
-    const { clip, front = 0, includeAir = false, points, baseY, maxOps = 300000 } = opts;
+    const { clip, front = 0, includeAir = false, points, baseY, maxOps = 300000, isAir = null } = opts;
     const F = frameOf(clip, front);
-    const path = resamplePath(points);
-    const total = path.length - 1;          // 全体の長さ（マス）
+    const { path, ctrlS, total } = resamplePath(points);
     if (total < 1) throw new Error('経路が短すぎます');
-    const map = new Map();                  // "x,y,z" -> id
+    const ys = points.map(p => Number(p.y) || 0);
+    const y0 = ys[0];
+    const hasRamp = ys.some(v => v !== y0);
+    const map = new Map();                     // "x,y,z" -> id
+    const colLow = new Map();                  // "x,z" -> { minY, id }（その場所で一番低い固体）
     const half = (F.W - 1) / 2;
-    for (let i = 0; i <= total; i++) {
-      // 経路上の位置と向き
-      const a = path[Math.min(i, total)];
-      const b = path[Math.min(i + 1, total)];
+    for (let i = 0; i < path.length; i++) {
+      const a = path[i];
+      const b = path[Math.min(i + 1, path.length - 1)];
       let tx = b.x - a.x, tz = b.z - a.z;
-      if (i === total) { tx = a.x - path[total - 1].x; tz = a.z - path[total - 1].z; }
+      if (i === path.length - 1) { tx = a.x - path[i - 1].x; tz = a.z - path[i - 1].z; }
       const tl = Math.hypot(tx, tz) || 1;
       tx /= tl; tz /= tl;
-      const nx = -tz, nz = tx;              // 進む向きの右（左の向きは符号を逆に）
-      const l = i % F.L;                    // この位置で使う断面の「長さ」の位置
+      const nx = -tz, nz = tx;
+      const yb = baseY + Math.round(heightAt(ctrlS, ys, a.s) - y0);   // この位置の断面の底の高さ
+      const l = i % F.L;
       for (let u = 0; u < F.W; u++) {
         const du = u - half;
         const wx = Math.round(a.x + nx * du);
         const wz = Math.round(a.z + nz * du);
         for (let y = 0; y < F.H; y++) {
           const id = F.at(u, y, l);
-          const key = wx + ',' + (baseY + y) + ',' + wz;
+          const wy = yb + y;
+          const key = wx + ',' + wy + ',' + wz;
           if (id === 0) { if (includeAir) map.set(key, 0); continue; }
           map.set(key, id);
+          const ck = wx + ',' + wz;
+          const cur = colLow.get(ck);
+          if (!cur || wy < cur.minY) colLow.set(ck, { minY: wy, id });
         }
       }
       if (map.size > maxOps) throw new Error('生成するブロックが多すぎます（' + maxOps + '個まで）');
+    }
+    // 坂：一番低いところより高い場所の下は、空気のところだけ支えを埋める
+    if (hasRamp && isAir) {
+      let low = Infinity;
+      for (const v of colLow.values()) low = Math.min(low, v.minY);
+      for (const [ck, v] of colLow) {
+        if (v.minY <= low) continue;
+        const [wx, wz] = ck.split(',').map(Number);
+        for (let d = 1; d <= SUPPORT_DEPTH; d++) {
+          const y = v.minY - d;
+          const key = wx + ',' + y + ',' + wz;
+          if (map.has(key) || !isAir(wx, y, wz)) break;
+          map.set(key, v.id);
+        }
+      }
     }
     const ops = [];
     for (const [key, id] of map) {
       const [x, y, z] = key.split(',').map(Number);
       ops.push({ x, y, z, id });
     }
-    return { ops, length: total, slices: total + 1 };
+    return { ops, length: total, slices: path.length };
   }
 
   // ---------- 画面（道メーカーのパネル・ボタン・生成・元に戻す） ----------
@@ -112,6 +150,47 @@
       ids[x + z * sx + y * sx * sz] = getBlock(r.min[0] + x, r.min[1] + y, r.min[2] + z);
     }
     return { clip: { sx, sy, sz, ids }, baseY: r.min[1] };
+  }
+
+  // ---------- プレビュー（生成される形を、設置する前に見せる） ----------
+  let prevMesh = null;
+  const PREVIEW_MAX = 20000;
+  const airAt = (x, y, z) => getBlock(x, y, z) === 0;
+  function clearPreview() {
+    if (!prevMesh) return;
+    try { scene.remove(prevMesh); prevMesh.geometry.dispose(); prevMesh.material.dispose(); } catch (e) {}
+    prevMesh = null;
+  }
+  // 道路と同じ設定（端末ごと）：オン＝設置される通りの見た目（色は近似）、オフ＝白い四角
+  function realPreviewOn() {
+    try { return localStorage.getItem('vcrt_rd_preview_v1') !== '0'; } catch (e) { return true; }
+  }
+  function updatePreview() {
+    clearPreview();
+    if (!st.open || !st.clip || st.points.length < 2 || st.busy) return;
+    if (typeof THREE === 'undefined' || typeof scene === 'undefined') return;
+    let r;
+    try {
+      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: airAt });
+    } catch (e) { return; }
+    const ops = r.ops.filter(o => o.id !== 0).slice(0, PREVIEW_MAX);
+    if (!ops.length) return;
+    const real = realPreviewOn();
+    const mat = real
+      ? new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 })
+      : new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3, depthWrite: false });
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), mat, ops.length);
+    const m = new THREE.Matrix4(), c = new THREE.Color();
+    ops.forEach((o, i) => {
+      m.makeTranslation(o.x + 0.5, o.y + 0.5, o.z + 0.5);
+      mesh.setMatrixAt(i, m);
+      if (real) { c.setHSL((o.id * 0.618) % 1, 0.25, 0.62); mesh.setColorAt(i, c); }
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (real && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    prevMesh = mesh;
   }
 
   function refreshInfo() {
@@ -134,9 +213,11 @@
     st.panel.style.display = 'block';
     st.open = true;
     refreshInfo();
+    clearPreview();
   }
   function closePanel() {
     st.open = false;
+    clearPreview();
     if (st.panel) st.panel.style.display = 'none';
   }
 
@@ -146,12 +227,14 @@
     if (typeof raycastBlock !== 'function') return;
     const h = raycastBlock(7);
     if (!h) { say('道の上をタップしてください'); return; }
-    st.points.push({ x: h.x + h.nx, z: h.z + h.nz });
+    st.points.push({ x: h.x + h.nx, z: h.z + h.nz, y: h.y + h.ny });
     say('経路の点を追加しました（' + st.points.length + '点）');
     refreshInfo();
+    updatePreview();
   }
 
   function applyOps(ops) {
+    clearPreview();
     st.busy = true; setBusy(true);
     const record = [];
     let i = 0;
@@ -175,7 +258,7 @@
     if (st.points.length < 2) { say('経路の点を2つ以上タップしてください'); return; }
     let r;
     try {
-      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY });
+      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: airAt });
     } catch (e) { say(e.message); return; }
     applyOps(r.ops);
   }
@@ -223,14 +306,14 @@
     d.querySelector('#rmGen').style.background = '#2e6a9a';
     st.panel = d;
     st.info = d.querySelector('#rmInfo');
-    d.querySelector('#rmFront').addEventListener('change', e => { st.front = Number(e.target.value) || 0; });
-    d.querySelector('#rmAir').addEventListener('change', e => { st.includeAir = !!e.target.checked; });
-    d.querySelector('#rmUndoPt').addEventListener('click', () => { st.points.pop(); refreshInfo(); });
-    d.querySelector('#rmResetPt').addEventListener('click', () => { st.points = []; refreshInfo(); });
+    d.querySelector('#rmFront').addEventListener('change', e => { st.front = Number(e.target.value) || 0; updatePreview(); });
+    d.querySelector('#rmAir').addEventListener('change', e => { st.includeAir = !!e.target.checked; updatePreview(); });
+    d.querySelector('#rmUndoPt').addEventListener('click', () => { st.points.pop(); refreshInfo(); updatePreview(); });
+    d.querySelector('#rmResetPt').addEventListener('click', () => { st.points = []; refreshInfo(); clearPreview(); });
     d.querySelector('#rmRecapture').addEventListener('click', () => {
       const got = clipFromWand();
       if (!got) { say('先にステッキで道の断面を範囲選択してください'); return; }
-      st.clip = got; st.points = []; refreshInfo();
+      st.clip = got; st.points = []; refreshInfo(); clearPreview();
     });
     d.querySelector('#rmGen').addEventListener('click', onGenerate);
     d.querySelector('#rmUndo').addEventListener('click', onUndo);
