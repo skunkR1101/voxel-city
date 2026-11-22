@@ -24,9 +24,28 @@ window.setBlock = function (x, y, z, t) {
   const old = getBlock(x, y, z);
   const r = origSet.apply(this, arguments);
   const now = getBlock(x, y, z);
-  if (now !== old && rm && rm.peerId) rm.set('blk:' + x + ',' + y + ',' + z, encodeT(now));
+  if (now !== old && rm && rm.peerId) sendCell(x, y, z);
   return r;
 };
+// 向き・色（ブロックの状態）も、ブロックと一緒に送る。送るのは、同じ手の中の処理が終わったあと（状態を入れてから送るため）
+const sendSoon = new Set();
+function sendCell(x, y, z) {
+  const k = 'blk:' + x + ',' + y + ',' + z;
+  if (sendSoon.has(k)) return;
+  sendSoon.add(k);
+  setTimeout(() => {
+    sendSoon.delete(k);
+    if (!rm || !rm.peerId || typeof getBlock !== 'function') return;
+    rm.set(k, encodeFull(x, y, z, getBlock(x, y, z)));
+  }, 0);
+}
+function encodeFull(x, y, z, t) {
+  const base = encodeT(t);
+  const st = (window.VoxelExt && VoxelExt.stateOf && t !== 0) ? VoxelExt.stateOf(x, y, z) : null;
+  if (!st) return base;
+  const s = { rot: st.rot ?? 0, color: st.color ?? null, qb: st.qb ?? null };
+  return (base !== null && typeof base === 'object') ? { ...base, s } : { t: base, s };
+}
 
 // カスタムブロックは、端末ごとに番号が違うことがあるので、番号と「中身のしるし」を一緒に送る
 // 受け取る側は、しるしで自分の同じ中身のブロックの番号に読み替える（同じ見た目になるように）
@@ -38,8 +57,8 @@ function encodeT(t) {
   return d ? { t, h: VoxelCustom.defHash(d) } : t;
 }
 function decodeT(v) {
-  if (v && typeof v === 'object') return { t: v.t, h: typeof v.h === 'string' ? v.h : null };
-  return { t: v, h: null };
+  if (v && typeof v === 'object') return { t: v.t, h: typeof v.h === 'string' ? v.h : null, s: v.s && typeof v.s === 'object' ? v.s : null };
+  return { t: v, h: null, s: null };
 }
 // 受け取った番号を、この端末の番号に読み替える（見つからなければ、そのまま）
 function localT(t, h) {
@@ -55,8 +74,8 @@ function onBlk(key, v, meta) {
   const d = v === undefined ? { t: 0, h: null } : decodeT(v);     // 削除は空気（0）として扱う
   if (!Number.isInteger(d.t) || d.t < 0 || d.t > 65535) return;
   const r = localT(d.t, d.h);
-  if (!r.found) unresolved.set(key, { x: +m[1], y: +m[2], z: +m[3], h: d.h }); else unresolved.delete(key);
-  queue.push([+m[1], +m[2], +m[3], r.t]);
+  if (!r.found) unresolved.set(key, { x: +m[1], y: +m[2], z: +m[3], h: d.h, s: d.s }); else unresolved.delete(key);
+  queue.push([+m[1], +m[2], +m[3], r.t, d.s]);
   pump();
 }
 // 定義が後から届いたら、待っていたブロックを正しい番号にする
@@ -65,7 +84,7 @@ setInterval(() => {
     const r = localT(-1, u.h);
     if (!r.found || r.t < 0) continue;
     unresolved.delete(key);
-    queue.push([u.x, u.y, u.z, r.t]);
+    queue.push([u.x, u.y, u.z, r.t, u.s]);
   }
   if (unresolved.size === 0 && queue.length === 0) return;
   pump();
@@ -79,8 +98,9 @@ function pump() {
     applying = true;
     try {
       while (queue.length && n < APPLY_PER_FRAME) {
-        const [x, y, z, t] = queue.shift();
+        const [x, y, z, t, s] = queue.shift();
         if (getBlock(x, y, z) !== t) window.setBlock(x, y, z, t);
+        if (s && t !== 0 && window.VoxelExt && VoxelExt.applyRemoteState) VoxelExt.applyRemoteState(x, y, z, s);
         n++;
       }
     } finally { applying = false; }
@@ -99,8 +119,8 @@ function applyEntries(list) {
     const d = !e || e.del ? { t: 0, h: null } : decodeT(e.v);
     if (!Number.isInteger(d.t) || d.t < 0 || d.t > 65535) continue;
     const r = localT(d.t, d.h);
-    if (!r.found) unresolved.set(key, { x: +m[1], y: +m[2], z: +m[3], h: d.h }); else unresolved.delete(key);
-    queue.push([+m[1], +m[2], +m[3], r.t]);
+    if (!r.found) unresolved.set(key, { x: +m[1], y: +m[2], z: +m[3], h: d.h, s: d.s }); else unresolved.delete(key);
+    queue.push([+m[1], +m[2], +m[3], r.t, d.s]);
   }
   pump();
 }
@@ -116,5 +136,5 @@ function attach(room) {
 }
 
 if (window.VoxelRTUI && window.VoxelRTUI.onRoom) window.VoxelRTUI.onRoom(attach);
-window.VoxelRTWorld = { attach, apply: applyEntries, pending: () => queue.length };
+window.VoxelRTWorld = { attach, apply: applyEntries, pending: () => queue.length, touch: (x, y, z) => sendCell(x, y, z) };
 })();

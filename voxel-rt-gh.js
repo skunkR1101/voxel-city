@@ -11,13 +11,16 @@
 
 const GH_KEY = 'voxelcraft_gh_v1';          // 既存の形式 {repo, token}
 const POLL_MS = 3000;
-const QUIET_MS = 30000;                      // 変更が止まってから、この時間後に自動保存
+const QUIET_MS = 10000;                      // 変更が止まってから、この時間後に自動保存（相手がオフラインになっても、保存の内容が残るように短め）
+const PULL_MS = 30000;                       // 部屋にいる間、GitHub の新しい内容を定期的に受け取る（元の端末や相手がオフラインでも届くように）
 const LOAD_AFTER_JOIN_MS = 4000;
 const FILE_VERSION = 1;
 
 let rm = null;
 let timers = [];
+let lastN = -1, lastX = -1;                  // 最後に保存した時点の部屋の印
 let changedAt = 0, pending = false, busy = false;
+let pulling = false;
 
 // ---------- 設定・通信 ----------
 function normRepo(s) {
@@ -130,7 +133,7 @@ async function saveRoom(room) {
     const obj = { v: FILE_VERSION, room: room.roomId, saved: new Date().toISOString(), entries };
     const r = await putFile(c, path, obj, cur ? cur.sha : null, 'world save: ' + room.roomId);
     if (r !== 'conflict') {
-      pending = false;
+      lastN = room.dig.n; lastX = room.dig.x; pending = false;
       return entries.length;
     }
   }
@@ -145,93 +148,13 @@ async function loadRoom(room) {
   return mergeInto(room, cur.json.entries);
 }
 
-// ---------- 旧サーバーワールドの取り込み（旧版の rooms/<部屋ID>.json と .pN を読む） ----------
-const OLD_SEP = '\u0001';                    // 旧版の、分割した項目の区切り
-async function gunzipB64(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return new Response(stream).text();
-}
-// 旧版の、1ファイルの中の項目の一覧（圧縮されているものも開く）
-async function oldFileList(o) {
-  if (!o) return [];
-  if (o.v === 3 && o.d) {
-    const j = JSON.parse(await gunzipB64(o.d));
-    return Array.isArray(j.kv) ? j.kv : [];
-  }
-  return Array.isArray(o.kv) ? o.kv : [];
-}
-// 分けて保存された項目を、元に戻す（旧版の ghAssemble と同じ考え方）
-function oldAssemble(list) {
-  const out = [];
-  const groups = new Map();
-  for (const [k, v] of list) {
-    if (!k.includes(OLD_SEP) || !v || !v.pc) { out.push([k, v]); continue; }
-    const base = k.split(OLD_SEP)[0];
-    let byTs = groups.get(base);
-    if (!byTs) { byTs = new Map(); groups.set(base, byTs); }
-    const ts = v.ts || 0;
-    let g = byTs.get(ts);
-    if (!g) { g = { n: v.pc[1], peer: v.peer, del: v.del, pieces: new Map() }; byTs.set(ts, g); }
-    g.pieces.set(v.pc[0], v.pv);
-  }
-  for (const [base, byTs] of groups) {
-    const cands = [...byTs.entries()].sort((x, y) => y[0] - x[0]);
-    for (const [ts, g] of cands) {
-      if (g.pieces.size !== g.n) continue;
-      let val;
-      try { val = JSON.parse([...Array(g.n).keys()].map(i => g.pieces.get(i)).join('')); } catch (e) { continue; }
-      out.push([base, { v: val, ts, peer: g.peer, del: g.del }]);
-      break;
-    }
-  }
-  return out;
-}
-// 旧サーバーワールドを読み、新しい形（blk:）に直す。戻り値：{entries, blocks, skipped}
-async function readOldWorld(c, oldId) {
-  const base = 'rooms/' + encodeURIComponent(oldId);
-  let list = [];
-  let found = 0;
-  for (let k = 0; k < 200; k++) {
-    const path = base + (k ? '.p' + k : '') + '.json';
-    const f = await getFile(c, path);
-    if (!f) break;
-    found++;
-    list = list.concat(await oldFileList(f.json));
-  }
-  if (!found) return null;
-  const items = oldAssemble(list);
-  const entries = [];
-  let skipped = 0;
-  for (const [key, val] of items) {
-    if (!val || typeof key !== 'string' || !key.startsWith('b:')) { skipped++; continue; }
-    const pos = key.slice(2);
-    if (val.del) { entries.push(['blk:' + pos, { ts: val.ts || 0, peer: String(val.peer || ''), del: true }]); continue; }
-    if (typeof val.v !== 'number' || !Number.isInteger(val.v)) { skipped++; continue; }   // カスタムブロック等は、今の仕組みで別に同期する
-    entries.push(['blk:' + pos, { v: val.v, ts: val.ts || 0, peer: String(val.peer || ''), del: false }]);
-  }
-  return { entries, blocks: entries.length, skipped, files: found };
-}
-async function importOldWorld(oldId) {
-  if (!rm) throw new Error('部屋に入ってから取り込んでください');
-  const c = ghCfg();
-  if (!c) throw new Error('GitHub のトークンが、この端末にありません');
-  const r = await readOldWorld(c, oldId);
-  if (!r) throw new Error('旧版の保存（rooms/' + oldId + '.json）が見つかりません（部屋IDを確かめてください）');
-  const n = mergeInto(rm, r.entries);
-  return { n, blocks: r.blocks, skipped: r.skipped, files: r.files };
-}
-
 // ---------- 画面（部屋パネルの下） ----------
-let statusEl, saveBtn, loadBtn, oldBtn;
+let statusEl, saveBtn, loadBtn;
 function setStatus(t) { if (statusEl) statusEl.textContent = t; }
 function updateButtons() {
   const on = !!rm;
   if (saveBtn) saveBtn.disabled = !on || busy;
   if (loadBtn) loadBtn.disabled = !on || busy;
-  if (oldBtn) oldBtn.disabled = !on || busy;
 }
 function buildCard() {
   const host = document.getElementById('rtCard');
@@ -250,9 +173,6 @@ function buildCard() {
   loadBtn = document.createElement('button'); loadBtn.className = 'go sub'; loadBtn.textContent = 'GitHub から読み込む';
   loadBtn.addEventListener('click', () => manualLoad());
   box.appendChild(loadBtn);
-  oldBtn = document.createElement('button'); oldBtn.className = 'go sub'; oldBtn.textContent = '旧版のサーバーワールドを取り込む';
-  oldBtn.addEventListener('click', () => manualImportOld());
-  box.appendChild(oldBtn);
   host.parentNode.insertBefore(box, host.nextSibling);
   updateButtons();
 }
@@ -261,17 +181,6 @@ async function manualSave() {
   busy = true; updateButtons(); setStatus('保存しています…');
   try { const n = await saveRoom(rm); setStatus('保存しました（' + n + ' 件）'); }
   catch (e) { setStatus('保存できませんでした：' + (e && e.message || e)); }
-  finally { busy = false; updateButtons(); }
-}
-async function manualImportOld() {
-  if (!rm) return;
-  const id = window.prompt('旧版のサーバーワールドの部屋IDを入れてください（今の部屋IDと同じなら、そのまま OK）', rm.roomId);
-  if (!id) return;
-  busy = true; updateButtons(); setStatus('旧版の保存を読んでいます…');
-  try {
-    const r = await importOldWorld(id.trim());
-    setStatus('取り込みました（ブロック ' + r.blocks + ' 件・対象外 ' + r.skipped + ' 件）。「今すぐ保存」で新しい保存先にも残せます');
-  } catch (e) { setStatus('取り込めませんでした：' + (e && e.message || e)); }
   finally { busy = false; updateButtons(); }
 }
 async function manualLoad() {
@@ -284,41 +193,68 @@ async function manualLoad() {
   finally { busy = false; updateButtons(); }
 }
 
-// ---------- 自動保存（変更が止まって30秒たったら保存） ----------
-let seenN = -1, seenX = -1, pollT = null;
+// ---------- 自動保存（変更の印を見て、止まったら保存） ----------
 function tick() {
   if (!rm || busy) return;
   const n = rm.dig.n, x = rm.dig.x;
-  if (n !== seenN || x !== seenX) { seenN = n; seenX = x; changedAt = Date.now(); pending = true; }
+  if (n !== lastN || x !== lastX) {
+    if (!pending) { pending = true; changedAt = Date.now(); }
+    else if (Date.now() - changedAt < QUIET_MS && (n !== tick.seenN || x !== tick.seenX)) changedAt = Date.now();
+    tick.seenN = n; tick.seenX = x;
+  }
   if (pending && Date.now() - changedAt >= QUIET_MS && ghCfg()) {
     busy = true; updateButtons();
     setStatus('自動で保存しています…');
     saveRoom(rm).then(k => setStatus('自動保存しました（' + k + ' 件）'))
-      .catch(e => { changedAt = Date.now(); setStatus('自動保存できませんでした：' + (e && e.message || e)); })
+      .catch(e => { pending = true; changedAt = Date.now(); setStatus('自動保存できませんでした：' + (e && e.message || e)); })
       .finally(() => { busy = false; updateButtons(); });
   }
 }
+tick.seenN = -1; tick.seenX = -1;
 
 // ---------- 部屋に入った・出た ----------
 function attach(room) {
-  timers.forEach(clearTimeout); timers = [];
-  if (pollT) { clearInterval(pollT); pollT = null; }
+  timers.forEach(clearTimeout); clearInterval(timers.poll); clearInterval(timers.pull); timers = [];
   const left = rm;
-  // 部屋を出るとき、変更が残っていれば、出る前の部屋の内容を保存する
-  if (!room && left && pending && ghCfg()) saveRoom(left).catch(() => {});
   rm = room || null;
-  seenN = -1; seenX = -1; pending = false;
-  if (!rm) { setStatus(ghCfg() ? '部屋に入ると、変更が止まって30秒後に自動で保存されます' : 'GitHub のトークンが、この端末にありません（設定の「マルチ」で登録）'); updateButtons(); return; }
-  pollT = setInterval(tick, POLL_MS);
-  // 入ってしばらくしたら、保存の内容を読み込む
-  timers.push(setTimeout(() => { if (rm === room && ghCfg()) manualLoadQuiet(room); }, LOAD_AFTER_JOIN_MS));
+  // 部屋を出るとき、変更が残っていれば、出る前の部屋の内容を保存する
+  if (!room && left && pending && ghCfg()) {
+    saveRoom(left).catch(() => {});
+  }
+  if (!rm) { lastN = -1; lastX = -1; pending = false; setStatus(ghCfg() ? '部屋に入ると、変更が止まって30秒後に自動で保存されます' : 'GitHub のトークンが、この端末にありません（設定の「マルチ」で登録）'); updateButtons(); return; }
+  lastN = -1; lastX = -1; pending = false;
+  timers.poll = setInterval(tick, POLL_MS);
+  timers.pull = setInterval(() => { pullQuiet(room); }, PULL_MS);
+  // 入ってしばらくしたら、保存の内容を読み込む（部屋の中の人がいれば、その人の内容を先に受け取る）
+  timers.push(setTimeout(() => {
+    if (rm !== room || !ghCfg()) return;
+    manualLoadQuiet(room);
+  }, LOAD_AFTER_JOIN_MS));
   updateButtons();
 }
+// 部屋にいる間の、静かな受け取り（画面の表示は変えない。新しいものがあったときだけ知らせる）
+async function pullQuiet(room) {
+  if (rm !== room || !ghCfg() || busy || pulling || document.visibilityState === 'hidden') return;
+  pulling = true;
+  try {
+    const n = await loadRoom(room);
+    if (rm === room && n > 0) setStatus('GitHub から新しい内容を ' + n + ' 件受け取りました');
+  } catch (e) { /* 次の回にまた試す */ }
+  finally { pulling = false; }
+}
+// 画面を閉じる・背景に回すときは、変更が残っていれば、すぐ保存する（相手が後からでも受け取れるように）
+function flushNow() {
+  if (rm && pending && !busy && ghCfg()) { saveRoom(rm).catch(() => {}); }
+}
+window.addEventListener('pagehide', flushNow);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
+
 async function manualLoadQuiet(room) {
   busy = true; updateButtons();
   try {
     const n = await loadRoom(room);
     if (rm === room) setStatus(n < 0 ? 'この部屋の保存は、まだありません' : (n ? '保存から ' + n + ' 件読み込みました' : '保存と同じ内容です'));
+    if (n > 0) { lastN = -1; lastX = -1; pending = true; changedAt = Date.now() - QUIET_MS + 5000; }
   } catch (e) { if (rm === room) setStatus('読み込めませんでした：' + (e && e.message || e)); }
   finally { busy = false; updateButtons(); }
 }
@@ -331,5 +267,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTGh = { saveRoom, loadRoom, mergeInto, ghCfg, pathOf, readOldWorld, importOldWorld };
+window.VoxelRTGh = { saveRoom, loadRoom, mergeInto, ghCfg, pathOf };
 })();

@@ -101,8 +101,20 @@ loadBstate();
 setInterval(saveBstate, 1500);
 // 向き・色を変えたマスを、部屋へも送る（相手の画面でも同じ向きになる）
 function touchState(x, y, z) {
-  if (window.VoxelMulti && VoxelMulti.touchCell) VoxelMulti.touchCell(x, y, z);
+  if (window.VoxelRTWorld && VoxelRTWorld.touch) VoxelRTWorld.touch(x, y, z);       // 今の部屋（rt）へ、向き・色も含めて送る
+  else if (window.VoxelMulti && VoxelMulti.touchCell) VoxelMulti.touchCell(x, y, z);
 }
+// 相手から届いた向き・色を、この端末のブロックに入れる（同じ中身なら何もしない）
+function applyRemoteState(x, y, z, st) {
+  if (!st || typeof st !== 'object') return;
+  const k = keyOf(x, y, z);
+  const next = { color: st.color ?? null, rot: st.rot ?? 0, qb: st.qb ?? null };
+  const cur = blockState.get(k);
+  if (cur && JSON.stringify(cur) === JSON.stringify(next)) return;
+  blockState.set(k, next);
+  remeshAt(x, y, z);
+}
+function stateOf(x, y, z) { return blockState.get(keyOf(x, y, z)) || null; }
 // 別機能（斜めグリッドなど）が置き場所を決めるとき、プレビューの位置を受け取る関数
 let placeHook = null;
 function setPlaceHook(fn) { placeHook = fn; }
@@ -4595,7 +4607,7 @@ async function applyRemoteExt(text) {
 }
 window.VoxelExt = {
   T_TRAFFIC, T_CROWD, T_SOUND, T_PHONE, T_SHIP_MAKER, T_CANNON, T_ROAD_MAKER, TOOLS, CUSTOM_BASE, CUSTOM_MAX, ext, defRT, blockState, tiltList,
-  keyOf, nextId, saveExt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp, setPlaceHook,
+  keyOf, nextId, saveExt, applyRemoteState, stateOf, remeshAt, renderInventory, addTilt, removeTilt, pickTarget, pushHistory, isTool, registerDef, refreshHotbarVisuals, fullExtJson, importExtJson, blobGet, blobPut: blobWriteOp, blobDel: blobDelOp, setPlaceHook,
   applyRemoteExt, hydrated: () => hydrateReady, makeModelInstance,
   // ステッキで始点と終点を選び終えているときの範囲（利益地点の設定に使う）。選んでいなければ null
   wandRange: () => { if (wand.stage !== 2) return null; const b = selBounds(); return b ? { min: b.min.slice(), max: b.max.slice() } : null; }
