@@ -62,6 +62,30 @@ function fpOf(text) {
   return text.length.toString(36) + '-' + h1.toString(36) + '-' + h2.toString(36);
 }
 const enc = key => encodeURIComponent(key);
+// 中身を部品に分ける。文字の途中（二つに割れる文字）では切らない。部品ごとの印も作る（届いたかを一つずつ確かめるため）
+function splitText(text, size) {
+  const out = [];
+  let i = 0;
+  while (i < text.length) {
+    let e = Math.min(text.length, i + size);
+    if (e < text.length) { const c = text.charCodeAt(e - 1); if (c >= 0xD800 && c <= 0xDBFF) e--; }
+    out.push(text.slice(i, e));
+    i = e;
+  }
+  if (!out.length) out.push('');
+  return out;
+}
+function packBlob(text) {
+  const parts = splitText(text, PART);
+  return { parts, meta: { n: parts.length, fp: fpOf(text), ph: parts.map(fpOf) } };
+}
+function queueBlob(key, pk) {
+  for (let i = 0; i < pk.parts.length; i++) outQ.push(['wb:' + enc(key) + '#' + i, pk.parts[i]]);
+  outQ.push(['wb:' + enc(key) + '#n', pk.meta]);   // 目次は部品のあとに送る
+}
+const problems = new Map();        // キー -> 届かない理由（画面に出す）
+const partSeen = new WeakMap();    // 部品の確かめ結果（同じ部品の印を、毎回計算しないため）
+const pendingPut = new Set();
 
 // ---------- 送る（少しずつ） ----------
 function pump() {
@@ -81,11 +105,9 @@ function resendBlobs(room, keys) {
   if (!window.VoxelExt || !VoxelExt.blobGet) return Promise.resolve();
   const jobs = keys.map(key => Promise.resolve(VoxelExt.blobGet(key)).then(text => {
     if (rm !== room || typeof text !== 'string') return;
-    const f = fpOf(text);
-    sentFp.set(key, f);
-    const n = Math.max(1, Math.ceil(text.length / PART));
-    for (let i = 0; i < n; i++) outQ.push(['wb:' + enc(key) + '#' + i, text.slice(i * PART, (i + 1) * PART)]);
-    outQ.push(['wb:' + enc(key) + '#n', { n, fp: f }]);
+    const pk = packBlob(text);
+    sentFp.set(key, pk.meta.fp);
+    queueBlob(key, pk);
   }, () => {}));
   return Promise.all(jobs).then(() => pump());
 }
@@ -95,12 +117,10 @@ function sendBlobRefs(room, str) {
   for (const key of refsOf(str)) {
     Promise.resolve(VoxelExt.blobGet(key)).then(text => {
       if (rm !== room || typeof text !== 'string') return;
-      const f = fpOf(text);
-      if (sentFp.get(key) === f) return;
-      sentFp.set(key, f);
-      const n = Math.max(1, Math.ceil(text.length / PART));
-      for (let i = 0; i < n; i++) outQ.push(['wb:' + enc(key) + '#' + i, text.slice(i * PART, (i + 1) * PART)]);
-      outQ.push(['wb:' + enc(key) + '#n', { n, fp: f }]);
+      const pk = packBlob(text);
+      if (sentFp.get(key) === pk.meta.fp) return;
+      sentFp.set(key, pk.meta.fp);
+      queueBlob(key, pk);
       pump();
     }, () => {});
   }
@@ -128,24 +148,54 @@ function blobReady(room, key) {
   const meta = remoteMetaOf(room, key);
   return !!meta && localFpOf(key) === meta.fp;
 }
+// 部品の状態：ok（届いて、印も合う）／missing（まだ）／bad（届いたが中身が合わない）
+function partState(room, key, i, meta) {
+  const e = room.kv.get('wb:' + enc(key) + '#' + i);
+  if (!e || e.del || typeof e.v !== 'string') return 'missing';
+  if (!meta.ph) return 'ok';
+  const c = partSeen.get(e);
+  if (c && c.ph === meta.ph) return c.r;
+  const r = fpOf(e.v) === meta.ph[i] ? 'ok' : 'bad';
+  partSeen.set(e, { ph: meta.ph, r });
+  return r;
+}
+function partsState(room, key, meta) {
+  let missing = 0, bad = 0, text = '';
+  for (let i = 0; i < meta.n; i++) {
+    const r = partState(room, key, i, meta);
+    if (r === 'missing') missing++;
+    else if (r === 'bad') bad++;
+    else text += room.kv.get('wb:' + enc(key) + '#' + i).v;
+  }
+  return { missing, bad, text: (missing || bad) ? null : text };
+}
+// 端末に書く（失敗したら、少し待って何度か試す。そのあとは理由を画面に出す）
+function putBlob(key, text, fp, tries) {
+  if (pendingPut.has(key)) return;
+  pendingPut.add(key);
+  Promise.resolve().then(() => VoxelExt.blobPut(key, text)).then(() => {
+    pendingPut.delete(key);
+    localFps[key] = fp; saveFps(); problems.delete(key);
+  }, () => {
+    pendingPut.delete(key);
+    if (tries < 3) setTimeout(() => putBlob(key, text, fp, tries + 1), 800);
+    else problems.set(key, '端末に保存できませんでした（この端末の保存領域を確かめてください）');
+  });
+}
 function assembleBlobs(room, force) {
+  if (!window.VoxelExt || !VoxelExt.blobPut) return;
   for (const k of KEYS) {
     const remote = kvValue(room, k);
     if (!remote) continue;
     for (const key of refsOf(remote)) {
       const meta = remoteMetaOf(room, key);
-      if (!meta || (!force && localFpOf(key) === meta.fp)) continue;   // force: 統一のときは、この端末の同じ名前の中身も書き直す
-      let text = '';
-      let complete = true;
-      for (let i = 0; i < meta.n; i++) {
-        const e = room.kv.get('wb:' + enc(key) + '#' + i);
-        if (!e || e.del || typeof e.v !== 'string') { complete = false; break; }
-        text += e.v;
-      }
-      if (!complete || fpOf(text) !== meta.fp) continue;
-      const fp = meta.fp;
-      if (!window.VoxelExt || !VoxelExt.blobPut) continue;
-      Promise.resolve(VoxelExt.blobPut(key, text)).then(() => { localFps[key] = fp; saveFps(); }, () => {});
+      if (!meta) { problems.set(key, '素材の目次がまだ届いていません'); continue; }
+      if (!force && localFpOf(key) === meta.fp) { problems.delete(key); continue; }   // force: 統一のときは、この端末の同じ名前の中身も書き直す
+      const ps = partsState(room, key, meta);
+      if (ps.missing) { problems.set(key, '素材の部品がまだ ' + ps.missing + ' 個届いていません'); continue; }
+      if (ps.bad) { problems.set(key, '素材の部品 ' + ps.bad + ' 個の中身が合いません（送り直しを頼みます）'); continue; }
+      if (fpOf(ps.text) !== meta.fp) { problems.set(key, '素材の全体の印が合いません（送り直しを頼みます）'); continue; }
+      putBlob(key, ps.text, meta.fp, 0);
     }
   }
 }
@@ -302,16 +352,11 @@ function blobProgress(room, diffs) {
       const meta = remoteMetaOf(room, key);
       if (!meta) { total += 1; missing.push(key); continue; }
       total += meta.n;
-      let have = 0;
-      for (let i = 0; i < meta.n; i++) {
-        const e = room.kv.get('wb:' + enc(key) + '#' + i);
-        if (e && !e.del && typeof e.v === 'string') have++;
-      }
-      ready += have;
+      for (let i = 0; i < meta.n; i++) if (partState(room, key, i, meta) === 'ok') ready++;
       if (!blobReady(room, key)) missing.push(key);
     }
   }
-  return { total, ready, missing };
+  return { total, ready, missing, problems: [...problems.values()].slice(0, 2) };
 }
 // 足りない素材を、部屋の相手に送り直してもらう（少し間をあけて、何度でも頼む）
 let lastNeedAt = 0;
@@ -323,14 +368,14 @@ function askResend(room, keys) {
 }
 // 送り直しの依頼が来たら、この端末が持っている素材を、もう一度部屋へ送る（中身が同じでも送り直す）
 function onNeed(room, v) {
-  if (rm !== room || !v || !Array.isArray(v.keys) || !window.VoxelExt || !VoxelExt.blobGet) return;
+  if (rm !== room || !v) return;
+  if (v.uni !== undefined) { if (window.VoxelRTUnify && VoxelRTUnify.onNeedUni) VoxelRTUnify.onNeedUni(room, v); return; }
+  if (!Array.isArray(v.keys) || !window.VoxelExt || !VoxelExt.blobGet) return;
   for (const key of v.keys.slice(0, 40)) {
     if (typeof key !== 'string' || !key) continue;
     Promise.resolve(VoxelExt.blobGet(key)).then(text => {
       if (rm !== room || typeof text !== 'string') return;
-      const n = Math.max(1, Math.ceil(text.length / PART));
-      for (let i = 0; i < n; i++) outQ.push(['wb:' + enc(key) + '#' + i, text.slice(i * PART, (i + 1) * PART)]);
-      outQ.push(['wb:' + enc(key) + '#n', { n, fp: fpOf(text) }]);
+      queueBlob(key, packBlob(text));
       pump();
     }, () => {});
   }
@@ -361,5 +406,5 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else startUp();
 
 window.VoxelRTState = { KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length,
-  forgetSent: () => sentFp.clear(), blobProgress, askResend, missingLocalBlobs, resendBlobs };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
+  forgetSent: () => sentFp.clear(), blobProgress, askResend, missingLocalBlobs, resendBlobs, splitText, packBlob };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
 })();

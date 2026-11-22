@@ -147,7 +147,7 @@
 
   // ---------- 画面（道メーカーのパネル・ボタン・生成・元に戻す） ----------
   const T_ROAD_MAKER = 62;
-  const st = { clip: null, points: [], front: 0, includeAir: false, open: false, busy: false, undo: null, panel: null, info: null, btn: null };
+  const st = { clip: null, points: [], front: 0, includeAir: false, support: true, open: false, busy: false, undo: null, panel: null, info: null, btn: null };
   function say(m) { try { if (typeof toast === 'function') toast(m); } catch (e) {} }
 
   // ステッキで選んだ範囲を、断面（ブロックの箱）として読む
@@ -183,7 +183,7 @@
     if (typeof THREE === 'undefined' || typeof scene === 'undefined') return;
     let r;
     try {
-      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: airAt });
+      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: st.support ? airAt : null });
     } catch (e) { return; }
     const ops = r.ops.filter(o => o.id !== 0).slice(0, PREVIEW_MAX);
     if (!ops.length) return;
@@ -270,7 +270,7 @@
     if (st.points.length < 2) { say('経路の点を2つ以上タップしてください'); return; }
     let r;
     try {
-      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: airAt });
+      r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: st.support ? airAt : null });
     } catch (e) { say(e.message); return; }
     applyOps(r.ops);
   }
@@ -303,6 +303,7 @@
       '<select id="rmFront" style="width:100%;margin-top:4px;padding:6px">' +
       '<option value="0">0°（そのまま）</option><option value="1">90°</option><option value="2">180°</option><option value="3">270°</option></select></label>' +
       '<label style="display:block;margin:6px 0"><input type="checkbox" id="rmAir"> 範囲内の空気も含める（空いたマスを消す）</label>' +
+      '<label style="display:block;margin:6px 0"><input type="checkbox" id="rmSupport" checked> 坂の土台を自動で作る（宙に浮く部分の下を埋める）</label>' +
       '<label style="display:block;margin:6px 0;opacity:.45"><input type="checkbox" disabled> 道リストに登録（段階4で追加）</label>' +
       '<label style="display:block;margin:6px 0;opacity:.45"><input type="checkbox" disabled> 滑らか生成（斜め・傾き：段階3で追加）</label>' +
       '<div style="margin:8px 0;opacity:.85">道の上をタップして経路の点を追加します（中間点も同じ）。2点以上で生成できます。</div>' +
@@ -320,6 +321,7 @@
     st.info = d.querySelector('#rmInfo');
     d.querySelector('#rmFront').addEventListener('change', e => { st.front = Number(e.target.value) || 0; updatePreview(); });
     d.querySelector('#rmAir').addEventListener('change', e => { st.includeAir = !!e.target.checked; updatePreview(); });
+    d.querySelector('#rmSupport').addEventListener('change', e => { st.support = !!e.target.checked; updatePreview(); });
     d.querySelector('#rmUndoPt').addEventListener('click', () => { st.points.pop(); refreshInfo(); updatePreview(); });
     d.querySelector('#rmResetPt').addEventListener('click', () => { st.points = []; refreshInfo(); clearPreview(); });
     d.querySelector('#rmRecapture').addEventListener('click', () => {

@@ -31,6 +31,8 @@ const C = {
   customs: [],             // 自分の人（保存用）
   preview: null,           // 選んだ範囲（まだ生成していない）{x1,z1,x2,z2,y}
   pick: null,              // 1つ目の点 {x,y,z}
+  diag: false,             // 斜め範囲モード（true のとき、点は地面の正確な位置・2点で線を引き、幅は diagW）
+  diagW: 4,                // 斜め範囲の幅（ブロック）
   seq: 1, hseq: 1, gseq: 1,
   dirty: true
 };
@@ -157,7 +159,7 @@ const isSolid = b => b !== AIR && b !== WATER;
 // 指定の高さから下へ探して、最初に当たる地面の高さ（範囲をどれだけ高く選んでも、地面を歩く）
 function groundAt(x, z, fromY) {
   const ix = Math.floor(x), iz = Math.floor(z);
-  const top = Math.floor(fromY) + 3;
+  const top = Math.floor(fromY) + 1;   // 選んだ床の少し上から下へ（天井の上には乗らない）
   for (let y = top; y > top - 48; y--) {
     if (isSolid(getBlock(ix, y, iz))) return y + 1;
   }
@@ -173,8 +175,50 @@ function groundNear(x, z, feetY) {
   }
   return null;
 }
+// 範囲の形：箱（ブロックに沿う長方形）か、斜めの四角形（pts: 4つの角。順番に並ぶ）
+function inRect(r, x, z) {
+  if (!(x >= r.x1 && x <= r.x2 && z >= r.z1 && z <= r.z2)) return false;
+  if (!r.pts) return true;
+  // 凸四角形の内側か（4辺すべてに対して同じ側にあるか）
+  let pos = 0, neg = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = r.pts[i], b = r.pts[(i + 1) % 4];
+    const cr = (b[0] - a[0]) * (z - a[1]) - (b[1] - a[1]) * (x - a[0]);
+    if (cr > 0) pos++; else if (cr < 0) neg++;
+  }
+  return pos === 0 || neg === 0;
+}
+function randInRect(r) {
+  for (let i = 0; i < 30; i++) {
+    const x = rnd(r.x1 + 0.4, r.x2 - 0.4), z = rnd(r.z1 + 0.4, r.z2 - 0.4);
+    if (inRect(r, x, z)) return { x, z };
+  }
+  return null;
+}
+// 斜めの範囲：点Aと点Bを結ぶ線を中心に、幅 w の四角形
+function makeDiagRect(a, b, w) {
+  const dx = b.x - a.x, dz = b.z - a.z, L = Math.hypot(dx, dz) || 1;
+  const nx = -dz / L * w / 2, nz = dx / L * w / 2;
+  const pts = [[a.x + nx, a.z + nz], [b.x + nx, b.z + nz], [b.x - nx, b.z - nz], [a.x - nx, a.z - nz]];
+  const xs = pts.map(p => p[0]), zs = pts.map(p => p[1]);
+  return { x1: Math.min(...xs), x2: Math.max(...xs), z1: Math.min(...zs), z2: Math.max(...zs),
+    y: Math.max(a.y, b.y), yLo: Math.min(a.y, b.y), pts, diag: true };
+}
+function boxRect(a, b) {
+  return { x1: Math.min(a.x, b.x), x2: Math.max(a.x, b.x), z1: Math.min(a.z, b.z), z2: Math.max(a.z, b.z), y: Math.max(a.y, b.y), yLo: Math.min(a.y, b.y) };
+}
+// 描画用：中心・大きさ・向き
+function orientedOf(r) {
+  if (!r.pts) return { cx: (r.x1 + r.x2) / 2, cz: (r.z1 + r.z2) / 2, sx: r.x2 - r.x1, sz: r.z2 - r.z1, rot: 0 };
+  const [p0, p1, p2, p3] = r.pts;
+  const e0x = p1[0] - p0[0], e0z = p1[1] - p0[1];
+  const e1x = p2[0] - p1[0], e1z = p2[1] - p1[1];
+  return { cx: (p0[0] + p1[0] + p2[0] + p3[0]) / 4, cz: (p0[1] + p1[1] + p2[1] + p3[1]) / 4,
+    sx: Math.hypot(e0x, e0z), sz: Math.hypot(e1x, e1z), rot: -Math.atan2(e0z, e0x) };
+}
+function cornersOf(r) { return r.pts ? r.pts.map(p => [p[0], p[1]]) : [[r.x1, r.z1], [r.x2, r.z1], [r.x2, r.z2], [r.x1, r.z2]]; }
 function inRects(g, x, z) {
-  for (const r of g.rects) if (x >= r.x1 && x <= r.x2 && z >= r.z1 && z <= r.z2) return true;
+  for (const r of g.rects) if (inRect(r, x, z)) return true;
   return false;
 }
 function groupOf(x, z) {
@@ -183,7 +227,10 @@ function groupOf(x, z) {
 }
 function areaOf(g) {
   let a = 0;
-  for (const r of g.rects) a += (r.x2 - r.x1) * (r.z2 - r.z1);
+  for (const r of g.rects) {
+    if (r.pts) { const o = orientedOf(r); a += o.sx * o.sz; }
+    else a += (r.x2 - r.x1) * (r.z2 - r.z1);
+  }
   return a;
 }
 function targetCount(g) { return Math.round(g.density * areaOf(g) / 100); }
@@ -192,6 +239,8 @@ function rnd(a, b) { return a + Math.random() * (b - a); }
 // 範囲の中の、流れに合った出現の位置（流れの上流の縁）
 function spawnPoint(g, a) {
   const r = g.rects[Math.floor(Math.random() * g.rects.length)];
+  const yy = r.yLo != null ? r.yLo : r.y;
+  if (r.pts) { const q = randInRect(r); return q ? { x: q.x, z: q.z, y: yy } : { x: NaN, z: NaN, y: yy }; }
   const sx = Math.sin(a), sz = Math.cos(a);
   let x, z;
   if (Math.abs(sx) > Math.abs(sz)) {
@@ -201,7 +250,7 @@ function spawnPoint(g, a) {
     z = sz > 0 ? r.z1 + 0.4 : r.z2 - 0.4;
     x = rnd(r.x1 + 0.4, r.x2 - 0.4);
   }
-  return { x, z, y: r.y };
+  return { x, z, y: yy };
 }
 function pickVariantId(g) {
   const ids = g.variety.filter(id => variants.has(id));
@@ -215,7 +264,9 @@ function spawnHuman(g) {
   if (flow.mode === 'rand') a = Math.random() * Math.PI * 2;
   else if (flow.mode === 'two') a = (flow.deg * Math.PI / 180) + (Math.random() < 0.5 ? Math.PI : 0);
   else a = flow.deg * Math.PI / 180 + rnd(-0.12, 0.12);
-  const p = (flow.mode === 'rand') ? (() => { const r = g.rects[Math.floor(Math.random() * g.rects.length)]; return { x: rnd(r.x1 + 0.4, r.x2 - 0.4), z: rnd(r.z1 + 0.4, r.z2 - 0.4), y: r.y }; })() : spawnPoint(g, a);
+  let p;
+  if (flow.mode === 'rand') { const r = g.rects[Math.floor(Math.random() * g.rects.length)]; const q = randInRect(r); if (!q) return; p = { x: q.x, z: q.z, y: r.yLo != null ? r.yLo : r.y }; }
+  else { p = spawnPoint(g, a); }
   if (!inRects(g, p.x, p.z)) return;
   const gy = groundAt(p.x, p.z, p.y);
   if (gy == null) return;
@@ -281,7 +332,7 @@ function simulateCrowd(dt) {
 // 3. 範囲の生成（重なったら、ひとつにまとめる）
 // ============================================================
 function rectOverlap(a, b) {
-  return a.x1 < b.x2 && b.x1 < a.x2 && a.z1 < b.z2 && b.z1 < a.z2;
+  return a.x1 < b.x2 && b.x1 < a.x2 && a.z1 < b.z2 && b.z1 < a.z2;   // 箱どうしの重なり（斜めも外側の箱で判定）
 }
 function commitPreview() {
   if (!C.preview) { toast2('先に、始点と終点を選んでください'); return; }
@@ -310,15 +361,17 @@ function tapGround() {
   const g = VR.surfacePoint();
   if (!g) { toast2('地面に向けてタップしてください'); return; }
   const gr = VR.getGrid() || 1;
-  const p = { x: Math.round(g.x / gr) * gr, y: g.y, z: Math.round(g.z / gr) * gr };
+  // 斜めモードは地面の正確な位置、通常はブロックのマス目に合わせる
+  const p = C.diag ? { x: g.x, y: g.y, z: g.z } : { x: Math.round(g.x / gr) * gr, y: g.y, z: Math.round(g.z / gr) * gr };
   if (!C.pick) {
     C.pick = p;
-    toast2('始点を指定しました。終点をタップ');
+    toast2(C.diag ? '斜め：始点を指定しました。線の終点をタップ' : '始点を指定しました。終点をタップ');
     return;
   }
-  const r = { x1: Math.min(C.pick.x, p.x), x2: Math.max(C.pick.x, p.x), z1: Math.min(C.pick.z, p.z), z2: Math.max(C.pick.z, p.z), y: Math.max(C.pick.y, p.y) };
+  const r = C.diag ? makeDiagRect(C.pick, p, C.diagW) : boxRect(C.pick, p);
   C.pick = null;
-  if (r.x2 - r.x1 < 1 || r.z2 - r.z1 < 1) { toast2('もう少し広く選んでください'); return; }
+  if (!C.diag && (r.x2 - r.x1 < 1 || r.z2 - r.z1 < 1)) { toast2('もう少し広く選んでください'); return; }
+  if (C.diag && Math.max(r.x2 - r.x1, r.z2 - r.z1) < 1) { toast2('もう少し長く選んでください'); return; }
   C.preview = r;
   toast2('範囲を選びました。「範囲生成」で人混みにします');
 }
@@ -348,12 +401,14 @@ function rebuildAreaMeshes() {
     const col = new THREE.Color(g.col);
     for (const r of g.rects) {
       const pl = new THREE.Mesh(planeGeo, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.28, depthWrite: false, side: THREE.DoubleSide }));
-      pl.scale.set(r.x2 - r.x1, 1, r.z2 - r.z1);
-      pl.position.set((r.x1 + r.x2) / 2, r.y + 0.08, (r.z1 + r.z2) / 2);
+      const o = orientedOf(r);
+      pl.scale.set(o.sx, 1, o.sz);
+      pl.rotation.y = o.rot;
+      pl.position.set(o.cx, r.y + 0.08, o.cz);
       pl.renderOrder = 5;
       scene.add(pl);
       m.plane.push(pl);
-      const pts = [new THREE.Vector3(r.x1, r.y + 0.1, r.z1), new THREE.Vector3(r.x2, r.y + 0.1, r.z1), new THREE.Vector3(r.x2, r.y + 0.1, r.z2), new THREE.Vector3(r.x1, r.y + 0.1, r.z2)];
+      const pts = cornersOf(r).map(c => new THREE.Vector3(c[0], r.y + 0.1, c[1]));
       const ln = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: col }));
       scene.add(ln);
       m.line.push(ln);
@@ -368,7 +423,11 @@ function setAreaVisible(on) {
 let previewMesh = null;
 function updatePreviewMesh() {
   const show = holding() && started && !menuOpen && !paused;
-  const r = C.preview || (C.pick && groundP() ? { x1: Math.min(C.pick.x, groundP().x), x2: Math.max(C.pick.x, groundP().x), z1: Math.min(C.pick.z, groundP().z), z2: Math.max(C.pick.z, groundP().z), y: C.pick.y } : null);
+  let r = C.preview;
+  if (!r && C.pick) {
+    const cur = C.diag ? VR.surfacePoint() : groundP();
+    if (cur) r = C.diag ? makeDiagRect(C.pick, { x: cur.x, y: cur.y, z: cur.z }, C.diagW) : boxRect(C.pick, cur);
+  }
   if (!show || !r) { if (previewMesh) previewMesh.visible = false; return; }
   if (!previewMesh) {
     previewMesh = new THREE.Mesh(planeGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide }));
@@ -376,8 +435,10 @@ function updatePreviewMesh() {
     scene.add(previewMesh);
   }
   previewMesh.visible = true;
-  previewMesh.scale.set(Math.max(0.2, r.x2 - r.x1), 1, Math.max(0.2, r.z2 - r.z1));
-  previewMesh.position.set((r.x1 + r.x2) / 2, r.y + 0.1, (r.z1 + r.z2) / 2);
+  const o = orientedOf(r);
+  previewMesh.scale.set(Math.max(0.2, o.sx), 1, Math.max(0.2, o.sz));
+  previewMesh.rotation.y = o.rot;
+  previewMesh.position.set(o.cx, r.y + 0.1, o.cz);
 }
 
 // ============================================================
@@ -599,6 +660,8 @@ hud.innerHTML = `
   <div class="row">
     <button class="tbtn" data-a="gen">範囲生成</button>
     <button class="tbtn" data-a="cancel">選択をやめる</button>
+    <button class="tbtn" data-a="diag">斜め：オフ</button>
+    <button class="tbtn" data-a="diagw">斜め幅 4</button>
     <button class="tbtn" data-a="types">人の種類</button>
   </div>
   <div class="info" id="crInfo"></div>`;
@@ -610,6 +673,8 @@ hud.addEventListener('click', e => {
   if (a === 'gen') commitPreview();
   else if (a === 'cancel') { C.pick = null; C.preview = null; toast2('選択をやめました'); }
   else if (a === 'types') openTypesPanel();
+  else if (a === 'diag') { C.diag = !C.diag; C.pick = null; C.preview = null; b.textContent = '斜め：' + (C.diag ? 'オン' : 'オフ'); toast2(C.diag ? '斜めモード：2点で線を引き、その両側に広がる範囲になります' : 'ブロックのマスに沿った範囲に戻しました'); }
+  else if (a === 'diagw') { const ws = [2, 4, 6, 8, 12]; C.diagW = ws[(ws.indexOf(C.diagW) + 1) % ws.length]; b.textContent = '斜め幅 ' + C.diagW; }
 });
 function updateHud() {
   const show = holding() && started && !menuOpen && !paused;

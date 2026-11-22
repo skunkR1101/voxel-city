@@ -161,13 +161,15 @@ async function press() {
       edits: (save.base && save.base.edits) || [], sounds: save.sounds || [], ws
     });
     const id = newId();
-    const n = Math.max(1, Math.ceil(payload.length / PART));
-    const items = [];
-    for (let i = 0; i < n; i++) items.push({ key: 'uni:' + id + ':p' + i, value: payload.slice(i * PART, (i + 1) * PART) });
+    const parts = VoxelRTState.splitText(payload, PART);
+    const n = parts.length;
+    const ph = parts.map(fpOf);
+    const items = parts.map((p, i) => ({ key: 'uni:' + id + ':p' + i, value: p }));
+    sent = { id, items };
     say('統一データを送っています…（' + n + '通）');
     if (!(await sendAll(room, items))) return;
     const prev = kvGet(room, GEN);
-    room.set(GEN, { id, n, fp: fpOf(payload) });
+    room.set(GEN, { id, n, fp: fpOf(payload), ph });
     const entry = kvEntry(room, GEN);
     if (!entry || !entry.v || entry.v.id !== id) { say('統一できませんでした（部屋につながっていません）'); return; }
     setAdopted(room.roomId, { id, ts: entry.ts });
@@ -195,19 +197,49 @@ async function press() {
 }
 
 // ---------- 受け取る（ほかの端末が統一したとき） ----------
-function readPayload(room, gen) {
-  let s = '';
+// 統一データの部品のうち、足りない・中身が合わないものの番号
+function uniPartMissing(room, gen) {
+  const out = [];
   for (let i = 0; i < gen.n; i++) {
-    const p = kvGet(room, 'uni:' + gen.id + ':p' + i);
-    if (typeof p !== 'string') return null;
-    s += p;
+    const e = room.kv.get('uni:' + gen.id + ':p' + i);
+    if (!e || e.del || typeof e.v !== 'string') { out.push(i); continue; }
+    if (!gen.ph) continue;
+    const c = uniSeen.get(e);
+    let ok;
+    if (c && c.ph === gen.ph) ok = c.ok;
+    else { ok = fpOf(e.v) === gen.ph[i]; uniSeen.set(e, { ph: gen.ph, ok }); }
+    if (!ok) out.push(i);
   }
+  return out;
+}
+function readPayload(room, gen) {
+  if (uniPartMissing(room, gen).length) return null;
+  let s = '';
+  for (let i = 0; i < gen.n; i++) s += room.kv.get('uni:' + gen.id + ':p' + i).v;
   return fpOf(s) === gen.fp ? s : null;
+}
+// 足りない部品を、送った端末に頼む（何度でも、少し間をあけて）
+function askUni(room, gen, idxs) {
+  const t = Date.now();
+  if (!idxs.length || t - lastUniAsk < 5000) return;
+  lastUniAsk = t;
+  try { room.ephemeral('need:' + room.peerId, { uni: gen.id, parts: idxs.slice(0, 300) }); } catch (e) { console.error(e); }
+}
+// 送った端末：足りないと頼まれた部品だけ、もう一度送る
+function onNeedUni(room, v) {
+  if (rm !== room || !sent || v.uni !== sent.id) return;
+  const idx = Array.isArray(v.parts)
+    ? v.parts.filter(i => Number.isInteger(i) && i >= 0 && i < sent.items.length).slice(0, 300)
+    : sent.items.map((_, i) => i);
+  sendAll(room, idx.map(i => sent.items[i]));
 }
 // 中身がそろっていれば、統一データを返す（まだなら null）
 // 統一データの解析結果を、同じ統一のあいだは使い回す（数MBのデータを毎回つなぎ直さないため）
 let uniCache = { id: null, fp: null, data: null };
 let forcedGenId = null;   // 強制の書き直しは、統一ごとに一度だけ
+let sent = null;          // 押した端末：送った統一の部品（足りないと言われたら、同じものを送り直す）
+const uniSeen = new WeakMap();
+let lastUniAsk = 0;
 function uniData(room, gen) {
   if (uniCache.id === gen.id && uniCache.fp === gen.fp && uniCache.data) return uniCache.data;
   const text = readPayload(room, gen);
@@ -375,20 +407,25 @@ function hideRecv() {
   recvTrack.lastPct = -1; recvTrack.lastChangeAt = 0;
   if (recvBar) recvBar.style.display = 'none';
 }
-// 受け取りの段階：統一データの通数、そのあとの素材の数（全体に対する割合）
+// 受け取りの段階：統一データの通数（届いて、印も合う数）、そのあとの素材の数（全体に対する割合）
 function receiveStatus(room, gen) {
-  let have = 0;
-  for (let i = 0; i < gen.n; i++) if (typeof kvGet(room, 'uni:' + gen.id + ':p' + i) === 'string') have++;
-  if (have < gen.n) return { pct: 30 * have / Math.max(1, gen.n), text: `統一データを受け取っています（${have} / ${gen.n} 通）`, missing: [] };
+  const miss = uniPartMissing(room, gen);
+  if (miss.length) {
+    const have = gen.n - miss.length;
+    return { pct: 30 * have / Math.max(1, gen.n), text: `統一データを受け取っています（${have} / ${gen.n} 通）`, missing: [], uniMissing: miss, problems: [] };
+  }
   const data = uniData(room, gen);
-  if (!data) return { pct: 30, text: '統一データを確認しています…', missing: [] };
+  if (!data) {
+    // 部品はそろっているのに全体の印が合わない：全部を送り直してもらう
+    return { pct: 30, text: '統一データの全体の印が合いません', missing: [], uniMissing: Array.from({ length: gen.n }, (_, i) => i), problems: [] };
+  }
   const diffs = {};
   for (const k of KEYS) if (typeof data.ws[k] === 'string') diffs[k] = data.ws[k];
   const p = VoxelRTState.blobProgress(room, diffs);
   const pct = p.total ? 30 + 70 * p.ready / p.total : 100;
-  return { pct, text: `素材を受け取っています（${p.ready} / ${p.total}）`, missing: p.missing };
+  return { pct, text: `素材を受け取っています（${p.ready} / ${p.total}）`, missing: p.missing, uniMissing: [], problems: p.problems };
 }
-// 進みを見て、画面に出す。止まったら、足りない素材を送り直してもらう
+// 進みを見て、画面に出す。止まったら、足りない部品・素材を送り直してもらう
 function receiveProgress(room, gen) {
   const s = receiveStatus(room, gen);
   const now = Date.now();
@@ -397,8 +434,10 @@ function receiveProgress(room, gen) {
   let text = s.text;
   if (idle > 15000) {
     text += '（進みが止まっています。送り直しを依頼しています）';
+    if (s.uniMissing.length) askUni(room, gen, s.uniMissing);
     if (s.missing.length) VoxelRTState.askResend(room, s.missing);
   }
+  if (s.problems.length) text += '。理由：' + s.problems[0];
   if (idle > 120000) text += '。統一した端末がオンラインか確かめてください。それでも進まない場合は、その端末で「ワールド作業データを統一」をもう一度押してください';
   showRecv(s.pct, text);
   setStatusText(text);
@@ -471,5 +510,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTUnify = { skipBlk, busy, press, check: () => check(rm), pending: () => pressing, autoSyncOn, setAutoSync };
+window.VoxelRTUnify = { skipBlk, busy, press, check: () => check(rm), pending: () => pressing, autoSyncOn, setAutoSync, onNeedUni };
 })();
