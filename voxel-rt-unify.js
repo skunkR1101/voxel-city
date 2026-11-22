@@ -259,8 +259,9 @@ function readyFor(room, gen) {
     // 統一の中身は、この端末の同じ名前の中身より優先して書き直す（名前が同じでも別の中身のことがあるため）
     if (forcedGenId !== gen.id) { forcedGenId = gen.id; VoxelRTState.assembleBlobs(room, true); }
     else VoxelRTState.assembleBlobs(room, false);
-    if (!VoxelRTState.allReady(room, diffs)) return null;
   }
+  // 素材（画像・モデル）がそろうのは待たない。統一データ（地形・作業データ）が届いたら、先に読み込む。
+  // 素材はそのあとも届き続けるので、そろったら一度だけ読み直して反映する（finishBlobs）
   return data;
 }
 function putPending(seed, edits) {
@@ -296,10 +297,25 @@ async function adopt(room, gen, ts, data) {
     say('統一データを読み込めませんでした（保存領域の容量が足りない可能性があります）');
     return;
   }
-  setAdopted(room.roomId, { id: gen.id, ts });
+  const dIn = {};
+  for (const k of KEYS) if (typeof data.ws[k] === 'string') dIn[k] = data.ws[k];
+  const blobsReady = window.VoxelRTState ? VoxelRTState.allReady(room, dIn) : true;
+  setAdopted(room.roomId, { id: gen.id, ts, pendingBlobs: !blobsReady });
   const inv = L.makeInvite(location.href, room.roomId, room.password);
   try { location.hash = inv.slice(inv.indexOf('#')); } catch (e) {}
   location.reload();
+}
+
+// 統一のあとで素材がまだ届いていなかったとき：そろったら、一度だけ読み直して画像・モデルを反映する
+function finishBlobs(room, gen, a) {
+  const data = uniData(room, gen);
+  if (!data || !window.VoxelRTState) return;
+  const diffs = {};
+  for (const k of KEYS) if (typeof data.ws[k] === 'string') diffs[k] = data.ws[k];
+  VoxelRTState.assembleBlobs(room, false);
+  if (!VoxelRTState.allReady(room, diffs)) return;
+  setAdopted(room.roomId, { id: a.id, ts: a.ts });
+  if (window.confirm('統一の素材（画像・モデル）がそろいました。画面に反映するため、再読み込みしますか？')) location.reload();
 }
 
 // 自動反映の設定（この端末だけの設定。ワールドの保存とは別の場所に保存する）
@@ -317,7 +333,7 @@ function check(room) {
   if (!e || !e.v || typeof e.v.id !== 'string' || e.del) return;
   const gen = e.v;
   const a = adoptedFor(room.roomId);
-  if (a && a.id === gen.id) return;
+  if (a && a.id === gen.id) { if (a.pendingBlobs) finishBlobs(room, gen, a); return; }
   if (obsGen !== gen.id) {
     // 初めて見た統一：入ったばかりに見つけたものは「確認してから」、入ったあとに出てきたものは強制
     // 自動反映がオンなら、確認せずに読み込む
