@@ -221,8 +221,28 @@ function recentlyAdopted() {
   try { return Date.now() - Number(sessionStorage.getItem(ADOPT_MARK) || 0) < ADOPT_QUIET_MS; } catch (e) { return false; }
 }
 // 読み込んで、再読み込みする（部屋に入り直すために、招待リンクを #に入れておく）
-function adoptAndReload(room, diffs) {
+// 傾きブロックの一覧（この端末だけの記録）は、上書きせずに合わせる。
+// 相手の一覧で置き換えると、この端末だけにあった傾きブロックが消えてしまうため、記録の印（key）で和集合にする
+const TILT_KEY = 'voxelcraft_tilt_v1';
+async function mergedTilt(remoteJson) {
+  const parse = t => { try { const v = JSON.parse(t || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
+  let mine = [...parse(getLocal(TILT_KEY))];
+  try { if (window.VoxelExt && VoxelExt.blobGet) mine = mine.concat(parse(await VoxelExt.blobGet('idb:' + TILT_KEY))); } catch (e) {}
+  const byKey = new Map();
+  for (const r of [...mine, ...parse(remoteJson)]) {
+    if (!r || typeof r.key !== 'string') continue;
+    const cur = byKey.get(r.key);
+    if (!cur || (Number(r.ts) || 0) > (Number(cur.ts) || 0)) byKey.set(r.key, r);
+  }
+  return JSON.stringify([...byKey.values()]);
+}
+async function adoptAndReload(room, diffs) {
   if (window.VoxelRTUnify && VoxelRTUnify.busy()) return;
+  if (typeof diffs[TILT_KEY] === 'string') {
+    const m = await mergedTilt(diffs[TILT_KEY]);
+    diffs = { ...diffs, [TILT_KEY]: m };
+    try { if (window.VoxelExt && VoxelExt.blobPut) await VoxelExt.blobPut('idb:' + TILT_KEY, m); } catch (e) {}
+  }
   for (const k of Object.keys(diffs)) setLocal(k, diffs[k]);
   try { sessionStorage.setItem(ADOPT_MARK, String(Date.now())); } catch (e) {}
   const inv = L.makeInvite(location.href, room.roomId, room.password);
@@ -405,6 +425,7 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTState = { KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length,
+window.VoxelRTState = {
+  mergedTilt, TILT_KEY, KEYS, refsOf, fpOf, pushLocal, remoteDiffs, assembleBlobs, joinCheck, checkLive, allReady, pending: () => outQ.length,
   forgetSent: () => sentFp.clear(), blobProgress, askResend, missingLocalBlobs, resendBlobs, splitText, packBlob };   // 送った中身の記録を消す（次の pushLocal で、中身をすべて送り直す）
 })();

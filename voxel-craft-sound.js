@@ -290,6 +290,9 @@ const fileSentAt = new Map();        // id -> 送った時刻（同じ版を何�
 const fileIn = new Map();            // id -> { ver, n, name, type, parts: Map(版 -> Map(番号 -> 文字)) }
 const fileDone = new Map();          // id -> 使えるようにした版
 const fileBusy = new Set();
+const fileParts = new Map(); // id -> { ver, parts[] }：送った音声の中身（足りないと言われたら、その分だけ送り直す）
+const needAt = new Map();    // id -> 最後に送り直した時刻（連打しない）
+const askAt = new Map();     // id -> 最後に「足りない」と頼んだ時刻
 function fileVerOf(d) {               // 版：サイズと名前から作る（コロンを含まない）
   let h = 5381;
   for (const ch of String(d.fileName || '')) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
@@ -320,6 +323,9 @@ async function sendFile(d) {
     const n = Math.max(1, Math.ceil(b64.length / FILE_PART));
     LIVE.send('sndf:' + d.id, { ver, n, name: d.fileName, type: blob.type || '' });
     for (let i = 0; i < n; i++) LIVE.send('sndc:' + d.id + ':' + ver + ':' + i, b64.slice(i * FILE_PART, (i + 1) * FILE_PART));
+    const parts = [];
+    for (let i = 0; i < n; i++) parts.push(b64.slice(i * FILE_PART, (i + 1) * FILE_PART));
+    fileParts.set(d.id, { ver, parts });
     const old = fileSent.get(d.id);
     if (old && old.ver !== ver) for (let i = 0; i < old.n; i++) LIVE.send('sndc:' + d.id + ':' + old.ver + ':' + i, undefined, true);
     fileSent.set(d.id, { ver, n });
@@ -331,6 +337,19 @@ function ensureFiles() {
   if (!isRoomOn()) return;
   const kv = LIVE.kv();
   if (!kv) return;
+  // 受け取り側が「足りない」と頼んできた部分だけ、もう一度送る（届くまで）
+  for (const d of defs.values()) {
+    if (d.src !== 'local' || !d.fileName) continue;
+    const cache = fileParts.get(d.id);
+    const req = kv.get('sndneed:' + d.id);
+    if (!cache || cache.ver !== fileVerOf(d) || !req || req.del || !req.v || req.v.ver !== cache.ver) continue;
+    if (Date.now() - (Number(req.v.t) || 0) > 60000) continue;
+    if (Date.now() - (needAt.get(d.id) || 0) < 5000) continue;
+    needAt.set(d.id, Date.now());
+    for (const i of (Array.isArray(req.v.miss) ? req.v.miss : [])) {
+      if (Number.isInteger(i) && i >= 0 && i < cache.parts.length) LIVE.send('sndc:' + d.id + ':' + cache.ver + ':' + i, cache.parts[i]);
+    }
+  }
   for (const d of defs.values()) {
     if (d.src !== 'local' || !d.fileName) continue;
     const m = kv.get('sndf:' + d.id);
@@ -377,10 +396,23 @@ function pullFromRoom() {
       if (e.del || !e.v) continue;
       const ver = String(e.v.ver);
       if (fileDone.get(id) === ver) continue;
-      assembleFile(id, ver, Number(e.v.n) || 0, e.v.type, i => {
+      const n = Number(e.v.n) || 0;
+      const done = assembleFile(id, ver, n, e.v.type, i => {
         const c = kv.get('sndc:' + id + ':' + ver + ':' + i);
         return c && !c.del && typeof c.v === 'string' ? c.v : undefined;
       });
+      // そろっていなければ、足りない番号を送り手に頼む（送り手がオンラインなら届く。オフラインでも GitHub の保存から届く）
+      if (!done && n > 0 && Date.now() - (askAt.get(id) || 0) > 8000) {
+        const miss = [];
+        for (let i = 0; i < n && miss.length < 300; i++) {
+          const c = kv.get('sndc:' + id + ':' + ver + ':' + i);
+          if (!c || c.del || typeof c.v !== 'string') miss.push(i);
+        }
+        if (miss.length) {
+          askAt.set(id, Date.now());
+          LIVE.send('sndneed:' + id, { ver, miss, t: Date.now() });
+        }
+      }
     }
   }
 }

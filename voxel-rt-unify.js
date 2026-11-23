@@ -282,9 +282,12 @@ async function adopt(room, gen, ts, data) {
   if (adopting) return;
   adopting = true;
   try {
+    // 傾きブロックの一覧は、この端末の記録と合わせる（消して置き換えると、この端末だけのものが消えるため）
+    const tiltMerged = await VoxelRTState.mergedTilt(typeof data.ws[VoxelRTState.TILT_KEY] === 'string' ? data.ws[VoxelRTState.TILT_KEY] : '[]');
+    try { if (window.VoxelExt && VoxelExt.blobPut) await VoxelExt.blobPut('idb:' + VoxelRTState.TILT_KEY, tiltMerged); } catch (e) {}
     for (const k of KEYS) { try { localStorage.removeItem(k); } catch (e) {} }
     for (const k of KEYS) {
-      const v = data.ws[k];
+      const v = k === VoxelRTState.TILT_KEY ? tiltMerged : data.ws[k];
       if (typeof v !== 'string') continue;
       if (k === 'voxelcraft_ext_v1' && window.VoxelExt && VoxelExt.importExtJson) await VoxelExt.importExtJson(v);
       else if (!setLocal(k, v)) throw new Error('保存できる容量が足りません');
