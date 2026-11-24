@@ -1669,6 +1669,33 @@ function removeTilt(ent) {
 }
 
 // ============================================================
+// 当たり判定（透明のバリアブロック）
+// 傾き・滑らかな道路のブロックのうち、st.bar === 1 のものの占める場所を、当たり判定にする。
+// 元のブロックから毎回計算するので、撤去・空気で埋めると、自動で当たり判定も消える。
+// ============================================================
+let barrierSet = new Set();
+function rebuildBarrier() {
+  const next = new Set();
+  for (const t of tiltList) {
+    if (t.isModel || !t.st || t.st.bar !== 1) continue;
+    const c = t.c;
+    let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const v = new THREE.Vector3((i & 1) ? 0.5 : -0.5, (i & 2) ? 0.5 : -0.5, (i & 4) ? 0.5 : -0.5).applyQuaternion(t.q);
+      mnx = Math.min(mnx, v.x + c[0]); mxx = Math.max(mxx, v.x + c[0]);
+      mny = Math.min(mny, v.y + c[1]); mxy = Math.max(mxy, v.y + c[1]);
+      mnz = Math.min(mnz, v.z + c[2]); mxz = Math.max(mxz, v.z + c[2]);
+    }
+    for (let x = Math.floor(mnx + 1e-3); x <= Math.floor(mxx - 1e-3); x++)
+      for (let y = Math.floor(mny + 1e-3); y <= Math.floor(mxy - 1e-3); y++)
+        for (let z = Math.floor(mnz + 1e-3); z <= Math.floor(mxz - 1e-3); z++) next.add(x + ',' + y + ',' + z);
+  }
+  barrierSet = next;
+}
+setInterval(rebuildBarrier, 200);
+window.VoxelBarrier = { has: (x, y, z) => barrierSet.has(x + ',' + y + ',' + z), rebuild: rebuildBarrier };
+
+// ============================================================
 // 破壊・設置
 // ============================================================
 window.doBreak = function () {
@@ -1882,7 +1909,11 @@ function applyRecord(ch) {
     }
     if (c.tiltRedo) {
       const r = c.tiltRedo;
-      if (addTilt(r.id, r.c, r.q, r.st)) snap.push({ tiltEnt: tiltList[tiltList.length - 1] });
+      if (addTilt(r.id, r.c, r.q, r.st)) {
+        const ne = tiltList[tiltList.length - 1];
+        if (window.VoxelDiag && VoxelDiag.adoptTilt) VoxelDiag.adoptTilt(ne);   // 部屋・保存にも、もう一度記録する
+        snap.push({ tiltEnt: ne });
+      }
       continue;
     }
     snap.push({ x: c.x, y: c.y, z: c.z, k: c.k, oldId: getBlock(c.x, c.y, c.z), oldSt: blockState.get(c.k) || null });
@@ -1923,9 +1954,23 @@ function fillSel() {
     setBlock(x, y, z, id);
     blockState.delete(k);
   }
+  // 埋める・撤去する範囲の中の傾き・0.5マスのブロックも、一緒に消す（残ると、空気で撤去したあとも浮いて残るため）
+  // 置き換えモードは、対象のブロックだけを変えるので、傾きブロックには触らない
+  let tiltCount = 0;
+  if (!repl) {
+    for (const t of [...tiltList]) {
+      const c = t.c;
+      if (!(c[0] >= b.min[0] && c[0] < b.max[0] + 1 && c[1] >= b.min[1] && c[1] < b.max[1] + 1 && c[2] >= b.min[2] && c[2] < b.max[2] + 1)) continue;
+      changes.push({ tiltRedo: { id: t.id, c: t.c.slice(), q: t.q.clone(), st: t.st } });   // 元に戻すとき、もう一度置く
+      if (window.VoxelDiag && VoxelDiag.dropTilt && t.tl) VoxelDiag.dropTilt(t); else removeTilt(t);
+      if (tiltList.includes(t)) removeTilt(t);
+      tiltCount++;
+    }
+  }
+  const voxCount = changes.length - tiltCount;
   pushUndo(changes);
-  if (repl) toast(`「${repLabel(from)}」を「${repLabel(id)}」に ${changes.length} 個置き換えました`);
-  else toast(`「${nameOf(id)}」で ${changes.length} 個埋めました`);
+  if (repl) toast(`「${repLabel(from)}」を「${repLabel(id)}」に ${voxCount} 個置き換えました`);
+  else toast(`「${nameOf(id)}」で ${voxCount} 個埋めました` + (tiltCount ? `（傾き・0.5マスのブロック ${tiltCount} 個も消しました）` : ''));
 }
 
 // ── 置き換え（フィル時に、対象のブロックだけを別のブロックに変える）──

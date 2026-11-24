@@ -1403,7 +1403,7 @@ function boxCollides(px, py, pz) {
   const y0 = Math.floor(py), y1 = Math.floor(py + PH - 1e-6);
   const z0 = Math.floor(pz - HW), z1 = Math.floor(pz + HW - 1e-6);
   for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
-    if (isSolid(getBlock(x, y, z))) return true;
+    if (isSolid(getBlock(x, y, z)) || (window.VoxelBarrier && VoxelBarrier.has(x, y, z))) return true;   // 透明のバリアブロック（当たり判定）も止める
   }
   return false;
 }
@@ -2609,6 +2609,7 @@ setShader(settings.shader);
 if (settings.perf) setPerf(true);
 requestAnimationFrame(frame);
 </script>
+</body>
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
@@ -2645,5 +2646,4 @@ requestAnimationFrame(frame);
 <script src="voxel-rt-state.js"></script>
 <script src="voxel-rt-unify.js"></script>
 
-</body>
 </html>
