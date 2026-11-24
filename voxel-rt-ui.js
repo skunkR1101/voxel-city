@@ -37,6 +37,7 @@ const LOG_MAX = 80;
 const STRIP_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]', 'g');
 
 let room = null, transport = null;
+let serverSync = null;   // 中継サーバーへの保存（段階A）
 let myName = L.DEFAULT_NAME;
 let quietUntil = 0;
 let lastRejectMsg = 0;
@@ -311,6 +312,7 @@ async function joinRoom(roomId, password, name) {
     updateButtons();
     return;
   }
+  try { if (window.VoxelRTServer) serverSync = VoxelRTServer.attach(rm, tp); } catch (e) { console.error(e); }
   saveLast(roomId, password);
   quietUntil = Date.now() + QUIET_MS;
   setStatus('部屋：' + roomId + '（席 ' + (rm.slot + 1) + '）　参加中');
@@ -358,6 +360,7 @@ function wireRoom(rm) {
 function leaveRoom(announce) {
   if (!room) return;
   const rm = room, tp = transport;
+  if (serverSync) { try { serverSync.stop(); } catch (e) {} serverSync = null; }
   try { rm.ephemeral('bye:' + rm.peerId, { n: myName }); } catch (e) {}
   room = null; transport = null;
   rm.leave();

@@ -116,6 +116,10 @@ function onMsg(st, m) {
   if (m.t === 'msg') {
     const c = connFor(st, m.from, true);
     c._emit('data', m.data);
+    return;
+  }
+  if (m.t === 'snapshot') {
+    if (st.onSnap) { try { st.onSnap(m.entries || [], !!m.end); } catch (e) { console.error(e); } }
   }
 }
 function connFor(st, slot, incoming) {
@@ -161,6 +165,7 @@ function scheduleReconnect(st) {
       if (st.closed) { try { ws.close(); } catch (e) {} return; }
       st.ws = ws;
       tlog('中継に戻りました');
+      for (const f of st.readyFns) { try { f(); } catch (e) { console.error(e); } }
     }).catch(() => scheduleReconnect(st));
   }, RECONNECT_MS);
 }
@@ -169,7 +174,8 @@ function createTransport() {
   const st = {
     ws: null, room: null, slot: null,
     conns: new Map(), roster: new Set(),
-    onConn: null, pending: [], closed: false
+    onConn: null, pending: [], closed: false,
+    onSnap: null, readyFns: []
   };
   const t = {
     myId: '',
@@ -195,6 +201,21 @@ function createTransport() {
       tlog('席 ' + (k + 1) + ' を取りました');
       return true;
     },
+
+    // 部屋の内容の保存（段階A）：送る・受け取る・再接続したとき
+    storePut(entries) {
+      if (!st.ws || st.ws.readyState !== 1) return false;
+      st.ws.send(JSON.stringify({ store: 'put', entries }));
+      return true;
+    },
+    storeGet() {
+      if (!st.ws || st.ws.readyState !== 1) return false;
+      st.ws.send(JSON.stringify({ store: 'get' }));
+      return true;
+    },
+    onSnapshot(fn) { st.onSnap = fn; },
+    onReady(fn) { st.readyFns.push(fn); },
+    isReady() { return !!(st.ws && st.ws.readyState === 1); },
 
     onConnection(fn) {
       st.onConn = fn;
