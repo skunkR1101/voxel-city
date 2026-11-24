@@ -297,6 +297,7 @@ async function joinRoom(roomId, password, name) {
   nameIn.value = myName;
   remotes.clear();
   const tp = TR.createTransport();
+  tp.setRoomPassword(password);
   const rm = VR.create({ roomId, password, name: myName, transport: tp });
   transport = tp; room = rm;
   wireRoom(rm);

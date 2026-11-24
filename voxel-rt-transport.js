@@ -1,47 +1,28 @@
 /* voxel-rt-transport.js  通信の差し替え口：Cloudflare の中継サーバー版（第3段階）
- *  ・PeerJS（直接つなぐ方式）の代わりに、中継サーバー（Durable Objects）を使う
+ *  ・中継サーバー（Durable Objects）を使う。中継の合言葉は不要
+ *  ・入場は「部屋の合言葉」で確かめる。合言葉そのものは送らず、そこから作った印だけを送る
  *  ・席（0〜7）はサーバーが管理する。同じ席は1人だけ
- *  ・中継サーバーのアドレスと合言葉は、この端末にだけ保存する（初回に入力を求める）。チャットやファイルには書かない
  *  ・core が使う形（claimSlot / onConnection / connect / close、conn の peer・open・send・on・close）は、PeerJS版と同じ
  *  読み込み順：voxel-rt-core.js の後
  */
 (function (root) {
 'use strict';
 
-const CFG_KEY = 'voxelcraft_relay_v1';
-const RELAY_URL = 'https://voxel-room.hirashi.workers.dev';   // 中継サーバーのアドレス（公開してよい情報。合言葉は含めない）
+const RELAY_URL = 'https://voxel-room.hirashi.workers.dev';   // 中継サーバーのアドレス（公開してよい情報）
 const CLAIM_TIMEOUT_MS = 12000;
 const RECONNECT_MS = 3000;
 
 function tlog(m) { try { if (root.VoxelDebug) root.VoxelDebug.log('通信（中継）', m); } catch (e) {} }
 
-let cfgMem = null;          // この画面で使う設定（一度入力したら、ページを開き直すまで聞かない）
-let authFailed = false;     // 接続に失敗したら、ページを開き直すまで、もう一度は試さない（合言葉を何度も聞かないため）
-let failMsg = '';
-
-// 中継の合言葉は、この端末に一度入力すれば覚えておく（部屋の合言葉とは別のもの）
-function loadCfg() {
-  if (cfgMem) return cfgMem;
-  try {
-    const c = JSON.parse(localStorage.getItem(CFG_KEY) || 'null');
-    if (c && c.token) cfgMem = { url: RELAY_URL, token: String(c.token) };
-  } catch (e) {}
-  return cfgMem;
+// 部屋の合言葉から、入場の印を作る（合言葉は送らない）
+async function authOf(roomId, password) {
+  const data = new TextEncoder().encode('vcr-auth|' + roomId + '|' + password);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-function askCfg() {
-  const token = window.prompt('中継サーバーの合言葉を入力してください（サーバーに設定したもの。部屋の合言葉とは別です）', '');
-  if (!token || !token.trim()) throw new Error('中継の合言葉が入力されていません');
-  cfgMem = { url: RELAY_URL, token: token.trim() };
-  try { localStorage.setItem(CFG_KEY, JSON.stringify({ token: cfgMem.token })); } catch (e) {}
-  return cfgMem;
-}
-function forgetCfg() {
-  cfgMem = null;
-  try { localStorage.removeItem(CFG_KEY); } catch (e) {}
-}
-function wsUrl(cfg, roomId, slot) {
-  const base = cfg.url.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
-  return base + '/?room=' + encodeURIComponent(roomId) + '&slot=' + slot + '&token=' + encodeURIComponent(cfg.token);
+function wsUrl(auth, roomId, slot) {
+  const base = RELAY_URL.replace(/^https:/i, 'wss:');
+  return base + '/?room=' + encodeURIComponent(roomId) + '&slot=' + slot + '&auth=' + auth;
 }
 
 // 相手1人との「つながり」。core には、PeerJS の接続と同じ形に見せる
@@ -56,7 +37,7 @@ function makeConn(st, slot, roomId) {
     },
     on(ev, fn) {
       (c._h[ev] || (c._h[ev] = [])).push(fn);
-      if (ev === 'data' && c._q.length) { const q = c._q.splice(0); for (const m of q) fn(m); }   // 先に届いたものを渡す
+      if (ev === 'data' && c._q.length) { const q = c._q.splice(0); for (const m of q) fn(m); }
     },
     close() {
       c.open = false;
@@ -73,12 +54,12 @@ function makeConn(st, slot, roomId) {
 }
 
 // 中継につなぐ（席を取る）。成功なら WebSocket、席が使用中なら null、失敗なら例外
-function openSocket(st, k, roomId) {
+async function openSocket(st, k, roomId) {
+  if (!st.pw) throw new Error('部屋の合言葉が設定されていません');
+  if (!st.auth) st.auth = await authOf(roomId, st.pw);
   return new Promise((res, rej) => {
-    let cfg;
-    try { cfg = loadCfg() || askCfg(); } catch (e) { rej(e); return; }
     let done = false;
-    const ws = new WebSocket(wsUrl(cfg, roomId, k));
+    const ws = new WebSocket(wsUrl(st.auth, roomId, k));
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
@@ -95,7 +76,7 @@ function openSocket(st, k, roomId) {
       if (!done) {
         done = true; clearTimeout(timer);
         if (ev.code === 4409) res(null);
-        else rej(new Error('中継サーバーに接続できませんでした（コード ' + ev.code + '）'));
+        else rej(new Error('部屋に入れませんでした（合言葉が違うか、通信できません。コード ' + ev.code + '）'));
         return;
       }
       if (st.ws === ws) onDrop(st);
@@ -128,7 +109,6 @@ function connFor(st, slot, incoming) {
   c = makeConn(st, slot, st.room);
   st.conns.set(slot, c);
   if (incoming) {
-    // 相手から来た接続：core に新しい接続として渡してから、つながったことを知らせる
     if (st.onConn) st.onConn(c); else st.pending.push(c);
     c.open = true;
     c._emit('open');
@@ -175,34 +155,35 @@ function createTransport() {
     ws: null, room: null, slot: null,
     conns: new Map(), roster: new Set(),
     onConn: null, pending: [], closed: false,
-    onSnap: null, readyFns: []
+    onSnap: null, readyFns: [],
+    pw: '', auth: null
   };
   const t = {
     myId: '',
     lastError: '',
 
+    // 部屋の合言葉を渡す（席を取る前に呼ぶ）
+    setRoomPassword(pw) { st.pw = String(pw || ''); st.auth = null; },
+
     // 席を取る（取れたら true。使用中なら false）
     async claimSlot(k, roomId) {
-      if (authFailed) throw new Error(failMsg || '中継サーバーに接続できません。ページを開き直してください');
       let ws;
       try {
         ws = await openSocket(st, k, roomId);
       } catch (e) {
-        authFailed = true;
-        failMsg = e.message + '。中継の合言葉が違う可能性があります。ページを開き直すと、入力し直せます';
-        forgetCfg();
-        t.lastError = failMsg;
-        tlog(failMsg);
-        throw new Error(failMsg);
+        t.lastError = e.message;
+        tlog(e.message);
+        throw new Error(e.message);
       }
       if (!ws) { tlog('席 ' + (k + 1) + ' はほかの人が使っています'); return false; }
       st.ws = ws; st.room = roomId; st.slot = k; st.closed = false;
+      t.lastError = '';
       t.myId = roomId + '-' + k;
       tlog('席 ' + (k + 1) + ' を取りました');
       return true;
     },
 
-    // 部屋の内容の保存（段階A）：送る・受け取る・再接続したとき
+    // 部屋の内容の保存（段階A）
     storePut(entries) {
       if (!st.ws || st.ws.readyState !== 1) return false;
       st.ws.send(JSON.stringify({ store: 'put', entries }));
@@ -241,7 +222,7 @@ function createTransport() {
   return t;
 }
 
-const api = { createTransport, forgetCfg };
+const api = { createTransport };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.VoxelRTTransport = api;
 })(typeof window !== 'undefined' ? window : globalThis);
