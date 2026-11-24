@@ -9,6 +9,7 @@
 'use strict';
 
 const CFG_KEY = 'voxelcraft_relay_v1';
+const RELAY_URL = 'https://voxel-room.hirashi.workers.dev';   // 中継サーバーのアドレス（公開してよい情報。合言葉は含めない）
 const CLAIM_TIMEOUT_MS = 12000;
 const RECONNECT_MS = 3000;
 
@@ -18,21 +19,20 @@ let cfgMem = null;          // この画面で使う設定（一度入力した�
 let authFailed = false;     // 接続に失敗したら、ページを開き直すまで、もう一度は試さない（合言葉を何度も聞かないため）
 let failMsg = '';
 
+// 中継の合言葉は、この端末に一度入力すれば覚えておく（部屋の合言葉とは別のもの）
 function loadCfg() {
   if (cfgMem) return cfgMem;
   try {
     const c = JSON.parse(localStorage.getItem(CFG_KEY) || 'null');
-    if (c && c.url && c.token) cfgMem = c;
+    if (c && c.token) cfgMem = { url: RELAY_URL, token: String(c.token) };
   } catch (e) {}
   return cfgMem;
 }
 function askCfg() {
-  const url = window.prompt('中継サーバーのアドレスを入力してください（例：https://voxel-room.（名前）.workers.dev）', '');
-  if (!url || !url.trim()) throw new Error('中継サーバーのアドレスが入力されていません');
-  const token = window.prompt('合言葉を入力してください（サーバーに設定したもの）', '');
-  if (!token || !token.trim()) throw new Error('合言葉が入力されていません');
-  cfgMem = { url: url.trim().replace(/\/+$/, ''), token: token.trim() };
-  try { localStorage.setItem(CFG_KEY, JSON.stringify(cfgMem)); } catch (e) {}
+  const token = window.prompt('中継サーバーの合言葉を入力してください（サーバーに設定したもの。部屋の合言葉とは別です）', '');
+  if (!token || !token.trim()) throw new Error('中継の合言葉が入力されていません');
+  cfgMem = { url: RELAY_URL, token: token.trim() };
+  try { localStorage.setItem(CFG_KEY, JSON.stringify({ token: cfgMem.token })); } catch (e) {}
   return cfgMem;
 }
 function forgetCfg() {
@@ -183,7 +183,7 @@ function createTransport() {
         ws = await openSocket(st, k, roomId);
       } catch (e) {
         authFailed = true;
-        failMsg = e.message + '。ページを開き直すと、アドレスと合言葉を入力し直せます';
+        failMsg = e.message + '。中継の合言葉が違う可能性があります。ページを開き直すと、入力し直せます';
         forgetCfg();
         t.lastError = failMsg;
         tlog(failMsg);
