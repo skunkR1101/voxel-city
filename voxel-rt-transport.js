@@ -1,140 +1,226 @@
-/* voxel-rt-transport.js  通信の差し替え口の、PeerJS（公開の仲介サービス）版（第2段階）
- *  ・席の名前は「vcr2-部屋ID-席番号」。古い版（vcx1-）とは混ざらないように、接頭語を変えている
- *  ・core には「部屋ID-席番号」だけを見せる（接頭語は、ここで付け外しする）
- *  ・claimSlot は、取れたら true、その席が使用中なら false を返す
+/* voxel-rt-transport.js  通信の差し替え口：Cloudflare の中継サーバー版（第3段階）
+ *  ・PeerJS（直接つなぐ方式）の代わりに、中継サーバー（Durable Objects）を使う
+ *  ・席（0〜7）はサーバーが管理する。同じ席は1人だけ
+ *  ・中継サーバーのアドレスと合言葉は、この端末にだけ保存する（初回に入力を求める）。チャットやファイルには書かない
+ *  ・core が使う形（claimSlot / onConnection / connect / close、conn の peer・open・send・on・close）は、PeerJS版と同じ
  *  読み込み順：voxel-rt-core.js の後
  */
 (function (root) {
 'use strict';
 
-const PEERJS_URL = 'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js';
-const PREFIX = 'vcr2-';
-const TURN_KEY = 'voxelcraft_turn_v1';        // 既存の設定（設定画面で任意に入れる中継サーバー）
+const CFG_KEY = 'voxelcraft_relay_v1';
 const CLAIM_TIMEOUT_MS = 12000;
+const RECONNECT_MS = 3000;
 
-let peerJsReady = null;
-function loadPeerJs() {
-  if (window.Peer) return Promise.resolve();
-  if (peerJsReady) return peerJsReady;
-  peerJsReady = new Promise((res, rej) => {
-    const s = document.createElement('script');
-    s.src = PEERJS_URL;
-    s.onload = () => (window.Peer ? res() : rej(new Error('通信部品の読み込みに失敗しました')));
-    s.onerror = () => { peerJsReady = null; rej(new Error('通信部品を読み込めません。インターネットの接続を確認してください')); };
-    document.head.appendChild(s);
-  });
-  return peerJsReady;
+function tlog(m) { try { if (root.VoxelDebug) root.VoxelDebug.log('通信（中継）', m); } catch (e) {} }
+
+let cfgMem = null;          // この画面で使う設定（一度入力したら、ページを開き直すまで聞かない）
+let authFailed = false;     // 接続に失敗したら、ページを開き直すまで、もう一度は試さない（合言葉を何度も聞かないため）
+let failMsg = '';
+
+function loadCfg() {
+  if (cfgMem) return cfgMem;
+  try {
+    const c = JSON.parse(localStorage.getItem(CFG_KEY) || 'null');
+    if (c && c.url && c.token) cfgMem = c;
+  } catch (e) {}
+  return cfgMem;
+}
+function askCfg() {
+  const url = window.prompt('中継サーバーのアドレスを入力してください（例：https://voxel-room.（名前）.workers.dev）', '');
+  if (!url || !url.trim()) throw new Error('中継サーバーのアドレスが入力されていません');
+  const token = window.prompt('合言葉を入力してください（サーバーに設定したもの）', '');
+  if (!token || !token.trim()) throw new Error('合言葉が入力されていません');
+  cfgMem = { url: url.trim().replace(/\/+$/, ''), token: token.trim() };
+  try { localStorage.setItem(CFG_KEY, JSON.stringify(cfgMem)); } catch (e) {}
+  return cfgMem;
+}
+function forgetCfg() {
+  cfgMem = null;
+  try { localStorage.removeItem(CFG_KEY); } catch (e) {}
+}
+function wsUrl(cfg, roomId, slot) {
+  const base = cfg.url.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:');
+  return base + '/?room=' + encodeURIComponent(roomId) + '&slot=' + slot + '&token=' + encodeURIComponent(cfg.token);
 }
 
-// 通信の経路（STUN：直接つなぐ。TURN：直接つながらないときの中継）
-function iceConfig() {
-  const iceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
-  try {
-    const t = JSON.parse(localStorage.getItem(TURN_KEY) || 'null');
-    if (t && t.url) iceServers.push({ urls: t.url, username: t.user || undefined, credential: t.pass || undefined });
-  } catch (e) {}
-  return { iceServers, iceCandidatePoolSize: 4 };
-}
-
-// PeerJS の接続を、core が使う形（peer・open・send・on・close）に包む
-// 接続の様子を、画面の診断ログ（VoxelDebug）に残す（原因の特定用。通信の動きは変えない）
-function tlog(m) { try { if (window.VoxelDebug) VoxelDebug.log('通信（部屋）', m); } catch (e) {} }
-function watchIce(c, name) {
-  try {
-    const pc = c.peerConnection;
-    if (!pc || !pc.addEventListener) return;
-    pc.addEventListener('iceconnectionstatechange', () => tlog('相手 ' + name + ' の経路：' + pc.iceConnectionState));
-  } catch (e) {}
-}
-function wrapConn(c, name) {
-  try {
-    watchIce(c, name);
-    c.on('open', () => tlog('相手 ' + name + ' とつながりました'));
-    c.on('close', () => tlog('相手 ' + name + ' とのつながりが切れました'));
-    c.on('error', e => tlog('相手 ' + name + ' との通信エラー：' + ((e && e.type) || e)));
-  } catch (e) {}
-  return {
-    peer: name,
-    get open() { return !!c.open; },
-    get bufferedAmount() { const dc = c.dataChannel; return dc ? (dc.bufferedAmount || 0) : 0; },
-    send(m) { c.send(m); },
-    on(ev, fn) { c.on(ev, fn); },
-    close() { try { c.close(); } catch (e) {} }
+// 相手1人との「つながり」。core には、PeerJS の接続と同じ形に見せる
+function makeConn(st, slot, roomId) {
+  const c = {
+    peer: roomId + '-' + slot,
+    open: false,
+    get bufferedAmount() { return 0; },
+    send(m) {
+      if (!c.open || !st.ws || st.ws.readyState !== 1) throw new Error('つながっていません');
+      st.ws.send(JSON.stringify({ to: slot, data: m }));
+    },
+    on(ev, fn) {
+      (c._h[ev] || (c._h[ev] = [])).push(fn);
+      if (ev === 'data' && c._q.length) { const q = c._q.splice(0); for (const m of q) fn(m); }   // 先に届いたものを渡す
+    },
+    close() {
+      c.open = false;
+      if (st.conns.get(slot) === c) st.conns.delete(slot);
+    },
+    _h: {},
+    _q: [],
+    _emit(ev, arg) {
+      if (ev === 'data' && !(c._h.data && c._h.data.length)) { c._q.push(arg); return; }
+      for (const fn of (c._h[ev] || [])) { try { fn(arg); } catch (e) { console.error(e); } }
+    }
   };
+  return c;
 }
-function stripPrefix(full) { return String(full || '').startsWith(PREFIX) ? String(full).slice(PREFIX.length) : String(full || ''); }
+
+// 中継につなぐ（席を取る）。成功なら WebSocket、席が使用中なら null、失敗なら例外
+function openSocket(st, k, roomId) {
+  return new Promise((res, rej) => {
+    let cfg;
+    try { cfg = loadCfg() || askCfg(); } catch (e) { rej(e); return; }
+    let done = false;
+    const ws = new WebSocket(wsUrl(cfg, roomId, k));
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { ws.close(); } catch (e) {}
+      rej(new Error('中継サーバーに接続できません（時間切れ）'));
+    }, CLAIM_TIMEOUT_MS);
+    ws.onmessage = ev => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (!done && m.t === 'welcome') { done = true; clearTimeout(timer); res(ws); return; }
+      onMsg(st, m);
+    };
+    ws.onclose = ev => {
+      if (!done) {
+        done = true; clearTimeout(timer);
+        if (ev.code === 4409) res(null);
+        else rej(new Error('中継サーバーに接続できませんでした（コード ' + ev.code + '）'));
+        return;
+      }
+      if (st.ws === ws) onDrop(st);
+    };
+    ws.onerror = () => {};
+  });
+}
+
+function onMsg(st, m) {
+  if (!m || typeof m !== 'object') return;
+  if (m.t === 'roster') {
+    const next = new Set((m.slots || []).filter(s => s !== st.slot));
+    for (const s of [...st.roster]) if (!next.has(s)) goOffline(st, s);
+    for (const s of next) goOnline(st, s);
+    st.roster = next;
+    return;
+  }
+  if (m.t === 'msg') {
+    const c = connFor(st, m.from, true);
+    c._emit('data', m.data);
+  }
+}
+function connFor(st, slot, incoming) {
+  let c = st.conns.get(slot);
+  if (c) return c;
+  c = makeConn(st, slot, st.room);
+  st.conns.set(slot, c);
+  if (incoming) {
+    // 相手から来た接続：core に新しい接続として渡してから、つながったことを知らせる
+    if (st.onConn) st.onConn(c); else st.pending.push(c);
+    c.open = true;
+    c._emit('open');
+  } else {
+    c.open = st.roster.has(slot);
+  }
+  return c;
+}
+function goOnline(st, slot) {
+  const c = st.conns.get(slot);
+  if (c && !c.open) { c.open = true; c._emit('open'); }
+}
+function goOffline(st, slot) {
+  const c = st.conns.get(slot);
+  if (!c) return;
+  c.open = false;
+  st.conns.delete(slot);
+  c._emit('close');
+}
+function onDrop(st) {
+  st.ws = null;
+  const list = [...st.conns.values()];
+  st.conns.clear();
+  st.roster = new Set();
+  for (const c of list) { c.open = false; c._emit('close'); }
+  tlog('中継から切れました（自動で席を取り直します）');
+  if (!st.closed) scheduleReconnect(st);
+}
+function scheduleReconnect(st) {
+  setTimeout(() => {
+    if (st.closed || st.ws) return;
+    openSocket(st, st.slot, st.room).then(ws => {
+      if (!ws) { tlog('席 ' + (st.slot + 1) + ' は、ほかの人が使い始めました'); st.closed = true; return; }
+      if (st.closed) { try { ws.close(); } catch (e) {} return; }
+      st.ws = ws;
+      tlog('中継に戻りました');
+    }).catch(() => scheduleReconnect(st));
+  }, RECONNECT_MS);
+}
 
 function createTransport() {
+  const st = {
+    ws: null, room: null, slot: null,
+    conns: new Map(), roster: new Set(),
+    onConn: null, pending: [], closed: false
+  };
   const t = {
-    peer: null,
     myId: '',
     lastError: '',
-    _onConn: null,
-    _pending: [],
 
-    // 席を取る（取れたら true）
+    // 席を取る（取れたら true。使用中なら false）
     async claimSlot(k, roomId) {
-      await loadPeerJs();
-      const id = PREFIX + roomId + '-' + k;
-      return new Promise((res, rej) => {
-        let done = false;
-        const timer = setTimeout(() => {
-          if (done) return;
-          done = true;
-          try { p.destroy(); } catch (e) {}
-          t.lastError = '仲介サービスに接続できません（時間切れ）';
-          tlog('席 ' + (k + 1) + ' の取得が時間切れになりました（仲介サービスに届かない可能性）');
-          rej(new Error(t.lastError));
-        }, CLAIM_TIMEOUT_MS);
-        const p = new window.Peer(id, { debug: 0, config: iceConfig() });
-        tlog('席 ' + (k + 1) + ' を取りに行きます（' + roomId + '）');
-        p.on('open', () => {
-          if (done) return;
-          done = true; clearTimeout(timer);
-          t.peer = p; t.myId = id;
-          tlog('席 ' + (k + 1) + ' を取りました');
-          // 席を取ったあとは、相手からの接続を受け付ける
-          p.on('connection', c => {
-            const w = wrapConn(c, stripPrefix(c.peer));
-            if (t._onConn) t._onConn(w); else t._pending.push(w);
-          });
-          p.on('disconnected', () => { tlog('仲介サービスから切れました（再接続します）'); setTimeout(() => { try { p.reconnect(); } catch (e) {} }, 3000); });
-          // 相手が見つからない等のエラーは、そのつど自動で再試行されるので、ここでは記録だけ
-          p.on('error', e => { t.lastError = (e && e.type) || 'error'; tlog('通信エラー：' + t.lastError); });
-          res(true);
-        });
-        p.on('error', e => {
-          if (done) return;
-          done = true; clearTimeout(timer);
-          try { p.destroy(); } catch (x) {}
-          if (e && e.type === 'unavailable-id') { tlog('席 ' + (k + 1) + ' はほかの人が使っています'); res(false); }
-          else { t.lastError = (e && e.type) || 'error'; tlog('席 ' + (k + 1) + ' を取れませんでした：' + t.lastError); rej(new Error(t.lastError)); }
-        });
-      });
+      if (authFailed) throw new Error(failMsg || '中継サーバーに接続できません。ページを開き直してください');
+      let ws;
+      try {
+        ws = await openSocket(st, k, roomId);
+      } catch (e) {
+        authFailed = true;
+        failMsg = e.message + '。ページを開き直すと、アドレスと合言葉を入力し直せます';
+        forgetCfg();
+        t.lastError = failMsg;
+        tlog(failMsg);
+        throw new Error(failMsg);
+      }
+      if (!ws) { tlog('席 ' + (k + 1) + ' はほかの人が使っています'); return false; }
+      st.ws = ws; st.room = roomId; st.slot = k; st.closed = false;
+      t.myId = roomId + '-' + k;
+      tlog('席 ' + (k + 1) + ' を取りました');
+      return true;
     },
 
     onConnection(fn) {
-      t._onConn = fn;
-      while (t._pending.length) fn(t._pending.shift());
+      st.onConn = fn;
+      while (st.pending.length) fn(st.pending.shift());
     },
 
     // 相手へつなぐ（remoteId は「部屋ID-席番号」）
     connect(remoteId) {
-      if (!t.peer) throw new Error('まだ席を取っていません');
-      const c = t.peer.connect(PREFIX + remoteId, { reliable: true });
-      return wrapConn(c, String(remoteId));
+      if (!st.ws) throw new Error('まだ席を取っていません');
+      const slot = Number(String(remoteId).split('-').pop());
+      return connFor(st, slot, false);
     },
 
     // 通信をすべて閉じて、席を空ける
     close() {
-      try { if (t.peer) t.peer.destroy(); } catch (e) {}
-      t.peer = null; t.myId = ''; t._onConn = null; t._pending = [];
+      st.closed = true;
+      try { if (st.ws) st.ws.close(); } catch (e) {}
+      st.ws = null; st.conns.clear(); st.roster = new Set();
+      st.onConn = null; st.pending = [];
+      t.myId = '';
     }
   };
   return t;
 }
 
-const api = { createTransport, loadPeerJs, iceConfig, PREFIX };
+const api = { createTransport, forgetCfg };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.VoxelRTTransport = api;
 })(typeof window !== 'undefined' ? window : globalThis);
