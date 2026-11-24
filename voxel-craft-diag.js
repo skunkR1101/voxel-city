@@ -118,10 +118,11 @@ async function readStore(key) {
   let a = null, b = null;
   try { a = await VoxelExt.blobGet('idb:' + key); } catch (e) {}
   try { b = localStorage.getItem(key); } catch (e) {}
-  if (!a) return b;
-  if (!b || a === b) return a;
-  const n = t => { try { const v = JSON.parse(t); return Array.isArray(v) ? v.length : -1; } catch (e) { return -1; } };
-  return n(a) > n(b) ? a : b;
+  // 注意：IndexedDB は非同期で書くため、ページを閉じる直前に保存すると古いままのことがある。
+  // 同期で書く localStorage が読めるならそれを正とする（件数で選ぶと、消したものが戻ってしまう）
+  const ok = t => { try { return Array.isArray(JSON.parse(t)); } catch (e) { return false; } };
+  if (b && ok(b)) return b;
+  return a || b;
 }
 let diagLoaded = false;
 // この端末だけの斜めブロック（保存する）。部屋にいる間は部屋の記録だけを画面に出し、この端末のものは隠す（傾きブロックと同じ考え方）
@@ -239,6 +240,78 @@ function removeDiag(r) {
   if (r.src === 'local') { locRecs.delete(r.key); save(); }
   else { dgTombs.set(r.key, { ts: LIVE.nowTs(), room: r.src }); sendTomb(r.key); }
   playBreak(r.id);
+}
+
+// ============================================================
+// 4b. 範囲でまとめて消す・元に戻す（ワールドエディットのフィル・空気で埋める用）
+// ============================================================
+function dropDiagKey(key) {
+  const r = recs.get(key);
+  if (!r) return;
+  removeVisual(r);
+  recs.delete(key);
+  const wi = waiting.indexOf(r);
+  if (wi >= 0) waiting.splice(wi, 1);
+  if (r.src === 'local') { locRecs.delete(key); save(); }
+  else { dgTombs.set(key, { ts: LIVE.nowTs(), room: r.src }); sendTomb(key); }
+}
+function snapshotDiag(key) {
+  const r = recs.get(key);
+  if (!r) return null;
+  return { key: r.key, id: r.id, h: r.h || null, a: r.a, i: r.i, j: r.j, k: r.k, st: r.st || null };
+}
+// 元に戻す：消した斜めブロックを、同じ記録（同じキー）で置き直す
+function restoreDiag(v) {
+  if (!v || typeof v.key !== 'string') return false;
+  if (recs.has(v.key)) dropDiagKey(v.key);
+  const r = { key: v.key, id: v.id, h: v.h || null, a: v.a, i: v.i, j: v.j, k: v.k, st: v.st || null, ts: LIVE.nowTs() };
+  r.src = dgScopeNow();
+  r.own = r.src !== 'local';
+  r.sig = dgSig(r);
+  recs.set(r.key, r);
+  if (r.src === 'local') { locRecs.set(r.key, r); save(); }
+  else sendRec(r);
+  if (!tryVisual(r)) waiting.push(r);      // 定義がまだなら、届いた時に出す
+  return true;
+}
+// ブロックの占める場所（世界の箱）。画面に出ているものは実際の形、まだのものは向きと大きさから計算
+function recBox(cc, q, s, ent) {
+  if (ent && ent.obj) return new THREE.Box3().setFromObject(ent.obj);
+  const box = new THREE.Box3();
+  const k = s || 1;
+  for (let n = 0; n < 8; n++) {
+    const p = new THREE.Vector3((n & 1) ? 0.5 : -0.5, (n & 2) ? 0.5 : -0.5, (n & 4) ? 0.5 : -0.5)
+      .multiplyScalar(k).applyQuaternion(q).add(cc);
+    box.expandByPoint(p);
+  }
+  return box;
+}
+// 範囲 [mn, mx)（ブロック座標の最小と、最大+1）の中に少しでもはみ出すものを、斜め・0.5マス・傾きから消す
+// 戻り値：元に戻す記録（changes）と消した数
+function clearBox(mn, mx) {
+  const e = 0.05;
+  const lo = new THREE.Vector3(mn[0] + e, mn[1] + e, mn[2] + e);
+  const hi = new THREE.Vector3(mx[0] - e, mx[1] - e, mx[2] - e);
+  const hits = bb => bb.max.x > lo.x && bb.min.x < hi.x && bb.max.y > lo.y && bb.min.y < hi.y && bb.max.z > lo.z && bb.min.z < hi.z;
+  const changes = [];
+  let count = 0;
+  for (const r of [...recs.values()]) {
+    const bb = recBox(centerOf(r, r.a), frame(r.a).q, 1, r.ent);
+    if (!hits(bb)) continue;
+    const snap = snapshotDiag(r.key);
+    if (snap) changes.push({ diagRedo: snap });
+    dropDiagKey(r.key);
+    count++;
+  }
+  for (const r of [...tlRecs.values()]) {
+    const q = new THREE.Quaternion(r.q[0], r.q[1], r.q[2], r.q[3]);
+    const bb = recBox(new THREE.Vector3(r.c[0], r.c[1], r.c[2]), q, r.s, r.ent);
+    if (!hits(bb)) continue;
+    changes.push({ tiltRedo: { id: r.id, c: r.c.slice(), q, st: r.st || null } });
+    tlRemove(r.key, true);
+    count++;
+  }
+  return { changes, count };
 }
 
 const prevPlace = window.doPlace;
@@ -577,7 +650,8 @@ window.VoxelDiag = {
     move: tlMove, place: tlPlaceEnt,
     remove: key => tlRemove(key, true)
   },
-  dropTilt: ent => { if (ent.tl) tlRemove(ent.tl, true); else removeTilt(ent); },   // 元に戻す用
+  dropTilt: ent => { if (ent.tl) tlRemove(ent.tl, true); else if (ent.diag) dropDiagKey(ent.diag); else removeTilt(ent); },   // 元に戻す用
+  clearBox, snapshotDiag, restoreDiag, dropDiagKey,                // フィル・空気で埋める・元に戻す用
   wipeStoredTilts                                                  // 新しい世界を作るときだけ、保存された傾きブロックを消す
 };
 })();

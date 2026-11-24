@@ -1907,6 +1907,18 @@ function applyRecord(ch) {
       if (window.VoxelDiag && VoxelDiag.dropTilt) VoxelDiag.dropTilt(e);
       continue;
     }
+    if (c.diagRedo) {                       // 消した斜めブロックを、もう一度置く（取り消し）
+      if (window.VoxelDiag && VoxelDiag.restoreDiag && VoxelDiag.restoreDiag(c.diagRedo)) snap.push({ diagEnd: { key: c.diagRedo.key } });
+      continue;
+    }
+    if (c.diagEnd) {                        // 置いた斜めブロックを、もう一度消す（やり直し）
+      if (window.VoxelDiag && VoxelDiag.snapshotDiag) {
+        const cur = VoxelDiag.snapshotDiag(c.diagEnd.key);
+        VoxelDiag.dropDiagKey(c.diagEnd.key);
+        if (cur) snap.push({ diagRedo: cur });
+      }
+      continue;
+    }
     if (c.tiltRedo) {
       const r = c.tiltRedo;
       if (addTilt(r.id, r.c, r.q, r.st)) {
@@ -1958,12 +1970,20 @@ function fillSel() {
   // 置き換えモードは、対象のブロックだけを変えるので、傾きブロックには触らない
   let tiltCount = 0;
   if (!repl) {
+    const mn = [b.min[0], b.min[1], b.min[2]], mx = [b.max[0] + 1, b.max[1] + 1, b.max[2] + 1];
+    // 0.5マス・斜め（VoxelDiag）と、傾き（tl 記録つき）は、記録ごと消す（残すと、保存や再読み込みで戻るため）
+    if (window.VoxelDiag && VoxelDiag.clearBox) {
+      const d = VoxelDiag.clearBox(mn, mx);
+      changes.push(...d.changes);
+      tiltCount += d.count;
+    }
+    // そのほかの傾きブロック（記録のないもの）は、画面から直接消す。判定は、ブロックの占める箱が範囲と重なるかどうか
+    const e = 0.05;
     for (const t of [...tiltList]) {
-      const c = t.c;
-      if (!(c[0] >= b.min[0] && c[0] < b.max[0] + 1 && c[1] >= b.min[1] && c[1] < b.max[1] + 1 && c[2] >= b.min[2] && c[2] < b.max[2] + 1)) continue;
+      const bb = new THREE.Box3().setFromObject(t.obj);
+      if (!(bb.max.x > mn[0] + e && bb.min.x < mx[0] - e && bb.max.y > mn[1] + e && bb.min.y < mx[1] - e && bb.max.z > mn[2] + e && bb.min.z < mx[2] - e)) continue;
       changes.push({ tiltRedo: { id: t.id, c: t.c.slice(), q: t.q.clone(), st: t.st } });   // 元に戻すとき、もう一度置く
-      if (window.VoxelDiag && VoxelDiag.dropTilt && t.tl) VoxelDiag.dropTilt(t); else removeTilt(t);
-      if (tiltList.includes(t)) removeTilt(t);
+      removeTilt(t);
       tiltCount++;
     }
   }

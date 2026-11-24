@@ -58,6 +58,9 @@ function b64Dec(str) {
   return new TextDecoder().decode(out);
 }
 function pathOf(roomId) { return 'worlds/' + encodeURIComponent(roomId) + '.json'; }
+// 0.5マス・傾きブロック（斜め・傾きの記録。キーが dg: / tl: で始まるもの）は、専用のファイルに分けて保存する
+function finePathOf(roomId) { return 'worlds/' + encodeURIComponent(roomId) + '-fine.json'; }
+function isFine(key) { return typeof key === 'string' && (key.startsWith('dg:') || key.startsWith('tl:')); }
 function urlOf(c, path) { return 'https://api.github.com/repos/' + c.repo + '/contents/' + path; }
 
 // ファイルを読む（無ければ null）。大きいファイルは raw で読む
@@ -121,31 +124,40 @@ function mergeInto(room, entries) {
   return changed.length;
 }
 
-// 今の部屋の内容を GitHub へ保存する。戻り値：保存したときの件数
-async function saveRoom(room) {
-  const c = ghCfg();
-  if (!c) throw new Error('GitHub のトークンが、この端末にありません（設定の「マルチ」で登録してください）');
-  const path = pathOf(room.roomId);
+// 1つのファイルへ書く（書く前に、そのファイルの新しい内容を部屋へ取り込む）。戻り値：書いた件数
+async function writeWithMerge(c, room, path, message, pick) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const cur = await getFile(c, path);
     if (cur && cur.json && Array.isArray(cur.json.entries)) mergeInto(room, cur.json.entries);
-    const entries = [...room.kv.entries()];
+    const entries = [...room.kv.entries()].filter(pick);
     const obj = { v: FILE_VERSION, room: room.roomId, saved: new Date().toISOString(), entries };
-    const r = await putFile(c, path, obj, cur ? cur.sha : null, 'world save: ' + room.roomId);
-    if (r !== 'conflict') {
-      lastN = room.dig.n; lastX = room.dig.x; pending = false;
-      return entries.length;
-    }
+    const r = await putFile(c, path, obj, cur ? cur.sha : null, message + room.roomId);
+    if (r !== 'conflict') return entries.length;
   }
   throw new Error('ほかの人が同時に保存していて、保存できませんでした。もう一度押してください');
 }
-// GitHub の内容を部屋へ読み込む。戻り値：増えた件数（保存が無いときは -1）
+// 今の部屋の内容を GitHub へ保存する。通常の内容と、0.5マス・傾きブロック（専用ファイル）を別々に書く。戻り値：保存した件数
+async function saveRoom(room) {
+  const c = ghCfg();
+  if (!c) throw new Error('GitHub のトークンが、この端末にありません（設定の「マルチ」で登録してください）');
+  const main = await writeWithMerge(c, room, pathOf(room.roomId), 'world save: ', e => !isFine(e[0]));
+  const fine = await writeWithMerge(c, room, finePathOf(room.roomId), 'fine blocks save: ', e => isFine(e[0]));
+  lastN = room.dig.n; lastX = room.dig.x; pending = false;
+  return main + fine;
+}
+// GitHub の内容を部屋へ読み込む（通常の保存と、0.5マス・傾きの専用ファイルの両方）。戻り値：増えた件数（保存が無いときは -1）
 async function loadRoom(room) {
   const c = ghCfg();
   if (!c) throw new Error('GitHub のトークンが、この端末にありません');
-  const cur = await getFile(c, pathOf(room.roomId));
-  if (!cur || !cur.json || !Array.isArray(cur.json.entries)) return -1;
-  return mergeInto(room, cur.json.entries);
+  const [cur, fine] = await Promise.all([getFile(c, pathOf(room.roomId)), getFile(c, finePathOf(room.roomId))]);
+  let n = 0, found = false;
+  for (const f of [cur, fine]) {
+    if (!f || !f.json || !Array.isArray(f.json.entries)) continue;
+    found = true;
+    const k = mergeInto(room, f.json.entries);
+    n += k > 0 ? k : 0;
+  }
+  return found ? n : -1;
 }
 
 // ---------- 画面（部屋パネルの下） ----------
@@ -267,5 +279,5 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTGh = { saveRoom, loadRoom, mergeInto, ghCfg, pathOf };
+window.VoxelRTGh = { saveRoom, loadRoom, mergeInto, ghCfg, pathOf, finePathOf };
 })();
