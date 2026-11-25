@@ -157,8 +157,8 @@ async function press() {
       }
     }
     const payload = JSON.stringify({
-      format: 'vcrt-unify-1', seed: save.seed ?? null,
-      edits: (save.base && save.base.edits) || [], sounds: save.sounds || [], ws
+      format: 'vcrt-unify-2', seed: save.seed ?? null,
+      edits: aidEdits((save.base && save.base.edits) || []), sounds: save.sounds || [], ws
     });
     const id = newId();
     const parts = VoxelRTState.splitText(payload, PART);
@@ -246,7 +246,7 @@ function uniData(room, gen) {
   if (text === null) return null;
   let data;
   try { data = JSON.parse(text); } catch (e) { return null; }
-  if (!data || data.format !== 'vcrt-unify-1' || !data.ws) return null;
+  if (!data || (data.format !== 'vcrt-unify-1' && data.format !== 'vcrt-unify-2') || !data.ws) return null;
   uniCache = { id: gen.id, fp: gen.fp, data };
   return data;
 }
@@ -276,6 +276,16 @@ function putPending(seed, edits) {
     };
     r.onerror = () => rej(r.error);
   });
+}
+// 編集のブロック番号：カスタムブロックは端末ごとに番号が違うので、固定の印（aid）に書き換えて送る
+function aidEdits(edits) {
+  if (!window.VoxelExt || !VoxelExt.ext) return edits;
+  const byId = new Map(VoxelExt.ext.defs.map(d => [d.id, d]));
+  return edits.map(([cx, cy, cz, list]) => [cx, cy, cz, list.map(([i, v]) => {
+    if (typeof v !== 'number' || v < 100) return [i, v];
+    const d = byId.get(v);
+    return [i, d && typeof d.aid === 'string' ? 'A:' + d.aid : v];
+  })]);
 }
 // この端末のワールドを、統一されたものに置き換えて、再読み込みする
 async function adopt(room, gen, ts, data) {

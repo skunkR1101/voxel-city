@@ -215,6 +215,15 @@ async function loadFile(file) {
   location.reload();
 }
 
+// 統一のデータの「A:印」を、この端末のカスタムブロックの番号に戻す（見つからなければ空気のまま）
+function aidToLocal(list) {
+  const defs = (window.VoxelExt && VoxelExt.ext && VoxelExt.ext.defs) || [];
+  return list.map(([i, v]) => {
+    if (typeof v !== 'string' || v.slice(0, 2) !== 'A:') return [i, v];
+    const d = defs.find(x => x.aid === v.slice(2));
+    return [i, d ? d.id : 0];
+  });
+}
 // 読み込み待ちのワールドがあれば、その編集とシードを反映する（ページを読み直したあと）
 async function restorePending() {
   let pend = null;
@@ -222,7 +231,7 @@ async function restorePending() {
   if (!pend) return false;
   await idbDel(PENDING).catch(() => {});
   editsByChunk.clear();
-  for (const [cx, cy, cz, list] of pend.edits || []) editsByChunk.set(ckey(cx, cy, cz), new Map(list));
+  for (const [cx, cy, cz, list] of pend.edits || []) editsByChunk.set(ckey(cx, cy, cz), new Map(aidToLocal(list)));
   applySeed(pend.seed, false);
   return true;
 }
@@ -368,7 +377,7 @@ async function restoreAuto() {
   let a = null;
   try { a = await idbGet(AUTO_KEY); } catch (e) {}
   editsByChunk.clear();
-  if (a) for (const [cx, cy, cz, list] of a.edits || []) editsByChunk.set(ckey(cx, cy, cz), new Map(list));
+  if (a) for (const [cx, cy, cz, list] of a.edits || []) editsByChunk.set(ckey(cx, cy, cz), new Map(aidToLocal(list)));
   applySeed(a ? a.seed : localStorage.getItem(SEED_KEY), false);
   autoDirty = false;
 }
