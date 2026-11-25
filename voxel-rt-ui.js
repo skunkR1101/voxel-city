@@ -14,10 +14,16 @@
 const L = window.VoxelRTLogic;
 const VR = window.VoxelRT;
 const TR = window.VoxelRTTransport;
+const roomHooks = [];          // 部屋に入ったとき（fn(rm)）・出たとき（fn(null)）に呼ぶ。ブロック・保存・アバターなどの各モジュール用
+function fireRoom(rm) {
+  for (const fn of roomHooks) { try { fn(rm); } catch (e) { console.error(e); } }
+}
 if (!L || !VR || !TR) { console.error('voxel-rt: 部品が読み込まれていません'); return; }
 
 const NAME_KEY = 'vcrt_name_v1';
 const ROOM_ID_RE = /^[A-Za-z0-9_-]{3,32}$/;
+const CHAT_LAYOUT_KEY = 'vcrt_chatlayout_v1';   // チャット欄の位置（下からの px）と横幅（px）。この端末にだけ保存
+const CHAT_DEFAULT = { bottom: 72, width: 380 };
 const LAST_KEY = 'vcrt_last_v1';   // 最後に入った部屋（次回から自動で入るため。この端末にだけ保存）
 function saveLast(roomId, password) { try { localStorage.setItem(LAST_KEY, JSON.stringify({ roomId, password })); } catch (e) {} }
 function loadLast() {
@@ -71,7 +77,7 @@ function injectCss() {
     '#rtCard .go:disabled{opacity:.5}' +
     '#rtCard .m{font-size:12px;color:#9fb3c8;line-height:1.6;margin:6px 0 0}' +
     '#rtCard .tp{display:block;width:100%;text-align:left;background:#1f2b38;color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:8px;font-size:14px;margin-top:6px;cursor:pointer}' +
-    '#rtChat{position:fixed;left:8px;bottom:8px;top:auto;width:min(380px,62vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
+    '#rtChat{position:fixed;left:8px;bottom:72px;top:auto;width:min(380px,62vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
     '#rtChat .log{max-height:34vh;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:2px}' +
     '#rtChat .ln{background:rgba(0,0,0,.45);color:#fff;border-radius:6px;padding:2px 8px;width:fit-content;max-width:100%;word-break:break-word;text-shadow:0 1px 2px #000}' +
     '#rtChat .ln.sys{color:#ffe600}' +
@@ -90,6 +96,60 @@ function injectCss() {
 
 // ---------- チャットの画面 ----------
 let chatBox, chatLog, chatForm, chatInput;
+let chatLayout = { bottom: CHAT_DEFAULT.bottom, width: CHAT_DEFAULT.width };
+function loadChatLayout() {
+  try {
+    const v = JSON.parse(localStorage.getItem(CHAT_LAYOUT_KEY) || 'null');
+    if (v && typeof v === 'object') {
+      chatLayout = {
+        bottom: Math.min(300, Math.max(0, Math.round(Number(v.bottom)) || 0)),
+        width: Math.min(600, Math.max(200, Math.round(Number(v.width)) || CHAT_DEFAULT.width))
+      };
+    }
+  } catch (e) {}
+}
+function saveChatLayout() {
+  try { localStorage.setItem(CHAT_LAYOUT_KEY, JSON.stringify(chatLayout)); } catch (e) {}
+}
+function applyChatLayout() {
+  if (!chatBox) return;
+  chatBox.style.bottom = chatLayout.bottom + 'px';
+  chatBox.style.width = 'min(' + chatLayout.width + 'px,90vw)';
+}
+// ボタン配置の設定パネル（vcLayoutPanel）の中に、チャット欄の位置・大きさの調整を入れる
+function injectChatSettings(tries) {
+  const box = document.querySelector('#vcLayoutPanel .vcBox');
+  if (!box) { if ((tries || 0) < 30) setTimeout(() => injectChatSettings((tries || 0) + 1), 500); return; }
+  if (document.getElementById('rtChatSettings')) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'rtChatSettings';
+  wrap.innerHTML =
+    '<h3 style="margin:14px 0 0;font-size:14px;color:#cfe3f5">チャット欄の位置・大きさ</h3>' +
+    '<label>下からの位置：<span id="rtChatBottomV"></span></label>' +
+    '<input type="range" id="rtChatBottom" min="0" max="300" step="4">' +
+    '<label>横幅：<span id="rtChatWidthV"></span></label>' +
+    '<input type="range" id="rtChatWidth" min="200" max="600" step="10">' +
+    '<button id="rtChatReset" class="sub">チャット欄を初期位置に戻す</button>';
+  const close = document.getElementById('vcLayoutClose');
+  box.insertBefore(wrap, close || null);
+  const bIn = document.getElementById('rtChatBottom'), wIn = document.getElementById('rtChatWidth');
+  const sync = () => {
+    bIn.value = chatLayout.bottom; wIn.value = chatLayout.width;
+    document.getElementById('rtChatBottomV').textContent = chatLayout.bottom + 'px';
+    document.getElementById('rtChatWidthV').textContent = chatLayout.width + 'px';
+  };
+  bIn.addEventListener('input', () => { chatLayout.bottom = +bIn.value; applyChatLayout(); saveChatLayout(); sync(); });
+  wIn.addEventListener('input', () => { chatLayout.width = +wIn.value; applyChatLayout(); saveChatLayout(); sync(); });
+  document.getElementById('rtChatReset').addEventListener('click', () => {
+    chatLayout = { bottom: CHAT_DEFAULT.bottom, width: CHAT_DEFAULT.width };
+    applyChatLayout(); saveChatLayout(); sync();
+  });
+  sync();
+  // 設定パネルを開くたびに、今の値を表示し直す
+  const openBtn = document.getElementById('vcLayoutToggle');
+  if (openBtn) openBtn.addEventListener('click', sync);
+}
+
 function buildChat() {
   chatBox = el('div'); chatBox.id = 'rtChat';
   chatLog = el('div', 'log'); chatBox.appendChild(chatLog);
@@ -314,6 +374,7 @@ async function joinRoom(roomId, password, name) {
     return;
   }
   try { if (window.VoxelRTServer) serverSync = VoxelRTServer.attach(rm, tp); } catch (e) { console.error(e); }
+  fireRoom(rm);
   saveLast(roomId, password);
   quietUntil = Date.now() + QUIET_MS;
   setStatus('部屋：' + roomId + '（席 ' + (rm.slot + 1) + '）　参加中');
@@ -364,6 +425,7 @@ function leaveRoom(announce) {
   if (serverSync) { try { serverSync.stop(); } catch (e) {} serverSync = null; }
   try { rm.ephemeral('bye:' + rm.peerId, { n: myName }); } catch (e) {}
   room = null; transport = null;
+  fireRoom(null);
   rm.leave();
   if (tp) tp.close();
   remotes.clear();
@@ -407,6 +469,9 @@ function tick(now) {
 function startUp() {
   buildCard();
   buildChat();
+  loadChatLayout();
+  applyChatLayout();
+  injectChatSettings(0);
   buildOverlays();
   requestAnimationFrame(tick);
   window.addEventListener('pagehide', () => leaveRoom(false));
@@ -428,5 +493,15 @@ function startUp() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startUp);
 else startUp();
 
-window.VoxelRTUI = { join: joinRoom, leave: () => leaveRoom(true), remotes: () => remotes, say: t => { chatInput.value = t; sendChat(); } };
+window.VoxelRTUI = {
+  join: joinRoom,
+  leave: () => leaveRoom(true),
+  remotes: () => remotes,
+  say: t => { chatInput.value = t; sendChat(); },
+  // 部屋に入っている間ずっと fn(rm) を呼ぶ（すでに入っていれば、すぐに一度呼ぶ）
+  onRoom: fn => {
+    roomHooks.push(fn);
+    if (room && room.peerId) { try { fn(room); } catch (e) { console.error(e); } }
+  }
+};
 })();
