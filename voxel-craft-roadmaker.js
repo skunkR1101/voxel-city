@@ -68,6 +68,33 @@
     return ys[ys.length - 1];
   }
 
+  // 道の両側のバリア（当たり判定）の場所：道の外側1マス・道の高さ＋1段。道の上（幅の中）は含まない
+  // e: { points, front, sx, sy, sz, baseY }（道リストに保存している分だけで計算できる）
+  function barrierCells(e) {
+    const W = (e.front === 1 || e.front === 3) ? e.sz : e.sx;   // frameOf と同じ幅
+    const H = e.sy;
+    const { path, ctrlS } = resamplePath(e.points, 0.25);
+    const ys = e.points.map(p => (typeof p.y === 'number' && isFinite(p.y)) ? p.y : e.baseY);
+    const half = (W - 1) / 2;
+    const cells = new Set();
+    for (let i = 0; i < path.length; i++) {
+      const a = path[i];
+      const b = path[Math.min(i + 1, path.length - 1)];
+      let tx = b.x - a.x, tz = b.z - a.z;
+      if (i === path.length - 1) { tx = a.x - path[i - 1].x; tz = a.z - path[i - 1].z; }
+      const tl = Math.hypot(tx, tz) || 1;
+      tx /= tl; tz /= tl;
+      const nx = -tz, nz = tx;
+      const yb = Math.round(heightAt(ctrlS, ys, a.s));
+      for (const side of [-1, 1]) {
+        const du = side * (half + 1);
+        const wx = Math.round(a.x + nx * du), wz = Math.round(a.z + nz * du);
+        for (let y = 0; y <= H; y++) cells.add(wx + ',' + (yb + y) + ',' + wz);
+      }
+    }
+    return cells;
+  }
+
   const SUPPORT_DEPTH = 8;   // 坂の下の支え（空気のところだけ、この深さまで埋める）
 
   // 経路と断面から、生成するブロックを計算する
@@ -147,7 +174,7 @@
 
   // ---------- 画面（道メーカーのパネル・ボタン・生成・元に戻す） ----------
   const T_ROAD_MAKER = 62;
-  const st = { clip: null, points: [], front: 0, includeAir: false, support: true, open: false, busy: false, undo: null, panel: null, info: null, btn: null };
+  const st = { clip: null, points: [], front: 0, includeAir: false, support: true, toList: true, barrierOn: true, pendingEntry: null, open: false, busy: false, undo: null, panel: null, info: null, btn: null };
   function say(m) { try { if (typeof toast === 'function') toast(m); } catch (e) {} }
 
   // ステッキで選んだ範囲を、断面（ブロックの箱）として読む
@@ -259,6 +286,8 @@
         setBlock(o.x, o.y, o.z, o.id);
       }
       if (i < ops.length) { setTimeout(step, 0); return; }
+      const e = st.pendingEntry; st.pendingEntry = null;
+      if (e) { rdAdd(e); record.entryId = e.id; }
       st.undo = record; st.busy = false; setBusy(false);
       say('道を生成しました（' + ops.length + '個）。「元に戻す」で取り消せます');
     };
@@ -272,12 +301,14 @@
     try {
       r = generate({ clip: st.clip.clip, front: st.front, includeAir: st.includeAir, points: st.points, baseY: st.clip.baseY, isAir: st.support ? airAt : null });
     } catch (e) { say(e.message); return; }
+    st.pendingEntry = st.toList ? makeEntry() : null;
     applyOps(r.ops);
   }
 
   function onUndo() {
     if (st.busy || !st.undo) { say('元に戻せるものがありません'); return; }
     const rec = st.undo; st.undo = null;
+    if (rec.entryId) rdRemove(rec.entryId);
     st.busy = true; setBusy(true);
     let i = rec.length - 1;
     const CH = 1500;
@@ -289,6 +320,106 @@
       say('元に戻しました');
     };
     step();
+  }
+
+  // ---------- 道リスト（段階4）：登録した道は部屋の全員に共有され、道の両側に自動でバリアを置く ----------
+  // 端末の控えは localStorage（保存ファイルにも入る）。部屋とは「rd:道のID」の1件ずつで同期する（相手の登録を消さないため）
+  const LIST_KEY = 'voxelcraft_rdlist_v1';
+  const RD_PREFIX = 'rd:';
+  let rdList = [];                 // [{ id, name, points, front, sx, sy, sz, baseY, includeAir, support, barrier, at }]
+  const edgeCache = new Map();     // id -> バリアの場所（道が同じなら計算し直さない）
+  let rdRoom = null;
+  function loadList() {
+    try {
+      const v = JSON.parse(localStorage.getItem(LIST_KEY) || '[]');
+      rdList = Array.isArray(v) ? v.filter(e => e && typeof e.id === 'string' && Array.isArray(e.points)) : [];
+    } catch (e) { rdList = []; }
+  }
+  function saveList() {
+    try { localStorage.setItem(LIST_KEY, JSON.stringify(rdList)); } catch (e) { say('道リストを保存できませんでした（容量不足）'); }
+  }
+  function refreshBarrier() {
+    const all = new Set();
+    for (const e of rdList) {
+      if (!e.barrier) continue;
+      let s = edgeCache.get(e.id);
+      if (!s) { try { s = barrierCells(e); } catch (er) { s = new Set(); } edgeCache.set(e.id, s); }
+      for (const k of s) all.add(k);
+    }
+    if (window.VoxelBarrier && VoxelBarrier.setRoad) VoxelBarrier.setRoad(all);
+    refreshListBox();
+  }
+  function rdAdd(e, fromRoom) {
+    if (rdList.some(x => x.id === e.id)) return;
+    rdList.push(e);
+    saveList(); refreshBarrier();
+    if (!fromRoom && rdRoom) { try { rdRoom.set(RD_PREFIX + e.id, e); } catch (er) {} }
+  }
+  function rdRemove(id, fromRoom) {
+    const i = rdList.findIndex(x => x.id === id);
+    if (i < 0) return;
+    rdList.splice(i, 1); edgeCache.delete(id);
+    saveList(); refreshBarrier();
+    if (!fromRoom && rdRoom) { try { rdRoom.del(RD_PREFIX + id); } catch (er) {} }
+  }
+  function makeEntry() {
+    const c = st.clip.clip;
+    const id = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    return {
+      id, name: '道 ' + (rdList.length + 1), at: Date.now(),
+      points: st.points.map(p => ({ x: p.x, y: p.y, z: p.z })),
+      front: st.front, sx: c.sx, sy: c.sy, sz: c.sz, baseY: st.clip.baseY,
+      includeAir: !!st.includeAir, support: !!st.support, barrier: !!st.barrierOn
+    };
+  }
+  function refreshListBox() {
+    if (!st.panel) return;
+    const box = st.panel.querySelector('#rmListBox');
+    if (!box) return;
+    box.innerHTML = '';
+    const head = document.createElement('div');
+    head.style.cssText = 'margin:4px 0;font-weight:bold';
+    head.textContent = '道リスト（' + rdList.length + '本）';
+    box.appendChild(head);
+    rdList.slice().reverse().forEach(e => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:6px;margin:4px 0;font-size:13px';
+      const t = document.createElement('span');
+      t.textContent = e.name + '（' + e.points.length + '点' + (e.barrier ? '・バリアあり' : '') + '）';
+      const b = document.createElement('button');
+      b.textContent = 'リストから外す';
+      b.style.cssText = 'padding:4px 8px;border:none;border-radius:6px;background:#7a3a3a;color:#fff;font-size:12px';
+      b.addEventListener('click', () => { rdRemove(e.id); say('道リストから外しました（ブロックは残ります）'); });
+      row.appendChild(t); row.appendChild(b);
+      box.appendChild(row);
+    });
+  }
+  // 部屋の道リストの変更を受け取る（相手が登録・外したものを、この端末にも反映する）
+  function onRoomRd(key, v, meta) {
+    const id = key.slice(RD_PREFIX.length);
+    if (!id) return;
+    if (v === undefined || (meta && meta.del)) { rdRemove(id, true); return; }
+    if (v && typeof v === 'object' && typeof v.id === 'string' && Array.isArray(v.points)) rdAdd(v, true);
+  }
+  function syncRoom(rm) {
+    rdRoom = rm || null;
+    if (!rm) return;
+    rm.on('rd', onRoomRd);
+    setTimeout(() => {       // 部屋の保存が届いてから、足りないものだけ出す（外された道を戻さないため）
+      if (rdRoom !== rm) return;
+      if (rm.kv) for (const [k, cur] of rm.kv) {
+        if (!k.startsWith(RD_PREFIX)) continue;
+        if (cur && !cur.del && cur.v && typeof cur.v === 'object') rdAdd(cur.v, true);
+        else if (cur && cur.del) rdRemove(k.slice(RD_PREFIX.length), true);
+      }
+      for (const e of [...rdList]) {
+        if (!rm.kv || !rm.kv.get(RD_PREFIX + e.id)) rm.set(RD_PREFIX + e.id, e);
+      }
+    }, 4000);
+  }
+  function hookRoom(n) {
+    if (window.VoxelRTUI && VoxelRTUI.onRoom) VoxelRTUI.onRoom(syncRoom);
+    else if (n < 60) setTimeout(() => hookRoom(n + 1), 500);
   }
 
   function buildPanel() {
@@ -304,8 +435,10 @@
       '<option value="0">0°（そのまま）</option><option value="1">90°</option><option value="2">180°</option><option value="3">270°</option></select></label>' +
       '<label style="display:block;margin:6px 0"><input type="checkbox" id="rmAir"> 範囲内の空気も含める（空いたマスを消す）</label>' +
       '<label style="display:block;margin:6px 0"><input type="checkbox" id="rmSupport" checked> 坂の土台を自動で作る（宙に浮く部分の下を埋める）</label>' +
-      '<label style="display:block;margin:6px 0;opacity:.45"><input type="checkbox" disabled> 道リストに登録（段階4で追加）</label>' +
+      '<label style="display:block;margin:6px 0"><input type="checkbox" id="rmList" checked> 道リストに登録する（部屋の全員に共有）</label>' +
+      '<label style="display:block;margin:6px 0"><input type="checkbox" id="rmBarrier" checked> 道の両側に自動バリア（道の外へ出られない）</label>' +
       '<label style="display:block;margin:6px 0;opacity:.45"><input type="checkbox" disabled> 滑らか生成（斜め・傾き：段階3で追加）</label>' +
+      '<div id="rmListBox" style="margin:8px 0;border-top:1px solid #3a4a5a;padding-top:6px"></div>' +
       '<div style="margin:8px 0;opacity:.85">道の上をタップして経路の点を追加します（中間点も同じ）。2点以上で生成できます。</div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">' +
       '<button id="rmUndoPt">最後の点を取消</button>' +
@@ -319,6 +452,7 @@
     d.querySelector('#rmGen').style.background = '#2e6a9a';
     st.panel = d;
     st.info = d.querySelector('#rmInfo');
+    refreshListBox();
     d.querySelector('#rmFront').addEventListener('change', e => { st.front = Number(e.target.value) || 0; updatePreview(); });
     d.querySelector('#rmAir').addEventListener('change', e => { st.includeAir = !!e.target.checked; updatePreview(); });
     d.querySelector('#rmSupport').addEventListener('change', e => { st.support = !!e.target.checked; updatePreview(); });
@@ -329,6 +463,8 @@
       if (!got) { say('先にステッキで道の断面を範囲選択してください'); return; }
       st.clip = got; st.points = []; refreshInfo(); clearPreview();
     });
+    d.querySelector('#rmList').addEventListener('change', e => { st.toList = !!e.target.checked; });
+    d.querySelector('#rmBarrier').addEventListener('change', e => { st.barrierOn = !!e.target.checked; });
     d.querySelector('#rmGen').addEventListener('click', onGenerate);
     d.querySelector('#rmUndo').addEventListener('click', onUndo);
     d.querySelector('#rmClose').addEventListener('click', closePanel);
@@ -347,9 +483,14 @@
     }, 300);
   }
 
-  if (typeof window !== 'undefined') window.VoxelRoadMaker = { tap, open: openPanel, undo: onUndo, core: { frameOf, resamplePath, generate }, T_ROAD_MAKER };
+  if (typeof window !== 'undefined') window.VoxelRoadMaker = { tap, open: openPanel, undo: onUndo, core: { frameOf, resamplePath, generate, barrierCells }, T_ROAD_MAKER };
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    loadList();
+    setTimeout(refreshBarrier, 0);
+    hookRoom(0);
+  }
 
-  const core = { frameOf, resamplePath, generate };
+  const core = { frameOf, resamplePath, generate, barrierCells };
   if (typeof module !== 'undefined' && module.exports) module.exports = core;
   if (typeof window !== 'undefined') window.VoxelRoadMakerCore = core;
 })();

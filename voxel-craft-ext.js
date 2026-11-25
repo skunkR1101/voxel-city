@@ -1693,7 +1693,13 @@ function rebuildBarrier() {
   barrierSet = next;
 }
 setInterval(rebuildBarrier, 200);
-window.VoxelBarrier = { has: (x, y, z) => barrierSet.has(x + ',' + y + ',' + z), rebuild: rebuildBarrier };
+// 道リストの道の両側のバリア（道メーカーが場所を決めて渡す）
+let roadBarrierSet = new Set();
+window.VoxelBarrier = {
+  has: (x, y, z) => { const k = x + ',' + y + ',' + z; return barrierSet.has(k) || roadBarrierSet.has(k); },
+  rebuild: rebuildBarrier,
+  setRoad: s => { roadBarrierSet = s instanceof Set ? s : new Set(); }
+};
 
 // ============================================================
 // 破壊・設置
