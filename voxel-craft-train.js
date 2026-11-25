@@ -21,7 +21,7 @@ const V3 = THREE.Vector3;
 const QQ = THREE.Quaternion;
 const GIZMO_URL = 'https://unpkg.com/three@0.128.0/examples/js/controls/TransformControls.js';
 
-const lib = { cars: [], comp: [], maxKmh: 120 };
+const lib = { cars: [], comp: [], maxKmh: 120, cats: [] };      // cats：分類の名前（車には car.cat で入る）
 const built = new Map();
 const audioCache = new Map();
 let selId = null;
@@ -55,7 +55,8 @@ function newCar(name) {
   };
 }
 function carById(id) { return lib.cars.find(c => c.id === id); }
-function touchCar(id) { built.delete(id); }
+function touchCar(id) { built.delete(id); thumbsR.delete(id); }
+const thumbsR = new Map();       // 車の id -> プレビュー画像（この画面の中だけ。保存しない）
 
 // ---- 保存：大きい中身（模型・画像・音声）は、IndexedDB の「素材」に別に置き、保存領域には参照だけ残す ----
 // 部屋の仕組みは、この参照をたどって中身を相手に送る。相手は、参照から素材を受け取って車両を作る
@@ -101,7 +102,7 @@ function saveLib() {
       const cars = [];
       for (const c of lib.cars) cars.push(await slimOf(c));
       if (seq !== libSeq) return true;        // 後から新しい保存があれば、そちらを書く
-      const next = JSON.stringify({ cars: cars.concat(pendingRaw), comp: lib.comp, maxKmh: lib.maxKmh });
+      const next = JSON.stringify({ cars: cars.concat(pendingRaw), comp: lib.comp, maxKmh: lib.maxKmh, cats: lib.cats || [] });
       // 車両の数が減るときは、書き換える前の内容を予備に残す（うっかり消えたときに戻せるように）
       const prev = localStorage.getItem(LIB_KEY);
       try {
@@ -131,6 +132,7 @@ async function loadLib() {
   const ids = new Set([...ok, ...pend].map(c => c.id));
   if (Array.isArray(s.comp)) lib.comp = s.comp.filter(id => ids.has(id));
   if (typeof s.maxKmh === 'number') lib.maxKmh = clamp(s.maxKmh, 20, 300);
+  if (Array.isArray(s.cats)) lib.cats = s.cats.filter(x => typeof x === 'string' && x);
   built.clear();
   window.dispatchEvent(new Event('vc-train-lib'));
   if (pend.length && retryN++ < 200) setTimeout(() => { loadLib(); }, 1500);   // 素材が届くのを待って、もう一度作る
@@ -1200,6 +1202,126 @@ function bindEditor() {
   });
 }
 
+// ---------- 車両のリスト（リストを開く）：分類ごと・プレビュー画像つき。好きなだけ編成へ追加できる ----------
+let pickCat = '全部';
+let thumbRendR = null, thumbLoopR = false;
+function catOfCar(c) { return c.cat || '未分類'; }
+function allCatsR() {
+  const s = new Set(['未分類']);
+  (lib.cats || []).forEach(x => s.add(x));
+  lib.cars.forEach(c => s.add(catOfCar(c)));
+  return [...s];
+}
+// 車の見た目を1枚の画像にする（組み立て済みの模型を、斜め前から撮る）
+async function thumbCar(car) {
+  const b = await buildCar(car);
+  if (!thumbRendR) {
+    const cv = document.createElement('canvas');
+    thumbRendR = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+    thumbRendR.setSize(240, 150, false);
+    thumbRendR.setClearColor(0x243140, 1);
+  }
+  const sc = new THREE.Scene();
+  sc.add(new THREE.AmbientLight(0xffffff, 0.9));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+  dl.position.set(2, 4, 3);
+  sc.add(dl);
+  const copy = b.root.clone(true);
+  sc.add(copy);
+  const box = new THREE.Box3().setFromObject(copy);
+  if (box.isEmpty()) return '';
+  const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+  const L = Math.max(s.x, s.y, s.z, 1);
+  const cam = new THREE.PerspectiveCamera(35, 240 / 150, 0.1, 2000);
+  cam.position.copy(c).addScaledVector(new THREE.Vector3(0.7, 0.45, 0.9).normalize(), L * 1.6);
+  cam.lookAt(c);
+  thumbRendR.render(sc, cam);
+  return thumbRendR.domElement.toDataURL('image/png');
+}
+async function ensureThumbsR(list) {
+  for (const car of list) {
+    if (thumbsR.has(car.id)) continue;
+    let url = '';
+    try { url = await thumbCar(car); } catch (e) { console.error(e); }
+    thumbsR.set(car.id, url);
+    const img = document.querySelector('#trnPickBody img[data-tid="' + car.id + '"]');
+    if (img && url) img.src = url;
+  }
+}
+function openPicker() {
+  renderPicker();
+  document.getElementById('trnPick').style.display = 'flex';
+}
+function closePicker() { document.getElementById('trnPick').style.display = 'none'; }
+function renderPicker() {
+  const body = document.getElementById('trnPickBody');
+  if (!body) return;
+  const cats = allCatsR();
+  if (pickCat !== '全部' && !cats.includes(pickCat)) pickCat = '全部';
+  const shown = pickCat === '全部' ? lib.cars : lib.cars.filter(c => catOfCar(c) === pickCat);
+  const tabs = ['全部', ...cats].map(c =>
+    `<button class="trn-btn small ${c === pickCat ? '' : 'sub'}" data-ptab="${esc(c)}">${esc(c)}</button>`).join(' ');
+  const cards = shown.map(c => `
+    <div style="display:flex;gap:10px;align-items:center;border:1px solid #3a4a5a;border-radius:10px;padding:8px;margin:6px 0">
+      <img data-tid="${c.id}" alt="" src="${thumbsR.get(c.id) || ''}" style="width:150px;height:94px;object-fit:contain;background:#243140;border-radius:8px;flex:0 0 auto">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}（${c.length}m）</div>
+        <div style="margin:4px 0">分類 <select data-pcat="${c.id}" class="trn-in">${cats.map(x => `<option value="${esc(x)}" ${x === catOfCar(c) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="trn-btn small" data-pact="add" data-id="${c.id}">編成へ追加</button>
+          <button class="trn-btn small sub" data-pact="edit" data-id="${c.id}">編集</button>
+          <button class="trn-btn small danger" data-pact="del" data-id="${c.id}">削除</button>
+        </div>
+      </div>
+    </div>`).join('');
+  body.innerHTML = `
+    <div class="trn-row" style="justify-content:space-between">
+      <h3 style="margin:0">車両のリスト（${lib.cars.length}台）</h3>
+      <button class="trn-btn sub" id="trnPickClose">閉じる</button>
+    </div>
+    <div class="trn-row" style="flex-wrap:wrap;gap:6px">${tabs}
+      <button class="trn-btn small" id="trnPickAddCat">＋ 分類を追加</button></div>
+    ${cards || '<p class="trn-note">この分類の車両はありません。「＋ 新規車両」で作るか、分類を変えてください。</p>'}`;
+  ensureThumbsR(shown);
+}
+function bindPicker() {
+  const pick = document.getElementById('trnPick');
+  pick.addEventListener('click', e => {
+    if (e.target === pick) { closePicker(); return; }
+    if (e.target.closest('#trnPickClose')) { closePicker(); return; }
+    if (e.target.closest('#trnPickAddCat')) {
+      const n = (prompt('新しい分類の名前（例：電車・新幹線・特急）') || '').trim();
+      if (!n) return;
+      if (!lib.cats) lib.cats = [];
+      if (!lib.cats.includes(n)) lib.cats.push(n);
+      pickCat = n; saveLib(); renderPicker(); return;
+    }
+    const t = e.target.closest('[data-ptab],[data-pact]');
+    if (!t) return;
+    if (t.dataset.ptab) { pickCat = t.dataset.ptab; renderPicker(); return; }
+    const id = t.dataset.id, act = t.dataset.pact;
+    if (act === 'add') { lib.comp.push(id); saveLib(); renderLibrary(); renderPicker(); }
+    if (act === 'edit') { selId = id; renderLibrary(); renderEditor(); setPreviewCar(id); closePicker(); }
+    if (act === 'del') {
+      if (!confirm('この車両を削除しますか？（編成からも外れます）')) return;
+      lib.cars = lib.cars.filter(c => c.id !== id);
+      lib.comp = lib.comp.filter(x => x !== id);
+      built.delete(id); thumbsR.delete(id);
+      if (selId === id) { selId = null; renderEditor(); }
+      saveLib(); renderLibrary(); renderPicker();
+    }
+  });
+  pick.addEventListener('change', e => {
+    const s = e.target.closest('[data-pcat]');
+    if (!s) return;
+    const car = carById(s.dataset.pcat);
+    if (!car) return;
+    car.cat = s.value;
+    saveLib(); renderPicker();
+  });
+  document.getElementById('trnOpenList').addEventListener('click', openPicker);
+}
+
 function bindLibrary() {
   document.getElementById('trnNew').addEventListener('click', () => {
     const c = newCar('車両' + (lib.cars.length + 1));
@@ -1373,6 +1495,11 @@ function buildUI() {
 
   const wrap = document.createElement('div');
   wrap.innerHTML = `
+  <div id="trnPick" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:70;display:none;align-items:center;justify-content:center">
+    <div style="background:#1a2430;color:#fff;border-radius:12px;padding:14px;width:min(900px,95vw);max-height:90vh;overflow:auto;box-shadow:0 6px 24px rgba(0,0,0,.5)">
+      <div id="trnPickBody"></div>
+    </div>
+  </div>
   <div class="trn-panel" id="trnPanel"><div class="trn-box">
     <h2>カスタム列車エディット</h2>
     <div class="trn-row">
@@ -1385,8 +1512,10 @@ function buildUI() {
     <p class="trn-note" id="trnTotal"></p>
     <div class="trn-cols">
       <div class="trn-left">
-        <div class="trn-sec"><h3>車両の一覧</h3><div id="trnLib" style="display:flex;flex-direction:column;gap:4px"></div></div>
-        <div class="trn-sec"><h3>編成（左から順に連結）</h3><div id="trnComp" style="display:flex;flex-direction:column;gap:4px"></div></div>
+        <div class="trn-sec"><h3>車両の一覧</h3>
+          <div class="trn-row"><button class="trn-btn small" id="trnOpenList">📂 リストを開く（画像・分類で追加）</button></div>
+          <div id="trnLib" style="display:flex;flex-direction:column;gap:4px;max-height:26vh;overflow:auto"></div></div>
+        <div class="trn-sec"><h3>編成（左から順に連結）</h3><div id="trnComp" style="display:flex;flex-direction:column;gap:4px;max-height:26vh;overflow:auto"></div></div>
       </div>
       <div class="trn-right" id="trnEdit"></div>
       <div class="trn-left" style="width:360px">
@@ -1408,6 +1537,7 @@ function buildUI() {
   while (wrap.firstChild) document.body.appendChild(wrap.firstChild);
 
   bindLibrary();
+  bindPicker();
   bindEditor();
   holdBtn(document.getElementById('trnAcc'), () => { ctl.acc = true; }, () => { ctl.acc = false; });
   holdBtn(document.getElementById('trnBrk'), () => { ctl.brk = true; }, () => { ctl.brk = false; });

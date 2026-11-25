@@ -30,6 +30,8 @@ const S = {
   interval: 4,             // 車の出現間隔（秒）
   weights: {},             // 車の種類ID -> 出現の重み（既定は 1）
   customs: [],             // 自分の車（保存用：{id,name,len,front,back,alpha,fmt,model,tex}）
+  catOf: {},               // 車の id -> 分類名（未設定は「標準」「自分の車」）
+  cats: [],                // 分類の名前（リストで追加したもの）
   cars: [],
   spawnAcc: 0,
   paused: false
@@ -136,7 +138,7 @@ let saveTimer = 0;
 function saveSoon() { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 300); }
 function saveNow() {
   const data = {
-    seq: S.seq, colorN: S.colorN, interval: S.interval, weights: S.weights,
+    seq: S.seq, colorN: S.colorN, interval: S.interval, weights: S.weights, catOf: S.catOf, cats: S.cats,
     nodes: [...S.nodes.values()].map(n => ({ id: n.id, p: [n.p.x, n.p.y, n.p.z], kmh: n.kmh, w: n.w,
       sp: n.sp ? { interval: n.sp.interval, busOn: n.sp.busOn, sw: n.sp.sw } : undefined })),
     edges: [...S.edges.values()].map(e => ({ id: e.id, a: e.a, b: e.b, pts: e.pts, color: e.color, bus: !!e.bus })),
@@ -151,6 +153,8 @@ function loadNow() {
   if (!d) return;
   S.seq = d.seq || 1; S.colorN = d.colorN || 0; S.interval = d.interval || 4;
   S.weights = d.weights || {};
+  S.catOf = d.catOf && typeof d.catOf === 'object' ? d.catOf : {};
+  S.cats = Array.isArray(d.cats) ? d.cats.filter(x => typeof x === 'string' && x) : [];
   S.customs = Array.isArray(d.customs) ? d.customs : [];
   for (const n of d.nodes || []) {
     S.nodes.set(n.id, { id: n.id, p: new THREE.Vector3(n.p[0], n.p[1], n.p[2]), kmh: n.kmh || DEF_KMH, out: [], in: [], w: n.w || {}, sp: n.sp || null });
@@ -849,9 +853,87 @@ function openNodePanel(id) {
   };
 }
 
+// ---------- 車のリスト（リストを開く）：分類ごと・プレビュー画像つき ----------
+let listCatT = '全部';
+const thumbsT = new Map();       // 車の id -> 画像（この画面の中だけ。保存しない）
+let thumbRendT = null;
+function catOfV(v) { return S.catOf[v.id] || (v.id.startsWith('c_') ? '自分の車' : '標準'); }
+function allCatsT(all) {
+  const s = new Set(['標準', '自分の車', ...S.cats]);
+  for (const v of all) s.add(catOfV(v));
+  return [...s];
+}
+// 車の見た目を1枚の画像にする（斜め前から撮る）
+function thumbT(v) {
+  if (!thumbRendT) {
+    const cv = document.createElement('canvas');
+    thumbRendT = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
+    thumbRendT.setSize(240, 150, false);
+    thumbRendT.setClearColor(0x243140, 1);
+  }
+  const sc = new THREE.Scene();
+  sc.add(new THREE.AmbientLight(0xffffff, 0.9));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+  dl.position.set(2, 4, 3);
+  sc.add(dl);
+  const g = new THREE.Group();
+  for (const p of v.parts || []) g.add(new THREE.Mesh(p.geo, p.mat));
+  sc.add(g);
+  const box = new THREE.Box3().setFromObject(g);
+  if (box.isEmpty()) return '';
+  const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+  const L = Math.max(s.x, s.y, s.z, 1);
+  const cam = new THREE.PerspectiveCamera(35, 240 / 150, 0.1, 2000);
+  cam.position.copy(c).addScaledVector(new THREE.Vector3(0.7, 0.45, 0.9).normalize(), L * 1.6);
+  cam.lookAt(c);
+  thumbRendT.render(sc, cam);
+  return thumbRendT.domElement.toDataURL('image/png');
+}
+function ensureThumbsT(list) {
+  for (const v of list) {
+    if (thumbsT.has(v.id)) continue;
+    let url = '';
+    try { url = thumbT(v); } catch (e) { console.error(e); }
+    thumbsT.set(v.id, url);
+    const img = document.querySelector('img[data-tid="' + v.id + '"]');
+    if (img && url) img.src = url;
+  }
+}
+function openPickerT(all) {
+  const cats = allCatsT(all);
+  if (listCatT !== '全部' && !cats.includes(listCatT)) listCatT = '全部';
+  const shown = listCatT === '全部' ? all : all.filter(v => catOfV(v) === listCatT);
+  const tabs = ['全部', ...cats].map(c =>
+    `<button class="btn small ${c === listCatT ? '' : 'sub'}" data-tab="${esc(c)}">${esc(c)}</button>`).join(' ');
+  const cards = shown.map(v => {
+    const custom = v.id.startsWith('c_');
+    const rec = custom ? S.customs.find(c => 'c_' + c.id === v.id) : null;
+    const th = thumbsT.get(v.id) || '';
+    return `<div style="display:flex;gap:8px;align-items:center;border:1px solid #3a4a5a;border-radius:8px;padding:6px;margin:4px 0">
+      <img data-tid="${v.id}" alt="" src="${th}" style="width:120px;height:75px;object-fit:contain;background:#243140;border-radius:6px;flex:0 0 auto">
+      <div style="flex:1;min-width:0">
+        <div><b>${esc(v.name)}</b>${custom ? '（自分の車）' : '（標準）'}</div>
+        <div class="rowv">分類 <select data-catof="${v.id}">${cats.map(c => `<option value="${esc(c)}" ${c === catOfV(v) ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+          出現の重み <input type="number" min="0" step="1" value="${S.weights[v.id] == null ? 1 : S.weights[v.id]}" data-wt="${v.id}" style="width:60px"></div>
+        ${custom ? `<div class="rowv"><label><input type="checkbox" data-bus="${rec.id}" ${v.bus ? 'checked' : ''}> バス</label>
+          判定 前<input type="number" min="0" step="0.1" value="${v.front}" data-df="${rec.id}" style="width:56px"> 後<input type="number" min="0" step="0.1" value="${v.back}" data-db="${rec.id}" style="width:56px">
+          スケール<input type="number" min="0.1" max="10" step="0.1" value="${rec.scale || 1}" data-sc="${rec.id}" style="width:60px">倍
+          <button class="btn danger" data-del="${rec.id}">削除</button></div>` : `<div class="note">判定 前${v.front} 後${v.back}</div>`}
+      </div></div>`;
+  }).join('');
+  openP('set', `
+    <h2>車のリスト（${all.length}種類）</h2>
+    <div class="rowv" style="flex-wrap:wrap;gap:6px">${tabs}
+      <button class="btn small" data-a="addcat">＋ 分類を追加</button></div>
+    ${cards || '<p class="note">この分類の車はありません。</p>'}
+    <div class="rowv"><button class="btn" data-a="set">← 設定に戻る</button></div>`);
+  ensureThumbsT(shown);
+}
+
 // 車・出現の設定
-function openSetPanel() {
+function openSetPanel(view) {
   const all = [...variants.values()];
+  if (view === 'list') { openPickerT(all); return; }
   const rows = all.map(v => {
     const custom = v.id.startsWith('c_');
     const rec = custom ? S.customs.find(c => 'c_' + c.id === v.id) : null;
@@ -870,7 +952,7 @@ function openSetPanel() {
     <div class="rowv">出現の間隔（秒）<input type="number" min="0.5" step="0.5" value="${S.interval}" id="trInt" style="width:70px"></div>
     <p class="note">出現する割合：${pcts || '（車の種類がまだありません）'}</p>
     <h3>車の種類</h3>
-    ${rows}
+    <div class="rowv"><button class="btn" data-a="list">車のリストを開く（${all.length}種類・画像と分類つき）</button></div>
     <h3>自分の車を追加</h3>
     <div class="rowv">名前 <input id="trNm" value="マイカー" style="width:120px"></div>
     <div class="rowv"><label><input type="checkbox" id="trBus"> バス（ONにすると、バスとして判定・出現します）</label></div>
@@ -892,9 +974,11 @@ function openSetPanel() {
     const t = e.target;
     if (t.id === 'trInt') { S.interval = clampN(Number(t.value) || 4, 0.5, 600); saveSoon(); }
     if (t.dataset.wt) { S.weights[t.dataset.wt] = Math.max(0, Number(t.value) || 0); saveSoon(); }
+    if (t.dataset.catof) { S.catOf[t.dataset.catof] = t.value; saveSoon(); openSetPanel('list'); return; }
     if (t.dataset.sc) {
       const rec = S.customs.find(c => c.id === Number(t.dataset.sc));
       if (rec) {
+        thumbsT.delete('c_' + rec.id);
         rec.scale = clampN(Number(t.value) || 1, 0.1, 10);
         saveSoon();
         toast2('スケールを反映しています…');
@@ -916,8 +1000,16 @@ function openSetPanel() {
     }
   };
   panel.onclick = async e => {
-    const b = e.target.closest('[data-a],[data-del]');
+    const b = e.target.closest('[data-a],[data-del],[data-tab]');
     if (!b) return;
+    if (b.dataset.tab) { listCatT = b.dataset.tab; openSetPanel('list'); return; }
+    if (b.dataset.a === 'list') { openSetPanel('list'); return; }
+    if (b.dataset.a === 'set') { openSetPanel(); return; }
+    if (b.dataset.a === 'addcat') {
+      const n = (prompt('新しい分類の名前（例：路線バス・乗用車・トラック）') || '').trim();
+      if (n) { if (!S.cats.includes(n)) S.cats.push(n); listCatT = n; saveSoon(); openSetPanel('list'); }
+      return;
+    }
     if (b.dataset.del) {
       const id = Number(b.dataset.del);
       S.customs = S.customs.filter(c => c.id !== id);
@@ -1035,9 +1127,9 @@ function frame(now) {
     }
     if (fm === 'owner') VoxelFrame.publish('traffic', () => S.cars.map(packCar));
   }
-  renderCars();
-  updateMarkers();
-  updateHud();
+  renderCars();                                              // 車の位置は毎フレーム更新（動きを滑らかに保つ）
+  if (!window.VoxelPerf || VoxelPerf.every(4, 'traffic-mk')) updateMarkers();
+  if (!window.VoxelPerf || VoxelPerf.every(6, 'traffic-hud')) updateHud();
 }
 
 function init() {

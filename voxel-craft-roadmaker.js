@@ -322,6 +322,40 @@
     step();
   }
 
+  // フローティングウィンドウ：見出しをドラッグして動かせる。位置は端末ごとに覚える（画面からはみ出さない）
+  function makeDraggable(el, handle, key) {
+    if (!handle) return;
+    try {
+      const p = JSON.parse(localStorage.getItem(key) || 'null');
+      if (p && typeof p.left === 'number' && typeof p.top === 'number') {
+        el.style.left = Math.min(Math.max(0, p.left), Math.max(0, innerWidth - 80)) + 'px';
+        el.style.top = Math.min(Math.max(0, p.top), Math.max(0, innerHeight - 60)) + 'px';
+      }
+    } catch (e) {}
+    let drag = null;
+    handle.style.touchAction = 'none';
+    handle.addEventListener('pointerdown', e => {
+      const r = el.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      try { handle.setPointerCapture(e.pointerId); } catch (er) {}
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const left = Math.min(Math.max(0, e.clientX - drag.dx), Math.max(0, innerWidth - 80));
+      const top = Math.min(Math.max(0, e.clientY - drag.dy), Math.max(0, innerHeight - 60));
+      el.style.left = left + 'px';
+      el.style.top = top + 'px';
+    });
+    const end = () => {
+      if (!drag) return;
+      drag = null;
+      try { const r = el.getBoundingClientRect(); localStorage.setItem(key, JSON.stringify({ left: Math.round(r.left), top: Math.round(r.top) })); } catch (e) {}
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+  }
+
   // ---------- 道リスト（段階4）：登録した道は部屋の全員に共有され、道の両側に自動でバリアを置く ----------
   // 端末の控えは localStorage（保存ファイルにも入る）。部屋とは「rd:道のID」の1件ずつで同期する（相手の登録を消さないため）
   const LIST_KEY = 'voxelcraft_rdlist_v1';
@@ -426,9 +460,9 @@
     if (st.panel) { refreshInfo(); return; }
     const d = document.createElement('div');
     d.id = 'rmPanel';
-    d.style.cssText = 'position:fixed;left:12px;top:150px;width:280px;max-height:70vh;overflow:auto;background:rgba(18,26,36,.96);color:#fff;border-radius:10px;padding:12px;z-index:60;font-size:14px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+    d.style.cssText = 'position:fixed;left:12px;top:108px;width:280px;max-height:min(70vh,calc(100vh - 124px));overflow:auto;background:rgba(18,26,36,.96);color:#fff;border-radius:10px;padding:12px;z-index:60;font-size:14px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.4)';
     d.innerHTML =
-      '<div style="font-size:17px;font-weight:bold;margin-bottom:6px">道メーカー</div>' +
+      '<div id="rmHead" style="font-size:17px;font-weight:bold;margin-bottom:6px;cursor:move;user-select:none">道メーカー <span style="font-size:12px;opacity:.7">（ここをドラッグで移動）</span></div>' +
       '<div id="rmInfo" style="margin-bottom:8px;opacity:.9"></div>' +
       '<label style="display:block;margin:6px 0">正面（断面を回す）' +
       '<select id="rmFront" style="width:100%;margin-top:4px;padding:6px">' +
@@ -448,6 +482,7 @@
       '<button id="rmUndo">元に戻す</button>' +
       '<button id="rmClose">閉じる</button></div>';
     document.body.appendChild(d);
+    makeDraggable(d, d.querySelector('#rmHead'), 'voxelcraft_rmpos_v1');
     d.querySelectorAll('button').forEach(b => { b.style.cssText = 'padding:8px;border:none;border-radius:6px;background:#3a4a5a;color:#fff;font-size:14px'; });
     d.querySelector('#rmGen').style.background = '#2e6a9a';
     st.panel = d;
