@@ -8,7 +8,7 @@
 'use strict';
 
 const SYNC_MS = 2000;
-const BATCH = 50;
+const BATCH = 20;   // 1通のメッセージを小さく保つ（中継の上限 1MiB より十分小さく）
 
 // rm：VoxelRT の部屋。tp：VoxelRTTransport の通信（中継版）
 function attach(rm, tp) {

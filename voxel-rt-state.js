@@ -120,6 +120,8 @@ function sendBlobRefs(room, str) {
       const pk = packBlob(text);
       if (sentFp.get(key) === pk.meta.fp) return;
       sentFp.set(key, pk.meta.fp);
+      const have = remoteMetaOf(room, key);            // 部屋に同じ中身が既にあれば、送らない
+      if (have && have.fp === pk.meta.fp) return;
       queueBlob(key, pk);
       pump();
     }, () => {});
@@ -129,6 +131,7 @@ function sendBlobRefs(room, str) {
 // この端末の変更を、部屋へ出す
 function pushLocal(room, force) {
   for (const k of KEYS) {
+    if (k === EXT_K) continue;                 // カスタムブロックは extSync で扱う（相手の分を読んでから出す）
     const cur = getLocal(k);
     if (!force && cur === lastSeen.get(k)) continue;
     lastSeen.set(k, cur);
@@ -281,21 +284,42 @@ function autoApply(room) {
     if (m && typeof m.reload === 'function') { try { m.reload(); } catch (e) { console.error(e); } }
   }
 }
+// カスタムブロック（設定・テクスチャ・模型）：
+//  ・部屋に無ければ、この端末の分を出す（入ってから少し待つ。部屋の保存が届く前に上書きしないため）
+//  ・部屋にあれば、先に相手の分を読み込んで（足すだけ）、そのあとこの端末の分を部屋に合わせる
+//  ・同じ内容は送らない。大きい素材（テクスチャ・模型）は、部屋に同じ中身が無いものだけ送る
+let extReadyAt = 0;
+function extSync(room) {
+  if (!window.VoxelExt) return;
+  const local = getLocal(EXT_K);
+  const rext = kvValue(room, EXT_K);
+  const pushExt = (text) => {
+    lastSeen.set(EXT_K, text);
+    room.set('ws:' + EXT_K, text);
+    sendBlobRefs(room, text);
+  };
+  if (rext === null) {
+    if (local !== null && Date.now() >= extReadyAt && lastSeen.get(EXT_K) !== local) pushExt(local);
+    return;
+  }
+  if (rext === local) { lastSeen.set(EXT_K, local); return; }
+  if (extBusy || !VoxelExt.applyRemoteExt) return;
+  extBusy = true;
+  Promise.resolve(VoxelExt.applyRemoteExt(rext)).then(r => {
+    extBusy = false;
+    if (rm !== room || (r !== 'applied' && r !== 'same')) return;   // 素材待ちなどは、そろってから
+    const after = getLocal(EXT_K);
+    if (after !== null && after !== kvValue(room, EXT_K)) pushExt(after);   // 足した分（この端末の分）を部屋へ
+    else lastSeen.set(EXT_K, after);
+  }, e => { extBusy = false; console.error(e); });
+}
 function checkLive(room) {
   if (rm !== room) return;
   if (window.VoxelRTUnify && VoxelRTUnify.busy()) { hideBanner(); return; }
   assembleBlobs(room);
   pushLocal(room);
+  extSync(room);
   autoApply(room);
-  // カスタムブロックの追加・カテゴリ移動は、画面を変えずにそのまま反映する
-  const rext = kvValue(room, EXT_K);
-  if (rext !== null && rext !== getLocal(EXT_K) && !extBusy && window.VoxelExt && VoxelExt.applyRemoteExt) {
-    extBusy = true;
-    Promise.resolve(VoxelExt.applyRemoteExt(rext)).then(r => {
-      extBusy = false;
-      if (r === 'applied' && rm === room) lastSeen.set(EXT_K, getLocal(EXT_K));
-    }, e => { extBusy = false; console.error(e); });
-  }
   const diffs = remoteDiffs(room);
   if (!Object.keys(diffs).length) { hideBanner(); return; }
   showBanner(room);   // 道路などの変更だけ、設定メニュー内の表示で知らせる
@@ -355,6 +379,7 @@ function attach(room) {
   if (!rm) return;
   loadFps();
   for (const k of KEYS) lastSeen.set(k, getLocal(k));
+  extReadyAt = Date.now() + JOIN_CHECK_MS;
   timers.push(setInterval(() => checkLive(room), POLL_MS));
   timers.push(setTimeout(() => joinCheck(room), JOIN_CHECK_MS));
   try { room.on('need', (key, v) => onNeed(room, v)); } catch (e) { console.error(e); }
