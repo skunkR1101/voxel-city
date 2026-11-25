@@ -71,7 +71,7 @@ function injectCss() {
     '#rtCard .go:disabled{opacity:.5}' +
     '#rtCard .m{font-size:12px;color:#9fb3c8;line-height:1.6;margin:6px 0 0}' +
     '#rtCard .tp{display:block;width:100%;text-align:left;background:#1f2b38;color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:8px;font-size:14px;margin-top:6px;cursor:pointer}' +
-    '#rtChat{position:fixed;left:8px;top:8px;width:min(380px,62vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
+    '#rtChat{position:fixed;left:8px;bottom:8px;top:auto;width:min(380px,62vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
     '#rtChat .log{max-height:34vh;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:2px}' +
     '#rtChat .ln{background:rgba(0,0,0,.45);color:#fff;border-radius:6px;padding:2px 8px;width:fit-content;max-width:100%;word-break:break-word;text-shadow:0 1px 2px #000}' +
     '#rtChat .ln.sys{color:#ffe600}' +

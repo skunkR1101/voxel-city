@@ -269,7 +269,7 @@ function joinCheck(room) {
 
 // 画面を開いたまま、相手の変更が届いたとき：ボタンで反映する（画面は自動では変えない）
 // 車両（train）とダイヤ（dia）は、相手の変更を、確認なしでそのまま反映する（素材がそろってから）
-const AUTO = { voxelcraft_train_v1: 'train', voxelcraft_dia_v1: 'dia', voxelcraft_ship_v1: 'ship' };
+const AUTO = { voxelcraft_train_v1: 'train', voxelcraft_dia_v1: 'dia', voxelcraft_ship_v1: 'ship', voxelcraft_road_v1: 'road' };   // 道路も、確認なしで反映する（段階B）
 function autoApply(room) {
   for (const k of Object.keys(AUTO)) {
     const rv = kvValue(room, k);
