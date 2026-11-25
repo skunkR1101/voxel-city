@@ -121,12 +121,23 @@ function decodeKey(k) {
 // ============================================================
 // 保存・読み込み
 // ============================================================
+// 保存する編集：カスタムブロックは、端末ごとに違う番号ではなく固定の印（A:aid）で書く。
+// 番号が変わっても（統一・読み込み・再読み込み）、同じブロックを指し続けるため
+function localToAid(list) {
+  const defs = (window.VoxelExt && VoxelExt.ext && VoxelExt.ext.defs) || [];
+  const byId = new Map(defs.map(d => [d.id, d]));
+  return list.map(([i, v]) => {
+    if (typeof v !== 'number' || v < 100) return [i, v];
+    const d = byId.get(v);
+    return [i, d && typeof d.aid === 'string' ? 'A:' + d.aid : v];
+  });
+}
 function buildSave() {
   const edits = [];
   for (const [k, ed] of editsByChunk) {
     if (!ed || !ed.size) continue;
     const c = decodeKey(k);
-    if (c) edits.push([c.cx, c.cy, c.cz, [...ed.entries()]]);
+    if (c) edits.push([c.cx, c.cy, c.cz, localToAid([...ed.entries()])]);
   }
   const storage = {};
   for (let i = 0; i < localStorage.length; i++) {
@@ -233,6 +244,9 @@ async function restorePending() {
   editsByChunk.clear();
   for (const [cx, cy, cz, list] of pend.edits || []) editsByChunk.set(ckey(cx, cy, cz), new Map(aidToLocal(list)));
   applySeed(pend.seed, false);
+  // 統一・読み込みの結果を、すぐ自動保存にも書く（部屋の中でも）。古い保存が残ると、再読み込みで元に戻るため
+  autoDirty = true;
+  await autoSaveNow(true).catch(() => {});
   return true;
 }
 
@@ -357,11 +371,11 @@ function* worldEditsIter() {
   for (const [k, ed] of editsByChunk) {
     if (!ed || !ed.size) continue;
     const c = decodeKey(k);
-    if (c) yield [c.cx, c.cy, c.cz, [...ed.entries()]];
+    if (c) yield [c.cx, c.cy, c.cz, localToAid([...ed.entries()])];
   }
 }
-async function autoSaveNow() {
-  if (!autoDirty || isRoomOn() || autoSaving) return;
+async function autoSaveNow(force) {
+  if (!autoDirty || (isRoomOn() && !force) || autoSaving) return;
   autoSaving = true;
   autoDirty = false;                        // 書いている間に変わったものは、次の保存で拾う
   try {
