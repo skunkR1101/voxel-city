@@ -27,8 +27,7 @@ function isTyping(e) { return !!(e.target && /INPUT|TEXTAREA|SELECT/.test(e.targ
 function gameStarted() { try { return typeof started !== 'undefined' && !!started; } catch (x) { return false; } }
 function settingsOpen() { const s = el('settings'); return !!(s && s.classList.contains('show')); }
 function panelOpen() { return !!document.querySelector('.ext-panel.show'); }
-function phoneOpen() { return !!(window.VoxelPhone && VoxelPhone.isOpen()); }
-function uiOpen() { return settingsOpen() || panelOpen() || phoneOpen(); }
+function uiOpen() { return settingsOpen() || panelOpen(); }
 function chatInput() { const box = el('rtChat'); return box ? box.querySelector('input') : null; }
 function chatting() { const i = chatInput(); return !!i && document.activeElement === i; }
 function playing() { try { return gameStarted() && !uiOpen() && !chatting() && !(typeof menuOpen !== 'undefined' && menuOpen); } catch (x) { return false; } }
@@ -87,7 +86,7 @@ function setCursorFree(v) {
 // カーソルを出している間や、チャット中は、ポインターロックが外れても「一時停止」の画面を出さない
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement) return;
-  if (cursorFree || chatting() || settingsOpen() || panelOpen() || phoneOpen()) {
+  if (cursorFree || chatting() || anyOpen()) {
     try { if (typeof paused !== 'undefined') paused = false; } catch (x) {}
     const ov = el('overlay');
     if (ov) ov.style.display = 'none';
@@ -111,7 +110,6 @@ window.addEventListener('keydown', e => {
   switch (e.code) {
     case 'Escape': {
       if (!gameStarted()) return;
-      if (phoneOpen()) return;                   // 端末の閉じ方は、端末側の Esc に任せる
       if (settingsOpen()) { eat(e); if (typeof closeSettings === 'function') closeSettings(); return; }
       if (panelOpen()) return;                   // パネルの閉じ方は、既存の Esc に任せる
       eat(e);
@@ -183,15 +181,45 @@ window.addEventListener('keydown', e => {
   }
 }, true);
 
-// ---------- ホイールで持ち替え ----------
+// ---------- ホイールで持ち替え（1回の回転で1つだけ動く） ----------
+let wheelAcc = 0, wheelT = 0;
 window.addEventListener('wheel', e => {
   if (!e.deltaY || !playing()) return;
-  if (e.target && e.target.closest && e.target.closest('#rtChat, #settings, .ext-panel, #extQuick')) return;
+  if (e.target && e.target.closest && e.target.closest('#rtChat, #settings, .ext-panel, #extQuick, #rtLight')) return;
   if (typeof HOTBAR === 'undefined' || typeof selIdx === 'undefined' || typeof selectSlot !== 'function') return;
   e.preventDefault();
+  const now = performance.now();
+  if (now - wheelT > 400) wheelAcc = 0;          // 少し間があいたら、新しい回転として数え直す
+  wheelT = now;
+  wheelAcc += e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+  if (Math.abs(wheelAcc) < 50) return;           // 細かい回転の連続は、まとめて1つ分にする
+  const dir = wheelAcc > 0 ? 1 : -1;
+  wheelAcc = 0;
   const n = HOTBAR.length;
-  selectSlot((selIdx + (e.deltaY > 0 ? 1 : n - 1)) % n);
+  selectSlot((selIdx + dir + n) % n);
 }, { capture: true, passive: false });
+
+// ---------- メニュー・ウィンドウの開閉に合わせて、カーソルを出す／隠す ----------
+// 開いたらカーソルを出す（Tab で隠していても）。閉じたら、Tab で「表示」にしていない限り、また隠す
+function anyOpen() {
+  return uiOpen() || !!el('rtLight') || (typeof menuOpen !== 'undefined' && !!menuOpen);
+}
+let lastAnyOpen = false;
+function checkMenus() {
+  if (!gameStarted()) return;
+  const now = anyOpen();
+  if (now && !lastAnyOpen) {
+    if (document.pointerLockElement) document.exitPointerLock();
+  } else if (!now && lastAnyOpen) {
+    if (!cursorFree && !chatting()) relock();
+  }
+  lastAnyOpen = now;
+}
+// クリック・キーを離した直後に調べる（ブラウザが「ロックしてよい」と認める操作の中で、もう一度ロックするため）
+document.addEventListener('click', () => setTimeout(checkMenus, 0), true);
+document.addEventListener('pointerup', () => setTimeout(checkMenus, 0), true);
+document.addEventListener('keyup', () => setTimeout(checkMenus, 0), true);
+setInterval(checkMenus, 300);
 
 // カーソル表示中は、マウスの操作が画面の上で使えるように、カーソルの形を通常にする
 const st = document.createElement('style');

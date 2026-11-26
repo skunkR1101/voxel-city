@@ -2317,11 +2317,6 @@ window.addEventListener('blur', () => {
   releaseActions();
 });
 
-window.addEventListener('wheel', e => {
-  if (menuOpen) return;
-  selectSlot((selIdx + (e.deltaY > 0 ? 1 : -1) + HOTBAR.length) % HOTBAR.length);
-}, { passive: true });
-
 window.addEventListener('contextmenu', e => e.preventDefault());
 
 document.addEventListener('mousemove', e => {
@@ -2609,7 +2604,6 @@ setShader(settings.shader);
 if (settings.perf) setPerf(true);
 requestAnimationFrame(frame);
 </script>
-</body>
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
@@ -2647,4 +2641,5 @@ requestAnimationFrame(frame);
 <script src="voxel-rt-state.js"></script>
 <script src="voxel-rt-unify.js"></script>
 
+</body>
 </html>

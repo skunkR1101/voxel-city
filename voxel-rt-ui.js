@@ -87,7 +87,9 @@ function injectCss() {
     '#rtChat input{flex:1;min-width:0;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:7px;font-size:16px}' +
     '#rtChat button{background:#2e6a9a;color:#fff;border:none;border-radius:6px;padding:0 12px;font-size:14px}' +
     '#rtChat .ln a{color:#8fd3ff;text-decoration:underline;pointer-events:auto;word-break:break-all}' +
-    '#rtChat .ln img{display:block;max-width:min(60vw,220px);max-height:170px;border-radius:6px;margin-top:3px;pointer-events:auto}' +
+    '#rtChat .ln img{display:block;max-width:min(60vw,220px);max-height:170px;border-radius:6px;margin-top:3px;pointer-events:auto;cursor:zoom-in}' +
+    '#rtChat .chead{pointer-events:auto;display:inline-block;background:rgba(0,0,0,.5);color:#fff;border-radius:6px;padding:2px 10px;margin-bottom:3px;font-size:13px;cursor:pointer;user-select:none}' +
+    '#rtChat.min .log,#rtChat.min form{display:none}' +
     '#rtLoc{position:fixed;left:50%;transform:translateX(-50%);width:min(560px,92vw);height:12px;z-index:30;pointer-events:none;display:none}' +
     '#rtLoc .bar{position:absolute;inset:0;background:rgba(0,0,0,.35);border-radius:6px;border:1px solid rgba(255,255,255,.35)}' +
     '#rtLoc .dot{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;border:2px solid #fff;box-sizing:border-box}' +
@@ -154,7 +156,12 @@ function injectChatSettings(tries) {
 
 function buildChat() {
   chatBox = el('div'); chatBox.id = 'rtChat';
+  // 見出し（タップで、チャット欄をまるごと折りたたむ・戻す）
+  const head = el('div', 'chead', 'チャット ▾');
+  head.addEventListener('click', e => { e.stopPropagation(); setChatMin(!chatBox.classList.contains('min')); });
+  chatBox.appendChild(head);
   chatLog = el('div', 'log'); chatBox.appendChild(chatLog);
+  try { setChatMin(localStorage.getItem(CHAT_MIN_KEY) === '1'); } catch (e) {}
   chatForm = el('form');
   chatInput = el('input');
   chatInput.type = 'text';
@@ -188,6 +195,7 @@ function renderBody(box, text) {
       const img = document.createElement('img');
       img.src = u; img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
       img.onerror = () => { img.replaceWith(document.createTextNode(u)); };
+      img.addEventListener('click', e => { e.stopPropagation(); openLightbox(u); });
       box.appendChild(img);
     } else {
       const a = document.createElement('a');
@@ -208,12 +216,37 @@ function addLine(text, cls, nameColor, name, img) {
     d.appendChild(n);
   }
   renderBody(d, text || '');
-  if (img) { const i = document.createElement('img'); i.src = img; i.alt = ''; d.appendChild(i); }
+  if (img) {
+    const i = document.createElement('img'); i.src = img; i.alt = '';
+    i.addEventListener('click', e => { e.stopPropagation(); openLightbox(img); });
+    d.appendChild(i);
+  }
   chatLog.appendChild(d);
   while (chatLog.childNodes.length > LOG_MAX) chatLog.removeChild(chatLog.firstChild);
 }
 function sysLine(text) { addLine(text, 'sys'); }
 function setChatOn(on) { if (chatBox) chatBox.classList.toggle('on', !!on); }
+const CHAT_MIN_KEY = 'vcrt_chatmin_v1';
+function setChatMin(min) {
+  if (!chatBox) return;
+  chatBox.classList.toggle('min', !!min);
+  const head = chatBox.querySelector('.chead');
+  if (head) head.textContent = 'チャット ' + (min ? '▸' : '▾');
+  try { localStorage.setItem(CHAT_MIN_KEY, min ? '1' : '0'); } catch (e) {}
+}
+// 画像をタップすると大きく表示。もう一度どこかを押すと閉じる
+function openLightbox(src) {
+  if (document.getElementById('rtLight')) return;
+  const w = document.createElement('div');
+  w.id = 'rtLight';
+  w.style.cssText = 'position:fixed;inset:0;z-index:95;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:12px;cursor:zoom-out;touch-action:none';
+  const im = document.createElement('img');
+  im.src = src; im.alt = '';
+  im.style.cssText = 'max-width:96vw;max-height:94vh;object-fit:contain;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.6)';
+  w.appendChild(im);
+  w.addEventListener('click', e => { e.stopPropagation(); w.remove(); });
+  document.body.appendChild(w);
+}
 
 function sendChat() {
   const t = cleanText(chatInput.value, CHAT_MAX);
