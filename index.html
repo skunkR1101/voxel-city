@@ -2100,7 +2100,18 @@ function actsBlocked() {
     || (typeof panelOpen !== 'undefined' && !!panelOpen)
     || (typeof settingsEl !== 'undefined' && !!settingsEl && settingsEl.classList.contains('show'));
 }
+// 診断：設置の直後に破壊が始まったとき、その破壊を始めた元の操作を画面に出す（原因特定用）
+let dbgLastPlaceT = 0;
+const dbgPrevDoPlace = doPlace;
+window.doPlace = function () { dbgLastPlaceT = Date.now(); return dbgPrevDoPlace.apply(this, arguments); };
+function dbgTrace(kind) {
+  if (kind !== 'break' || Date.now() - dbgLastPlaceT > 1500) return;
+  const st = (new Error().stack || '').split('\n').slice(2, 5).map(s => s.trim().slice(0, 90)).join(' / ');
+  console.warn('[診断] 設置直後の破壊の元:', st);
+  toast('診断：設置直後に破壊 ← ' + st.slice(0, 200));
+}
 function startAct(kind) {
+  dbgTrace(kind);
   if (acts[kind]) return;
   if (actsBlocked()) return;
   const fn = kind === 'break' ? doBreak : doPlace;
@@ -2630,7 +2641,6 @@ setShader(settings.shader);
 if (settings.perf) setPerf(true);
 requestAnimationFrame(frame);
 </script>
-
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>
