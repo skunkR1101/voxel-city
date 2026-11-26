@@ -1152,6 +1152,8 @@ const FACES = [
 ];
 const STRIDE = [1, 18, 324];
 const AO_BRIGHT = [0.5, 0.66, 0.82, 1.0];
+// 面の向きによる明るさ（本家の見え方に近づける）：上=明るい、下=暗い、横は向きで少し違う。影の計算は使わないので軽い
+const FACE_SHADE = [0.8, 0.8, 1.0, 0.55, 0.66, 0.66];   // [+x, -x, 上, 下, +z, -z]
 const P = new Uint16Array(18 * 18 * 18); // パディング付きブロック配列
 
 function tileIndex(t, f) {
@@ -1191,7 +1193,8 @@ function computeAO(pi, f) {
   return out;
 }
 
-function emitQuad(buf, x, y, z, f, tile, ao) {
+function emitQuad(buf, x, y, z, f, tile, ao, shade) {
+  const sh = shade == null ? 1 : shade;
   const nd = FACES[f];
   const v0 = buf.p.length / 3;
   const col = tile % 4, row = Math.floor(tile / 4);
@@ -1203,7 +1206,7 @@ function emitQuad(buf, x, y, z, f, tile, ao) {
     buf.p.push(x + c[0], y + c[1], z + c[2]);
     buf.n.push(nd.n[0], nd.n[1], nd.n[2]);
     buf.uv.push(uvs[i * 2], uvs[i * 2 + 1]);
-    buf.c.push(ao[i], ao[i], ao[i]);
+    buf.c.push(ao[i] * sh, ao[i] * sh, ao[i] * sh);
   }
   if (ao[0] + ao[2] > ao[1] + ao[3]) buf.i.push(v0, v0 + 1, v0 + 3, v0 + 1, v0 + 2, v0 + 3);
   else buf.i.push(v0, v0 + 1, v0 + 2, v0, v0 + 2, v0 + 3);
@@ -1300,7 +1303,7 @@ function buildMesh(e) {
         emitQuad(WB, x, y, z, f, tileIndex(t, f), [1, 1, 1, 1]);
       } else {
         if (nt !== AIR && nt !== WATER) continue;
-        emitQuad(SB, x, y, z, f, tileIndex(t, f), computeAO(pi, f));
+        emitQuad(SB, x, y, z, f, tileIndex(t, f), computeAO(pi, f), FACE_SHADE[f]);
       }
     }
   }
@@ -1618,8 +1621,8 @@ function updateEnv() {
 
   // ライト
   hemi.color.copy(C_HEMI_NIGHT).lerp(C_HEMI_DAY, dayF);
-  hemi.intensity = shaderOn ? (0.25 + 0.35 * dayF) : (0.35 + 0.9 * dayF);
-  sun.intensity = shaderOn ? 1.25 * smoothstep(0.0, 0.2, e) : 0;
+  hemi.intensity = shaderOn ? (0.25 + 0.35 * dayF) : (0.3 + 0.75 * dayF);
+  sun.intensity = shaderOn ? 1.25 * smoothstep(0.0, 0.2, e) : 0.55 * smoothstep(0.0, 0.2, e);
   sun.castShadow = shaderOn && e > 0.02;
   sun.position.set(player.pos.x + sunDir.x * 120, player.pos.y + sunDir.y * 120, player.pos.z + sunDir.z * 120);
   sun.target.position.set(player.pos.x, player.pos.y, player.pos.z);

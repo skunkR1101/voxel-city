@@ -60,14 +60,18 @@ function stepSelect(sel, dir) {
   const orig = Element.prototype.requestPointerLock;
   if (!orig) return;
   Element.prototype.requestPointerLock = function () {
-    if (cursorFree) return Promise.reject(new Error('カーソル表示中'));
+    if (cursorFree || touchDevice()) return Promise.reject(new Error('カーソル表示中・タッチ端末'));
     return orig.apply(this, arguments);
   };
 })();
 
+// タッチ端末ではポインターロックを使わない（要求すると、Chrome が「カーソルを表示するには…」の案内を毎回出すため）
+function touchDevice() {
+  return (typeof isTouch !== 'undefined' && !!isTouch) || (window.matchMedia && matchMedia('(pointer: coarse)').matches);
+}
 function relock() {
   const cv = document.querySelector('canvas');
-  if (cv && cv.requestPointerLock && playing()) {
+  if (cv && cv.requestPointerLock && playing() && !touchDevice()) {
     const p = cv.requestPointerLock();
     if (p && p.catch) p.catch(() => {});
   }
