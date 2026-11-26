@@ -1128,10 +1128,17 @@ function frame(now) {
     if (fm === 'owner') VoxelFrame.publish('traffic', () => S.cars.map(packCar));
   }
   renderCars();                                              // 車の位置は毎フレーム更新（動きを滑らかに保つ）
-  if (!window.VoxelPerf || VoxelPerf.every(4, 'traffic-mk')) updateMarkers();
-  if (!window.VoxelPerf || VoxelPerf.every(6, 'traffic-hud')) updateHud();
+  if (everyN(4, 'traffic-mk')) updateMarkers();
+  if (everyN(6, 'traffic-hud')) updateHud();
 }
 
+// n フレームに1回だけ true を返す（描画の間引き。VoxelPerf には頼らない）
+const everyCount = {};
+function everyN(n, key) {
+  everyCount[key] = (everyCount[key] || 0) + 1;
+  if (everyCount[key] >= n) { everyCount[key] = 0; return true; }
+  return false;
+}
 function init() {
   buildDefaults();
   loadNow();

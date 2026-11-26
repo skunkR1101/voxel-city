@@ -86,6 +86,8 @@ function injectCss() {
     '#rtChat.on .log{pointer-events:none}' +
     '#rtChat input{flex:1;min-width:0;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:7px;font-size:16px}' +
     '#rtChat button{background:#2e6a9a;color:#fff;border:none;border-radius:6px;padding:0 12px;font-size:14px}' +
+    '#rtChat .ln a{color:#8fd3ff;text-decoration:underline;pointer-events:auto;word-break:break-all}' +
+    '#rtChat .ln img{display:block;max-width:min(60vw,220px);max-height:170px;border-radius:6px;margin-top:3px;pointer-events:auto}' +
     '#rtLoc{position:fixed;left:50%;transform:translateX(-50%);width:min(560px,92vw);height:12px;z-index:30;pointer-events:none;display:none}' +
     '#rtLoc .bar{position:absolute;inset:0;background:rgba(0,0,0,.35);border-radius:6px;border:1px solid rgba(255,255,255,.35)}' +
     '#rtLoc .dot{position:absolute;top:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;border:2px solid #fff;box-sizing:border-box}' +
@@ -163,23 +165,50 @@ function buildChat() {
   chatInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); sendChat(); } });
   chatInput.addEventListener('keyup', e => e.stopPropagation());
   chatInput.addEventListener('focus', () => { try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {} });
+  const pic = el('button', '', '🖼'); pic.type = 'button'; pic.title = '画像を送る';
+  pic.addEventListener('click', e => { e.preventDefault(); pickImage(); });
   const send = el('button', '', '送信'); send.type = 'submit';
-  chatForm.appendChild(chatInput); chatForm.appendChild(send);
+  chatForm.appendChild(chatInput); chatForm.appendChild(pic); chatForm.appendChild(send);
   chatForm.addEventListener('submit', e => { e.preventDefault(); sendChat(); });
   chatBox.appendChild(chatForm);
   document.body.appendChild(chatBox);
 }
-function addLine(text, cls, nameColor, name) {
+// チャットの表示：URL は押せるリンク。画像（gif・png・jpg・webp）の URL は、その場で画像として出す
+// 画像の送信（小さく縮めた JPEG）は、部屋の中継を通るので大きさを抑えている（IMG_MAX）
+const URL_RE = /https?:\/\/[^\s]+/g;
+const IMG_URL_RE = /\.(gif|png|jpe?g|webp)(\?[^\s]*)?$/i;
+const IMG_MAX = 60000;           // 送る画像の上限（文字数。約45KB）
+function renderBody(box, text) {
+  let last = 0, m;
+  URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(text))) {
+    if (m.index > last) box.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const u = m[0];
+    if (IMG_URL_RE.test(u)) {
+      const img = document.createElement('img');
+      img.src = u; img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer';
+      img.onerror = () => { img.replaceWith(document.createTextNode(u)); };
+      box.appendChild(img);
+    } else {
+      const a = document.createElement('a');
+      a.href = u; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = u;
+      box.appendChild(a);
+    }
+    last = m.index + u.length;
+  }
+  if (last < text.length) box.appendChild(document.createTextNode(text.slice(last)));
+}
+function addLine(text, cls, nameColor, name, img) {
   if (!chatLog) return;
   const d = el('div', 'ln' + (cls ? ' ' + cls : ''));
   if (name != null) {
-    const n = el('span', '', '<' + name + '> ');
+    const n = document.createElement('span');
+    n.textContent = '<' + name + '> ';
     n.style.color = nameColor || '#fff';
     d.appendChild(n);
-    d.appendChild(document.createTextNode(text));
-  } else {
-    d.textContent = text;
   }
+  renderBody(d, text || '');
+  if (img) { const i = document.createElement('img'); i.src = img; i.alt = ''; d.appendChild(i); }
   chatLog.appendChild(d);
   while (chatLog.childNodes.length > LOG_MAX) chatLog.removeChild(chatLog.firstChild);
 }
@@ -192,6 +221,42 @@ function sendChat() {
   if (!t || !room) return;
   room.ephemeral('chat:' + room.peerId, { n: myName, t });
   addLine(t, '', L.colorOf(myName), myName);
+}
+// 画像を選んで送る：小さく縮めて JPEG にし、部屋の中継で届ける（保存はしない）
+function shrinkImage(file) {
+  return new Promise((res, rej) => {
+    const src = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const k = Math.min(1, 200 / Math.max(img.width, img.height, 1));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * k));
+        c.height = Math.max(1, Math.round(img.height * k));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        let q = 0.7, url = c.toDataURL('image/jpeg', q);
+        while (url.length > IMG_MAX && q > 0.3) { q -= 0.15; url = c.toDataURL('image/jpeg', q); }
+        url.length <= IMG_MAX ? res(url) : rej(new Error('too big'));
+      } catch (e) { rej(e); } finally { URL.revokeObjectURL(src); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(src); rej(new Error('bad image')); };
+    img.src = src;
+  });
+}
+function pickImage() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  inp.addEventListener('change', async () => {
+    const f = inp.files && inp.files[0];
+    if (!f || !room) return;
+    try {
+      const url = await shrinkImage(f);
+      room.ephemeral('chat:' + room.peerId, { n: myName, t: '', img: url });
+      addLine('', '', L.colorOf(myName), myName, url);
+    } catch (e) { sysLine('画像を送れませんでした（大きすぎるか、読めない形式です）'); }
+  });
+  inp.click();
 }
 
 // ---------- 名前の表示・ロケーターバー ----------
@@ -407,7 +472,8 @@ function wireRoom(rm) {
     if (!v || !meta || meta.peer === rm.peerId) return;
     const n = cleanText(v.n, L.NAME_MAX) || L.DEFAULT_NAME;
     const t = cleanText(v.t, CHAT_MAX);
-    if (t) addLine(t, '', L.colorOf(n), n);
+    const img = typeof v.img === 'string' && /^data:image\/(jpeg|png);base64,/.test(v.img) && v.img.length <= IMG_MAX ? v.img : null;
+    if (t || img) addLine(t, '', L.colorOf(n), n, img);
   });
   rm.onEvent((ev, data) => {
     if (rm !== room) return;
