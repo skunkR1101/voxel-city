@@ -1314,6 +1314,7 @@ window.doBreak = function () {
 window.startAct = function (kind) {
   if (rs.mode && (kind === 'break' || kind === 'place')) {
     if (acts[kind]) return;
+    if (typeof actsBlocked === 'function' && actsBlocked()) return;
     acts[kind] = 'road';
     if (kind === 'break') roadBreak(); else roadTap();
     return;

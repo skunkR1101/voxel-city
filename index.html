@@ -2094,16 +2094,32 @@ function doPlace() {
 
 // 長押し連続動作
 const acts = { break: null, place: null };
+// メニューを開いている・一時停止中は、長押しの連続動作を止める（閉じたあとに勝手に設置・破壊しないように）
+function actsBlocked() {
+  return menuOpen || paused || !started
+    || (typeof panelOpen !== 'undefined' && !!panelOpen)
+    || (typeof settingsEl !== 'undefined' && !!settingsEl && settingsEl.classList.contains('show'));
+}
 function startAct(kind) {
   if (acts[kind]) return;
+  if (actsBlocked()) return;
   const fn = kind === 'break' ? doBreak : doPlace;
   fn();
-  acts[kind] = setInterval(fn, 260);
+  acts[kind] = setInterval(() => {
+    if (actsBlocked()) { stopAct(kind); return; }
+    fn();
+  }, 260);
 }
 function stopAct(kind) {
   if (acts[kind]) { clearInterval(acts[kind]); acts[kind] = null; }
 }
-function releaseActions() { stopAct('break'); stopAct('place'); }
+// タッチの「押している指」の状態を、設置せずに捨てる（endLook と違って、タップ扱いの設置をしない）
+function dropLook() {
+  clearTimeout(look.timer);
+  if (look.holding) { look.holding = false; }
+  look.id = null;
+}
+function releaseActions() { stopAct('break'); stopAct('place'); dropLook(); }
 
 // ============================================================
 // ホットバー
@@ -2118,6 +2134,8 @@ HOTBAR.forEach((id, i) => {
   slotEls.push(d);
 });
 function selectSlot(i) {
+  // 道具や場所を切り替えたら、押しっぱなしの動作は一度止める（前の道具で連続実行しない）
+  if (acts.break || acts.place) releaseActions();
   selIdx = i;
   slotEls.forEach((el, j) => el.classList.toggle('sel', j === i));
   hotLabel.textContent = BLOCK_INFO[HOTBAR[i]].name;
@@ -2186,7 +2204,7 @@ function syncSettingsUI() {
 function resetTouchState() {
   joy.id = null; joy.x = 0; joy.y = 0;
   joyEl.style.display = 'none';
-  endLook();
+  dropLook();
   touch.jump = false; touch.up = false; touch.down = false; touch.dash = false;
   suppressJump = false;
 }
@@ -2320,6 +2338,11 @@ window.addEventListener('blur', () => {
 window.addEventListener('contextmenu', e => e.preventDefault());
 
 document.addEventListener('mousemove', e => {
+  // 離したボタンの mouseup を取りこぼした場合に備えて、押していないのに続く長押し動作を止める
+  if (!isTouch) {
+    if (acts.break && !(e.buttons & 1)) stopAct('break');
+    if (acts.place && !(e.buttons & 2)) stopAct('place');
+  }
   if (document.pointerLockElement !== canvas) return;
   player.yaw -= e.movementX * 0.0022 * settings.sens;
   player.pitch = clamp(player.pitch - e.movementY * 0.0022 * settings.sens, -1.55, 1.55);
@@ -2334,6 +2357,9 @@ window.addEventListener('mouseup', e => {
   if (e.button === 0) stopAct('break');
   if (e.button === 2) stopAct('place');
 });
+// ウィンドウから出た・フォーカスを失った・タブを隠したときは、押している扱いを必ず解除する
+window.addEventListener('blur', () => releaseActions());
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseActions(); });
 canvas.addEventListener('click', () => {
   if (!isTouch && !document.pointerLockElement && !menuOpen) {
     const p = canvas.requestPointerLock && canvas.requestPointerLock();
@@ -2604,6 +2630,7 @@ setShader(settings.shader);
 if (settings.perf) setPerf(true);
 requestAnimationFrame(frame);
 </script>
+
 
 <script src="voxel-craft-ext.js"></script>
 <script src="voxel-craft-road.js"></script>

@@ -1770,6 +1770,7 @@ function isSolidAt(cell) {
 const DROP_LONG_MS = 450;
 let dropHold = null;                 // { kind, timer, long }
 window.startAct = function (kind) {
+  if (typeof actsBlocked === 'function' && actsBlocked()) return;   // メニューを開いている間は何もしない
   const id = HOTBAR[selIdx];
   if (isTool(id)) {
     if (acts[kind]) return;
