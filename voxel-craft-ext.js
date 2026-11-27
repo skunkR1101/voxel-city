@@ -202,7 +202,7 @@ function loadExt() {
       if (typeof s.water.tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(s.water.tint)) ext.waterTint = s.water.tint;
     }
     if (Array.isArray(s.defs)) ext.defs = s.defs;
-    if (typeof s.tilt === 'number') ext.tilt = clamp(s.tilt, 0, 90);
+    if (typeof s.tilt === 'number') ext.tilt = clamp(s.tilt, -90, 90);
     if (typeof s.grid === 'number') ext.grid = [1, 0.5, 0.25, 0].includes(s.grid) ? s.grid : 1;
   } catch (e) {}
 }
@@ -1542,9 +1542,13 @@ function snapToTilt(p, n) {
   }
   return { c: [c.x, c.y, c.z], q: T, snapped: true };
 }
+// スナップ吸着（端末ごと・初期値はオン）。オフでも、ブロックの面の上には置ける（吸着する場所を変えるだけ）
+const SNAP_KEY = 'voxelcraft_snap_v1';
+function snapOn() { try { return localStorage.getItem(SNAP_KEY) !== '0'; } catch (e) { return true; } }
+function setSnapOn(v) { try { localStorage.setItem(SNAP_KEY, v ? '1' : '0'); } catch (e) {} }
 function tiltPlacement(p) {
   const n = p.normal.clone().normalize();
-  if (p.kind === 'tilt' && p.ent) return snapToTilt(p, n);
+  if (snapOn() && p.kind === 'tilt' && p.ent) return snapToTilt(p, n);
   const ang = THREE.MathUtils.degToRad(ext.tilt);
   const up = new THREE.Vector3(0, 1, 0);
   let axis;
@@ -1559,9 +1563,9 @@ function tiltPlacement(p) {
   }
   const q = new THREE.Quaternion();
   if (ext.tilt !== 0) q.setFromAxisAngle(axis, ang);
-  const off = 0.5 * (Math.cos(ang) + Math.sin(ang));
+  const off = 0.5 * (Math.cos(ang) + Math.abs(Math.sin(ang)));   // 負の角度（逆向きの傾き）でも、面から浮かない・めり込まない
   const c = p.point.clone().addScaledVector(n, off);
-  if (ext.grid === 0) {
+  if (ext.grid === 0 && snapOn()) {
     // フリー：当てた面の持ち主（普通のブロック・傾きブロック）の格子に合わせて、隙間なく繋げる
     const hit = p.kind === 'tilt' && p.ent;
     const ref = hit ? new THREE.Vector3(p.ent.c[0], p.ent.c[1], p.ent.c[2]) : new THREE.Vector3(p.h.x + 0.5, p.h.y + 0.5, p.h.z + 0.5);
@@ -1580,7 +1584,7 @@ function tiltPlacement(p) {
     const q0 = hit && ext.tilt === 0 ? T : new THREE.Quaternion();
     if (ext.tilt === 0 && hit) return { c: [c.x, c.y, c.z], q: q0 };
   }
-  if (ext.grid > 0) {
+  if (ext.grid > 0 && snapOn()) {
     c.x = snapC(c.x, ext.grid);
     c.y = snapC(c.y, ext.grid);
     c.z = snapC(c.z, ext.grid);
@@ -3476,6 +3480,8 @@ function syncQuickBar() {
   if (!g) return;
   if (document.activeElement !== g) g.value = String(ext.grid);
   if (document.activeElement !== t) t.value = String(ext.tilt);
+  const sn = document.getElementById('qkSnap');
+  if (sn) { sn.textContent = snapOn() ? '吸着 ON' : '吸着 OFF'; sn.style.background = snapOn() ? '#14202e' : '#6a3a1a'; }
   if (document.activeElement !== d) {
     const a = String(diagAngleNow());
     if (!Array.from(d.options || []).some(o => o.value === a)) { const o = document.createElement('option'); o.value = a; o.textContent = a + '°'; d.appendChild(o); }
@@ -3490,28 +3496,30 @@ function buildQuickBar() {
       <option value="1">格子 1.0</option><option value="0.5">格子 0.5</option>
       <option value="0.25">格子 0.25</option><option value="0">フリー</option>
     </select>
-    <select id="qkTilt" title="傾き">
-      <option value="0">傾き 0°</option><option value="15">15°</option><option value="30">30°</option>
-      <option value="45">45°</option><option value="60">60°</option><option value="90">90°</option>
-    </select>
-    <select id="qkDeg" title="斜めの角度（格子を傾ける）">
-      <option value="0">斜め 0°</option><option value="15">15°</option><option value="30">30°</option><option value="45">45°</option>
-    </select>`;
+    <input id="qkTilt" type="number" step="0.5" min="-90" max="90" list="qkTiltList" title="傾き（数値を入力）" value="0">
+    <datalist id="qkTiltList"><option value="0"></option><option value="15"></option><option value="30"></option><option value="45"></option><option value="60"></option><option value="90"></option></datalist>
+    <input id="qkDeg" type="number" step="0.5" min="0" max="89.5" list="qkDegList" title="斜めの角度（格子を傾ける・数値を入力）" value="0">
+    <datalist id="qkDegList"><option value="0"></option><option value="15"></option><option value="30"></option><option value="45"></option></datalist>
+    <button id="qkSnap" title="スナップ吸着のオン・オフ" style="font-size:12px;padding:3px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.3);background:#14202e;color:#fff">吸着 ON</button>`;
   const st = document.createElement('style');
   st.textContent = `#extQuick{position:fixed;left:8px;top:96px;z-index:6;display:none;gap:4px;align-items:center;
     background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.35);border-radius:8px;padding:4px;touch-action:manipulation}
-    #extQuick select{background:#14202e;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;font-size:12px;padding:3px 2px;max-width:92px}`;
+    #extQuick select,#extQuick input{background:#14202e;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;font-size:12px;padding:3px 2px;max-width:92px;width:72px}`;
   document.head.appendChild(st);
   document.body.appendChild(bar);
   const g = bar.querySelector('#qkGrid'), t = bar.querySelector('#qkTilt'), d = bar.querySelector('#qkDeg');
+  const sn = bar.querySelector('#qkSnap');
+  sn.addEventListener('click', e => { e.stopPropagation(); setSnapOn(!snapOn()); syncQuickBar(); });
+  sn.addEventListener('pointerdown', e => e.stopPropagation());
   for (const el of [g, t, d]) {
     el.addEventListener('keydown', e => e.stopPropagation());
     el.addEventListener('pointerdown', e => e.stopPropagation());
     el.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
   }
   g.addEventListener('change', () => { ext.grid = Number(g.value); saveExt(); syncQuickBar(); });
-  t.addEventListener('change', () => { ext.tilt = Number(t.value); saveExt(); syncQuickBar(); });
-  d.addEventListener('change', () => { if (window.VoxelDiag && VoxelDiag.setAngle) VoxelDiag.setAngle(d.value); syncQuickBar(); });
+  const tiltSet = () => { const v = Number(t.value); if (Number.isFinite(v)) { ext.tilt = Math.max(-90, Math.min(90, v)); saveExt(); } syncQuickBar(); };
+  t.addEventListener('change', tiltSet);
+  d.addEventListener('change', () => { if (window.VoxelDiag && VoxelDiag.setAngle) VoxelDiag.setAngle(Number(d.value)); syncQuickBar(); });
   setInterval(syncQuickBar, 500);
   setQuickOn(quickOn());
   syncQuickBar();
@@ -3534,11 +3542,7 @@ function hookSettings() {
     </div>
     <h3>配置（傾き・グリッド）</h3>
     <label style="display:block;margin-top:6px">傾きの角度
-      <select class="ext-input" id="extTiltSel" style="margin-left:6px">
-        <option value="0">0°（水平・垂直）</option>
-        <option value="15">15°</option><option value="30">30°</option>
-        <option value="45">45°</option><option value="60">60°</option><option value="90">90°</option>
-      </select>
+      <input class="ext-input" id="extTiltSel" type="number" step="0.5" min="-90" max="90" style="margin-left:6px;width:90px"> °（数値で自由に入力）
     </label>
     <label style="display:block;margin-top:6px">グリッド
       <select class="ext-input" id="extSnapSel" style="margin-left:6px">
@@ -3572,7 +3576,7 @@ function hookSettings() {
   const ssel = document.getElementById('extSnapSel');
   tsel.value = String(ext.tilt);
   ssel.value = String(ext.grid);
-  tsel.addEventListener('change', () => { ext.tilt = Number(tsel.value); saveExt(); syncQuickBar(); });
+  tsel.addEventListener('change', () => { const v = Number(tsel.value); if (Number.isFinite(v)) { ext.tilt = Math.max(-90, Math.min(90, v)); saveExt(); } syncQuickBar(); });
   ssel.addEventListener('change', () => { ext.grid = Number(ssel.value); saveExt(); syncQuickBar(); });
   const qtog = document.getElementById('extQuickTog');
   qtog.checked = quickOn();

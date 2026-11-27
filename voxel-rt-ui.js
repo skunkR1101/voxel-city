@@ -39,7 +39,7 @@ const HEARTBEAT_MS = 1000;      // 止まっているとき、生存の知らせ
 const STALE_MS = 40000;         // これより長く便りがない相手は、画面から消す（お知らせは出さない）
 const QUIET_MS = 3000;          // 入った直後は、すでにいる人の「参加しました」を出さない
 const CHAT_MAX = 200;           // チャット1行の長さ（文字）
-const LOG_MAX = 80;
+const LOG_MAX = 300;            // 残しておく履歴の行数（上にスクロールして見られる）
 const STRIP_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]', 'g');
 
 let room = null, transport = null;
@@ -78,12 +78,13 @@ function injectCss() {
     '#rtCard .m{font-size:12px;color:#9fb3c8;line-height:1.6;margin:6px 0 0}' +
     '#rtCard .tp{display:block;width:100%;text-align:left;background:#1f2b38;color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:8px;font-size:14px;margin-top:6px;cursor:pointer}' +
     '#rtChat{position:fixed;left:8px;bottom:72px;top:auto;width:min(380px,62vw);z-index:40;pointer-events:none;font:14px/1.5 system-ui,sans-serif}' +
-    '#rtChat .log{max-height:34vh;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:2px}' +
+    '#rtChat .log{max-height:34vh;overflow-y:hidden;display:flex;flex-direction:column;overscroll-behavior:contain}' +
+    '#rtChat .lw{display:flex;flex-direction:column;gap:2px;margin-top:auto}' +
     '#rtChat .ln{background:rgba(0,0,0,.45);color:#fff;border-radius:6px;padding:2px 8px;width:fit-content;max-width:100%;word-break:break-word;text-shadow:0 1px 2px #000}' +
     '#rtChat .ln.sys{color:#ffe600}' +
     '#rtChat form{display:none;pointer-events:auto;margin-top:6px}' +
     '#rtChat.on form{display:flex;gap:6px}' +
-    '#rtChat.on .log{pointer-events:none}' +
+    '#rtChat.on .log{pointer-events:auto;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch}' +
     '#rtChat input{flex:1;min-width:0;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:7px;font-size:16px}' +
     '#rtChat button{background:#2e6a9a;color:#fff;border:none;border-radius:6px;padding:0 12px;font-size:14px}' +
     '#rtChat .ln a{color:#8fd3ff;text-decoration:underline;pointer-events:auto;word-break:break-all}' +
@@ -99,7 +100,7 @@ function injectCss() {
 }
 
 // ---------- チャットの画面 ----------
-let chatBox, chatLog, chatForm, chatInput;
+let chatBox, chatLog, chatLines, chatForm, chatInput;
 let chatLayout = { bottom: CHAT_DEFAULT.bottom, width: CHAT_DEFAULT.width };
 function loadChatLayout() {
   try {
@@ -161,6 +162,9 @@ function buildChat() {
   head.addEventListener('click', e => { e.stopPropagation(); setChatMin(!chatBox.classList.contains('min')); });
   chatBox.appendChild(head);
   chatLog = el('div', 'log'); chatBox.appendChild(chatLog);
+  chatLines = el('div', 'lw'); chatLog.appendChild(chatLines);
+  // 履歴のスクロール中は、ゲームの指の操作（視点の回転）に取られないようにする
+  chatLog.addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
   try { setChatMin(localStorage.getItem(CHAT_MIN_KEY) === '1'); } catch (e) {}
   chatForm = el('form');
   chatInput = el('input');
@@ -174,8 +178,10 @@ function buildChat() {
   chatInput.addEventListener('focus', () => { try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {} });
   const pic = el('button', '', '🖼'); pic.type = 'button'; pic.title = '画像を送る';
   pic.addEventListener('click', e => { e.preventDefault(); pickImage(); });
+  const emo = el('button', '', '😀'); emo.type = 'button'; emo.title = '絵文字';
+  emo.addEventListener('click', e => { e.preventDefault(); toggleEmoji(); });
   const send = el('button', '', '送信'); send.type = 'submit';
-  chatForm.appendChild(chatInput); chatForm.appendChild(pic); chatForm.appendChild(send);
+  chatForm.appendChild(chatInput); chatForm.appendChild(pic); chatForm.appendChild(emo); chatForm.appendChild(send);
   chatForm.addEventListener('submit', e => { e.preventDefault(); sendChat(); });
   chatBox.appendChild(chatForm);
   document.body.appendChild(chatBox);
@@ -207,7 +213,7 @@ function renderBody(box, text) {
   if (last < text.length) box.appendChild(document.createTextNode(text.slice(last)));
 }
 function addLine(text, cls, nameColor, name, img) {
-  if (!chatLog) return;
+  if (!chatLog || !chatLines) return;
   const d = el('div', 'ln' + (cls ? ' ' + cls : ''));
   if (name != null) {
     const n = document.createElement('span');
@@ -221,8 +227,10 @@ function addLine(text, cls, nameColor, name, img) {
     i.addEventListener('click', e => { e.stopPropagation(); openLightbox(img); });
     d.appendChild(i);
   }
-  chatLog.appendChild(d);
-  while (chatLog.childNodes.length > LOG_MAX) chatLog.removeChild(chatLog.firstChild);
+  const near = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 40;
+  chatLines.appendChild(d);
+  while (chatLines.childNodes.length > LOG_MAX) chatLines.removeChild(chatLines.firstChild);
+  if (near) chatLog.scrollTop = chatLog.scrollHeight;
 }
 function sysLine(text) { addLine(text, 'sys'); }
 function setChatOn(on) { if (chatBox) chatBox.classList.toggle('on', !!on); }
@@ -290,6 +298,210 @@ function pickImage() {
     } catch (e) { sysLine('画像を送れませんでした（大きすぎるか、読めない形式です）'); }
   });
   inp.click();
+}
+
+// ---------- 絵文字（好きな画像を登録して、チャットに送る。登録はこの端末だけに保存） ----------
+const EMO_KEY = 'vcrt_emoji_v1';
+const EMO_MAX = 200;
+const EMO_PX = 96;
+let emoBox = null, emoEdit = false;
+function emoList() {
+  try {
+    const a = JSON.parse(localStorage.getItem(EMO_KEY) || '[]');
+    return Array.isArray(a) ? a.filter(u => typeof u === 'string' && u.indexOf('data:image/png;base64,') === 0) : [];
+  } catch (e) { return []; }
+}
+function emoSave(list) {
+  try { localStorage.setItem(EMO_KEY, JSON.stringify(list.slice(0, EMO_MAX))); return true; } catch (e) { sysLine('絵文字を保存できませんでした（端末の空き容量が足りないかもしれません）'); return false; }
+}
+function toggleEmoji(force) {
+  if (!emoBox) buildEmoji();
+  const on = force == null ? emoBox.style.display === 'none' : !!force;
+  emoBox.style.display = on ? 'block' : 'none';
+  if (on) renderEmoji();
+}
+function buildEmoji() {
+  emoBox = el('div'); emoBox.id = 'rtEmoji';
+  emoBox.style.cssText = 'position:fixed;left:8px;bottom:150px;width:min(380px,62vw);max-height:40vh;overflow-y:auto;' +
+    'overscroll-behavior:contain;touch-action:pan-y;-webkit-overflow-scrolling:touch;z-index:41;background:rgba(10,14,20,.95);' +
+    'color:#fff;border-radius:10px;padding:8px;display:none;box-sizing:border-box;font:13px system-ui,sans-serif';
+  document.body.appendChild(emoBox);
+  // パネルの中の操作は、ゲームの操作（視点・設置）に取られないようにする
+  for (const t of ['pointerdown', 'click']) emoBox.addEventListener(t, e => e.stopPropagation());
+  emoBox.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+  emoBox.addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
+}
+const EMO_BTN = 'border:none;border-radius:6px;padding:6px 10px;background:#2e6a9a;color:#fff;font-size:13px';
+function renderEmoji() {
+  const list = emoList();
+  emoBox.innerHTML = '';
+  const head = document.createElement('div');
+  head.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px';
+  const title = document.createElement('b'); title.textContent = '絵文字（' + list.length + '）'; title.style.flex = '1';
+  const edit = document.createElement('button');
+  edit.textContent = emoEdit ? '完了' : '削除';
+  edit.style.cssText = EMO_BTN + (emoEdit ? ';background:#7a4a1a' : '');
+  edit.addEventListener('click', e => { e.preventDefault(); emoEdit = !emoEdit; renderEmoji(); });
+  const add = document.createElement('button');
+  add.textContent = '＋ 追加';
+  add.style.cssText = EMO_BTN;
+  add.addEventListener('click', e => { e.preventDefault(); pickEmoji(); });
+  head.append(title, edit, add);
+  emoBox.appendChild(head);
+  if (!list.length) {
+    const n = document.createElement('div');
+    n.style.cssText = 'opacity:.75;padding:6px 2px';
+    n.textContent = '絵文字はまだありません。「＋ 追加」で好きな画像を登録できます（切り取りができます）。';
+    emoBox.appendChild(n);
+    return;
+  }
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(56px,1fr));gap:6px';
+  list.forEach((u, i) => {
+    const b = document.createElement('button');
+    b.style.cssText = 'border:1px solid rgba(255,255,255,.25);border-radius:8px;background:rgba(255,255,255,.06);padding:4px;position:relative';
+    const im = document.createElement('img'); im.src = u; im.alt = '';
+    im.style.cssText = 'width:48px;height:48px;object-fit:contain;display:block;margin:0 auto';
+    b.appendChild(im);
+    b.addEventListener('click', e => {
+      e.preventDefault();
+      if (emoEdit) {
+        const cur = emoList(); cur.splice(i, 1); emoSave(cur); renderEmoji();
+      } else sendEmoji(u);
+    });
+    grid.appendChild(b);
+  });
+  emoBox.appendChild(grid);
+  if (emoEdit) {
+    const note = document.createElement('div');
+    note.style.cssText = 'margin-top:6px;opacity:.8;font-size:12px';
+    note.textContent = '削除したい絵文字をタップすると消えます（「完了」で戻ります）';
+    emoBox.appendChild(note);
+  }
+}
+function sendEmoji(url) {
+  if (!room) {
+    sysLine('部屋に入ると、相手にも絵文字が届きます');
+  } else {
+    room.ephemeral('chat:' + room.peerId, { n: myName, t: '', img: url });
+  }
+  addLine('', '', L.colorOf(myName), myName, url);
+  toggleEmoji(false);
+}
+function pickEmoji() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  inp.addEventListener('change', () => {
+    const f = inp.files && inp.files[0];
+    if (f) openCrop(f);
+  });
+  inp.click();
+}
+// 画像を、切り取りに使える大きさ（最大 512px）の PNG にする（どの大きさの画像でも受け付ける）
+function scaledPng(file, max) {
+  return new Promise((res, rej) => {
+    const src = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const k = Math.min(1, max / Math.max(img.width, img.height, 1));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * k));
+        c.height = Math.max(1, Math.round(img.height * k));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        res({ url: c.toDataURL('image/png'), w: c.width, h: c.height });
+      } catch (e) { rej(e); } finally { URL.revokeObjectURL(src); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(src); rej(new Error('bad image')); };
+    img.src = src;
+  });
+}
+// 切り取り：正方形の枠の中を、ドラッグで位置を合わせ、スライダーで拡大・縮小して決める
+async function openCrop(file) {
+  let pic;
+  try { pic = await scaledPng(file, 512); }
+  catch (e) { sysLine('この画像は読めませんでした'); return; }
+  const ov = document.createElement('div');
+  ov.id = 'rtCrop';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:96;background:rgba(0,0,0,.9);display:flex;flex-direction:column;' +
+    'align-items:center;justify-content:center;gap:10px;padding:12px;box-sizing:border-box;color:#fff;font:14px system-ui,sans-serif;touch-action:none';
+  const size = Math.max(160, Math.min(320, Math.floor(Math.min(window.innerWidth, window.innerHeight) * 0.7)));
+  const stage = document.createElement('div');
+  stage.style.cssText = 'position:relative;width:' + size + 'px;height:' + size + 'px;overflow:hidden;border-radius:8px;background:#222;cursor:move;touch-action:none';
+  const im = document.createElement('img');
+  im.src = pic.url; im.alt = ''; im.draggable = false;
+  im.style.cssText = 'position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;user-select:none;pointer-events:none';
+  stage.appendChild(im);
+  const frame = document.createElement('div');
+  frame.style.cssText = 'position:absolute;inset:0;border:2px dashed rgba(255,255,255,.85);box-sizing:border-box;pointer-events:none';
+  stage.appendChild(frame);
+  const zoom = document.createElement('input');
+  zoom.type = 'range'; zoom.min = '1'; zoom.max = '4'; zoom.step = '0.01'; zoom.value = '1';
+  zoom.style.width = size + 'px';
+  const label = document.createElement('div'); label.textContent = '拡大・縮小（ドラッグで位置を合わせる）'; label.style.opacity = '.85';
+  const btns = document.createElement('div'); btns.style.cssText = 'display:flex;gap:8px';
+  const ok = document.createElement('button'); ok.textContent = '決定'; ok.style.cssText = EMO_BTN;
+  const ng = document.createElement('button'); ng.textContent = 'キャンセル'; ng.style.cssText = EMO_BTN + ';background:#555';
+  btns.append(ok, ng);
+  ov.append(label, stage, zoom, btns);
+  // 切り取りの操作は、ゲームの指の操作（視点の回転）に取られないようにする
+  for (const t of ['touchstart', 'touchmove', 'pointerdown', 'click']) ov.addEventListener(t, e => e.stopPropagation(), { passive: true });
+  document.body.appendChild(ov);
+
+  const base = Math.max(size / pic.w, size / pic.h);   // 枠をちょうど覆う大きさ
+  let scale = base, ox = (size - pic.w * base) / 2, oy = (size - pic.h * base) / 2;
+  const clampPos = () => {
+    ox = Math.min(0, Math.max(size - pic.w * scale, ox));
+    oy = Math.min(0, Math.max(size - pic.h * scale, oy));
+  };
+  const place = () => {
+    clampPos();
+    im.style.width = (pic.w * scale) + 'px';
+    im.style.height = (pic.h * scale) + 'px';
+    im.style.transform = 'translate(' + ox + 'px,' + oy + 'px)';
+  };
+  zoom.addEventListener('input', () => {
+    const cx = (size / 2 - ox) / scale, cy = (size / 2 - oy) / scale;   // 今の中心（画像の上）
+    scale = base * Number(zoom.value);
+    ox = size / 2 - cx * scale; oy = size / 2 - cy * scale;
+    place();
+  });
+  let drag = null;
+  stage.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; stage.setPointerCapture(e.pointerId); });
+  stage.addEventListener('pointermove', e => {
+    if (!drag) return;
+    ox += e.clientX - drag.x; oy += e.clientY - drag.y;
+    drag = { x: e.clientX, y: e.clientY };
+    place();
+  });
+  const endDrag = () => { drag = null; };
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+  place();
+
+  const close = () => { ov.remove(); };
+  ng.addEventListener('click', close);
+  ok.addEventListener('click', () => {
+    const out = document.createElement('canvas');
+    out.width = EMO_PX; out.height = EMO_PX;
+    const sx = -ox / scale, sy = -oy / scale, sw = size / scale, sh = size / scale;
+    out.getContext('2d').drawImage(im, sx, sy, sw, sh, 0, 0, EMO_PX, EMO_PX);
+    let url = out.toDataURL('image/png');
+    if (url.length > IMG_MAX) {
+      // 念のため、さらに小さくする（相手に届けるときの上限に収める）
+      const small = document.createElement('canvas'); small.width = 64; small.height = 64;
+      small.getContext('2d').drawImage(out, 0, 0, 64, 64);
+      url = small.toDataURL('image/png');
+    }
+    const list = emoList();
+    list.push(url);
+    if (emoSave(list)) {
+      toggleEmoji(true);
+      sysLine('絵文字を登録しました');
+    }
+    close();
+  });
 }
 
 // ---------- 名前の表示・ロケーターバー ----------

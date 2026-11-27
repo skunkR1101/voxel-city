@@ -189,7 +189,7 @@ window.addEventListener('keydown', e => {
 let wheelAcc = 0, wheelT = 0;
 window.addEventListener('wheel', e => {
   if (!e.deltaY || !playing()) return;
-  if (e.target && e.target.closest && e.target.closest('#rtChat, #settings, .ext-panel, #extQuick, #rtLight')) return;
+  if (e.target && e.target.closest && e.target.closest('#rtChat, #rtEmoji, #rtCrop, #settings, .ext-panel, #extQuick, #rtLight')) return;
   if (typeof HOTBAR === 'undefined' || typeof selIdx === 'undefined' || typeof selectSlot !== 'function') return;
   e.preventDefault();
   const now = performance.now();
