@@ -2415,7 +2415,7 @@ overlayEl.addEventListener('click', e => {
 // ============================================================
 const joyEl = document.getElementById('joy');
 const joyKnob = document.getElementById('joyKnob');
-const UI_SEL = '#hotbar, .tb, #gearBtn, #settings, #overlay';
+const UI_SEL = '#hotbar, .tb, #gearBtn, #settings, #overlay, #rmPanel, .ext-panel';
 
 function joyStart(t) {
   joy.id = t.identifier;
@@ -2480,6 +2480,8 @@ window.addEventListener('touchstart', e => {
 
 window.addEventListener('touchmove', e => {
   if (!started || menuOpen) return;
+  // 道メーカーなど、中をスクロールする画面の上では、ブラウザ本来のスクロールを止めない
+  if (e.target && e.target.closest && e.target.closest('#rmPanel, .ext-panel, #settings')) return;
   e.preventDefault();
   for (const t of e.changedTouches) {
     if (t.identifier === joy.id) {

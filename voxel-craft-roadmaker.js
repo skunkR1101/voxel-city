@@ -460,7 +460,7 @@
     if (st.panel) { refreshInfo(); return; }
     const d = document.createElement('div');
     d.id = 'rmPanel';
-    d.style.cssText = 'position:fixed;left:12px;top:108px;width:280px;max-height:min(70vh,calc(100vh - 124px));overflow:auto;background:rgba(18,26,36,.96);color:#fff;border-radius:10px;padding:12px;z-index:60;font-size:14px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+    d.style.cssText = 'position:fixed;left:12px;top:108px;width:280px;max-height:min(70vh,calc(100vh - 124px));overflow:auto;overscroll-behavior:contain;touch-action:pan-y;-webkit-overflow-scrolling:touch;background:rgba(18,26,36,.96);color:#fff;border-radius:10px;padding:12px;z-index:60;font-size:14px;display:none;box-shadow:0 4px 16px rgba(0,0,0,.4)';
     d.innerHTML =
       '<div id="rmHead" style="font-size:17px;font-weight:bold;margin-bottom:6px;cursor:move;user-select:none">道メーカー <span style="font-size:12px;opacity:.7">（ここをドラッグで移動）</span></div>' +
       '<div id="rmInfo" style="margin-bottom:8px;opacity:.9"></div>' +

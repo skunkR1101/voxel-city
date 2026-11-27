@@ -3596,7 +3596,7 @@ function injectCSS() {
   const css = `
   #extBtn{position:fixed;right:10px;top:48px;z-index:6;background:rgba(0,0,0,.45);color:#fff;
     border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:7px 11px;font-size:13px;cursor:pointer}
-  .ext-panel{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:40}
+  .ext-panel{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:2147483000 !important}
   .ext-panel.show{display:flex}
   .ext-box{background:#1b2530;color:#fff;border-radius:10px;padding:16px;width:min(94vw,780px);max-height:92vh;
     overflow:auto;box-sizing:border-box;font-size:14px;box-shadow:0 6px 24px rgba(0,0,0,.5)}
