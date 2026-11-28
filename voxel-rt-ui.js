@@ -84,7 +84,16 @@ function injectCss() {
     '#rtChat .ln.sys{color:#ffe600}' +
     '#rtChat form{display:none;pointer-events:auto;margin-top:6px}' +
     '#rtChat.on form{display:flex;gap:6px}' +
-    '#rtChat.on .log{pointer-events:auto;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch}' +
+    '#rtChat .log{position:relative;pointer-events:none}' +
+    '#rtChat .sb{display:none;position:absolute;right:0;top:0;bottom:0;width:24px;touch-action:none;pointer-events:none}' +
+    '#rtChat.on .sb.show{display:block;pointer-events:auto}' +
+    '#rtChat .sb::before{content:"";position:absolute;right:9px;top:0;bottom:0;width:3px;border-radius:2px;background:rgba(255,255,255,.4)}' +
+    '#rtChat .sb .th{position:absolute;right:6px;top:0;width:9px;height:24px;border-radius:5px;background:rgba(255,255,255,.9)}' +
+    '#rtChat .ci{flex:1;min-width:0;min-height:38px;max-height:110px;overflow-y:auto;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:7px;font-size:16px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;outline:none;pointer-events:auto;touch-action:manipulation}' +
+    '#rtChat .ci:empty:before{content:attr(data-ph);opacity:.55;pointer-events:none}' +
+    '#rtChat .ci img{display:inline;width:1.5em;height:1.5em;vertical-align:-0.35em;margin:0 1px;object-fit:contain;user-select:none}' +
+    '#rtChat .ln img.emo{display:inline;width:1.5em;height:1.5em;max-width:none;max-height:none;vertical-align:-0.35em;margin:0 1px;cursor:zoom-in;pointer-events:auto}' +
+    '#rtChat .ln.big img.emo{width:72px;height:72px;vertical-align:middle}' +
     '#rtChat input{flex:1;min-width:0;background:rgba(0,0,0,.6);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:6px;padding:7px;font-size:16px}' +
     '#rtChat button{background:#2e6a9a;color:#fff;border:none;border-radius:6px;padding:0 12px;font-size:14px}' +
     '#rtChat .ln a{color:#8fd3ff;text-decoration:underline;pointer-events:auto;word-break:break-all}' +
@@ -101,6 +110,7 @@ function injectCss() {
 
 // ---------- チャットの画面 ----------
 let chatBox, chatLog, chatLines, chatForm, chatInput;
+let chatTrackSync = null, chatSavedRange = null;
 let chatLayout = { bottom: CHAT_DEFAULT.bottom, width: CHAT_DEFAULT.width };
 function loadChatLayout() {
   try {
@@ -165,16 +175,30 @@ function buildChat() {
   chatLines = el('div', 'lw'); chatLog.appendChild(chatLines);
   // 履歴のスクロール中は、ゲームの指の操作（視点の回転）に取られないようにする
   chatLog.addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
+  chatTrackSync = buildTrack();
   try { setChatMin(localStorage.getItem(CHAT_MIN_KEY) === '1'); } catch (e) {}
   chatForm = el('form');
-  chatInput = el('input');
-  chatInput.type = 'text';
-  chatInput.maxLength = CHAT_MAX;
-  chatInput.placeholder = 'チャット（Enterで送信）';
-  chatInput.autocomplete = 'off';
+  chatInput = el('div', 'ci');
+  chatInput.contentEditable = 'true';
+  chatInput.setAttribute('role', 'textbox');
+  chatInput.setAttribute('data-ph', 'チャット（Enterで送信・絵文字も入れられます）');
+  chatInput.spellcheck = false;
   // ゲームの操作（移動・視点）が、入力中の文字に反応しないようにする
-  chatInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); sendChat(); } });
-  chatInput.addEventListener('keyup', e => e.stopPropagation());
+  chatInput.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
+  });
+  chatInput.addEventListener('keyup', e => { e.stopPropagation(); saveRange(); });
+  chatInput.addEventListener('mouseup', saveRange);
+  chatInput.addEventListener('touchend', saveRange);
+  chatInput.addEventListener('blur', saveRange);
+  chatInput.addEventListener('input', trimComposer);
+  // 貼り付けは文字だけにする（書式や画像は入れない）
+  chatInput.addEventListener('paste', e => {
+    e.preventDefault();
+    const t = (e.clipboardData || window.clipboardData).getData('text') || '';
+    document.execCommand('insertText', false, t.replace(/[\r\n]+/g, ' '));
+  });
   chatInput.addEventListener('focus', () => { try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {} });
   const pic = el('button', '', '🖼'); pic.type = 'button'; pic.title = '画像を送る';
   pic.addEventListener('click', e => { e.preventDefault(); pickImage(); });
@@ -212,7 +236,7 @@ function renderBody(box, text) {
   }
   if (last < text.length) box.appendChild(document.createTextNode(text.slice(last)));
 }
-function addLine(text, cls, nameColor, name, img) {
+function addLine(text, cls, nameColor, name, img, em) {
   if (!chatLog || !chatLines) return;
   const d = el('div', 'ln' + (cls ? ' ' + cls : ''));
   if (name != null) {
@@ -221,7 +245,8 @@ function addLine(text, cls, nameColor, name, img) {
     n.style.color = nameColor || '#fff';
     d.appendChild(n);
   }
-  renderBody(d, text || '');
+  renderRich(d, text || '', em || []);
+  if (em && em.length && !String(text || '').replace(new RegExp(EMO_MARK, 'g'), '').trim()) d.classList.add('big');
   if (img) {
     const i = document.createElement('img'); i.src = img; i.alt = '';
     i.addEventListener('click', e => { e.stopPropagation(); openLightbox(img); });
@@ -231,9 +256,10 @@ function addLine(text, cls, nameColor, name, img) {
   chatLines.appendChild(d);
   while (chatLines.childNodes.length > LOG_MAX) chatLines.removeChild(chatLines.firstChild);
   if (near) chatLog.scrollTop = chatLog.scrollHeight;
+  if (chatTrackSync) chatTrackSync();
 }
 function sysLine(text) { addLine(text, 'sys'); }
-function setChatOn(on) { if (chatBox) chatBox.classList.toggle('on', !!on); }
+function setChatOn(on) { if (chatBox) chatBox.classList.toggle('on', !!on); if (chatTrackSync) chatTrackSync(); }
 const CHAT_MIN_KEY = 'vcrt_chatmin_v1';
 function setChatMin(min) {
   if (!chatBox) return;
@@ -256,12 +282,24 @@ function openLightbox(src) {
   document.body.appendChild(w);
 }
 
-function sendChat() {
-  const t = cleanText(chatInput.value, CHAT_MAX);
-  chatInput.value = '';
-  if (!t || !room) return;
-  room.ephemeral('chat:' + room.peerId, { n: myName, t });
-  addLine(t, '', L.colorOf(myName), myName);
+// 文字と絵文字を、そのままの順番で送る（絵文字は 64px に縮めて届ける）
+async function sendChat() {
+  let raw = '';
+  const ems = [];
+  for (const p of composerParts()) {
+    if (p.e) { raw += EMO_MARK; ems.push(p.e); } else raw += p.t;
+  }
+  const t = cleanText(raw, CHAT_MAX);
+  const n = Math.min(ems.length, Array.from(t).filter(c => c === EMO_MARK).length);
+  if (!t.replace(new RegExp(EMO_MARK, 'g'), '').trim() && n === 0) { chatInput.innerHTML = ''; return; }
+  if (!room) { sysLine('部屋に入ると送れます'); return; }
+  const small = [];
+  for (let i = 0; i < n; i++) small.push(await smallPng(ems[i], 64));
+  if (small.reduce((a, u) => a + u.length, 0) > IMG_MAX) { sysLine('絵文字が多すぎて送れません（減らしてください）'); return; }
+  chatInput.innerHTML = '';
+  chatSavedRange = null;
+  room.ephemeral('chat:' + room.peerId, { n: myName, t, em: small });
+  addLine(t, '', L.colorOf(myName), myName, null, small);
 }
 // 画像を選んで送る：小さく縮めて JPEG にし、部屋の中継で届ける（保存はしない）
 function shrinkImage(file) {
@@ -300,6 +338,128 @@ function pickImage() {
   inp.click();
 }
 
+// ---------- 入力欄：文字と絵文字（文の中に並べる） ----------
+// 文の中の絵文字の位置は、この記号で表す（相手の画面では、同じ順番で絵文字の画像に置き換える）
+const EMO_MARK = '￼';
+function composerParts() {
+  const parts = [];
+  chatInput.childNodes.forEach(n => {
+    if (n.nodeType === 3) parts.push({ t: n.nodeValue });
+    else if (n.nodeType === 1 && n.tagName === 'IMG' && n.dataset.emo) parts.push({ e: n.src });
+    else if (n.nodeType === 1 && n.tagName === 'BR') parts.push({ t: ' ' });
+    else parts.push({ t: n.textContent || '' });
+  });
+  return parts;
+}
+// 文字数の上限（絵文字は1文字として数える）を超えたら、後ろから切る
+function trimComposer() {
+  let total = 0;
+  for (const p of composerParts()) total += p.e ? 1 : Array.from(p.t).length;
+  if (total <= CHAT_MAX) return;
+  let over = total - CHAT_MAX;
+  const nodes = Array.from(chatInput.childNodes).reverse();
+  for (const n of nodes) {
+    if (over <= 0) break;
+    if (n.nodeType === 3) {
+      const a = Array.from(n.nodeValue);
+      const cut = Math.min(over, a.length);
+      n.nodeValue = a.slice(0, a.length - cut).join('');
+      over -= cut;
+    } else if (n.nodeType === 1 && n.tagName === 'IMG') { n.remove(); over -= 1; }
+  }
+}
+function saveRange() {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount && chatInput.contains(sel.getRangeAt(0).startContainer)) chatSavedRange = sel.getRangeAt(0).cloneRange();
+}
+function insertEmoji(url) {
+  chatInput.focus();
+  const sel = window.getSelection();
+  let r = chatSavedRange && chatInput.contains(chatSavedRange.startContainer) ? chatSavedRange : null;
+  if (!r) { r = document.createRange(); r.selectNodeContents(chatInput); r.collapse(false); }
+  const img = document.createElement('img');
+  img.src = url; img.alt = ''; img.dataset.emo = '1'; img.contentEditable = 'false';
+  const sp = document.createTextNode(' ');
+  r.deleteContents();
+  r.insertNode(sp);
+  sp.before(img);
+  const nr = document.createRange();
+  nr.setStartAfter(sp); nr.collapse(true);
+  if (sel) { sel.removeAllRanges(); sel.addRange(nr); }
+  saveRange();
+  trimComposer();
+}
+// 絵文字を、相手に届けやすい大きさ（64px の PNG）にする
+function smallPng(url, px) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => {
+      try {
+        const c = document.createElement('canvas'); c.width = px; c.height = px;
+        c.getContext('2d').drawImage(im, 0, 0, px, px);
+        res(c.toDataURL('image/png'));
+      } catch (e) { rej(e); }
+    };
+    im.onerror = () => rej(new Error('bad emoji'));
+    im.src = url;
+  });
+}
+// 発言の中の絵文字を、画像として並べる
+function renderRich(box, text, em) {
+  const segs = String(text).split(EMO_MARK);
+  segs.forEach((seg, i) => {
+    if (seg) renderBody(box, seg);
+    if (i < segs.length - 1 && em[i]) box.appendChild(emoImg(em[i]));
+  });
+  for (let i = segs.length - 1; i < em.length; i++) box.appendChild(emoImg(em[i]));
+}
+function emoImg(u) {
+  const im = document.createElement('img');
+  im.src = u; im.alt = ''; im.className = 'emo';
+  im.addEventListener('click', e => { e.stopPropagation(); openLightbox(u); });
+  return im;
+}
+// 右側の縦線だけで、チャットの履歴をスクロールする（それ以外の場所は、ゲームの操作のまま）
+function buildTrack() {
+  const sb = document.createElement('div'); sb.className = 'sb';
+  const th = document.createElement('div'); th.className = 'th';
+  sb.appendChild(th);
+  chatLog.appendChild(sb);
+  const maxS = () => Math.max(1, chatLog.scrollHeight - chatLog.clientHeight);
+  const sync = () => {
+    const sh = chatLog.scrollHeight, ch = chatLog.clientHeight;
+    const over = sh > ch + 2 && !!chatBox && chatBox.classList.contains('on');
+    sb.classList.toggle('show', over);
+    if (!over) return;
+    const tr = sb.clientHeight;
+    const h = Math.max(24, Math.round(tr * ch / sh));
+    th.style.height = h + 'px';
+    th.style.top = Math.round((tr - h) * chatLog.scrollTop / maxS()) + 'px';
+  };
+  chatLog.addEventListener('scroll', sync, { passive: true });
+  let grab = null;
+  const setFromY = clientY => {
+    const tr = sb.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientY - tr.top - grab) / Math.max(1, tr.height - th.offsetHeight)));
+    chatLog.scrollTop = f * maxS();
+    sync();
+  };
+  sb.addEventListener('pointerdown', e => {
+    e.stopPropagation();
+    const tr = sb.getBoundingClientRect();
+    grab = e.target === th ? (e.clientY - tr.top - th.offsetTop) : th.offsetHeight / 2;
+    try { sb.setPointerCapture(e.pointerId); } catch (x) {}
+    setFromY(e.clientY);
+  });
+  sb.addEventListener('pointermove', e => { if (grab == null) return; e.stopPropagation(); setFromY(e.clientY); });
+  const end = () => { grab = null; };
+  sb.addEventListener('pointerup', end);
+  sb.addEventListener('pointercancel', end);
+  for (const t of ['touchstart', 'touchmove', 'touchend']) sb.addEventListener(t, e => e.stopPropagation(), { passive: true });
+  sb.addEventListener('wheel', e => { e.preventDefault(); chatLog.scrollTop += e.deltaY; sync(); }, { passive: false });
+  return sync;
+}
+
 // ---------- 絵文字（好きな画像を登録して、チャットに送る。登録はこの端末だけに保存） ----------
 const EMO_KEY = 'vcrt_emoji_v1';
 const EMO_MAX = 200;
@@ -330,6 +490,7 @@ function buildEmoji() {
   for (const t of ['pointerdown', 'click']) emoBox.addEventListener(t, e => e.stopPropagation());
   emoBox.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
   emoBox.addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
+  emoBox.addEventListener('mousedown', e => e.preventDefault());
 }
 const EMO_BTN = 'border:none;border-radius:6px;padding:6px 10px;background:#2e6a9a;color:#fff;font-size:13px';
 function renderEmoji() {
@@ -367,7 +528,7 @@ function renderEmoji() {
       e.preventDefault();
       if (emoEdit) {
         const cur = emoList(); cur.splice(i, 1); emoSave(cur); renderEmoji();
-      } else sendEmoji(u);
+      } else insertEmoji(u);
     });
     grid.appendChild(b);
   });
@@ -378,15 +539,6 @@ function renderEmoji() {
     note.textContent = '削除したい絵文字をタップすると消えます（「完了」で戻ります）';
     emoBox.appendChild(note);
   }
-}
-function sendEmoji(url) {
-  if (!room) {
-    sysLine('部屋に入ると、相手にも絵文字が届きます');
-  } else {
-    room.ephemeral('chat:' + room.peerId, { n: myName, t: '', img: url });
-  }
-  addLine('', '', L.colorOf(myName), myName, url);
-  toggleEmoji(false);
 }
 function pickEmoji() {
   const inp = document.createElement('input');
@@ -718,7 +870,8 @@ function wireRoom(rm) {
     const n = cleanText(v.n, L.NAME_MAX) || L.DEFAULT_NAME;
     const t = cleanText(v.t, CHAT_MAX);
     const img = typeof v.img === 'string' && /^data:image\/(jpeg|png);base64,/.test(v.img) && v.img.length <= IMG_MAX ? v.img : null;
-    if (t || img) addLine(t, '', L.colorOf(n), n, img);
+    const em = Array.isArray(v.em) ? v.em.filter(u => typeof u === 'string' && u.indexOf('data:image/png;base64,') === 0 && u.length <= 20000).slice(0, 6) : [];
+    if (t || img || em.length) addLine(t, '', L.colorOf(n), n, img, em);
   });
   rm.onEvent((ev, data) => {
     if (rm !== room) return;
@@ -808,7 +961,7 @@ window.VoxelRTUI = {
   join: joinRoom,
   leave: () => leaveRoom(true),
   remotes: () => remotes,
-  say: t => { chatInput.value = t; sendChat(); },
+  say: t => { chatInput.textContent = t; sendChat(); },
   // 部屋に入っている間ずっと fn(rm) を呼ぶ（すでに入っていれば、すぐに一度呼ぶ）
   onRoom: fn => {
     roomHooks.push(fn);

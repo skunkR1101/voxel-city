@@ -23,12 +23,12 @@ let cursorFree = false;                    // Tab で切り替える「カーソ
 // ---------- 小さな補助 ----------
 function el(id) { return document.getElementById(id); }
 function eat(e) { e.preventDefault(); e.stopImmediatePropagation(); }
-function isTyping(e) { return !!(e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)); }
+function isTyping(e) { return !!(e.target && (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable)); }
 function gameStarted() { try { return typeof started !== 'undefined' && !!started; } catch (x) { return false; } }
 function settingsOpen() { const s = el('settings'); return !!(s && s.classList.contains('show')); }
 function panelOpen() { return !!document.querySelector('.ext-panel.show'); }
 function uiOpen() { return settingsOpen() || panelOpen(); }
-function chatInput() { const box = el('rtChat'); return box ? box.querySelector('input') : null; }
+function chatInput() { const box = el('rtChat'); return box ? box.querySelector('input, .ci') : null; }
 function chatting() { const i = chatInput(); return !!i && document.activeElement === i; }
 function playing() { try { return gameStarted() && !uiOpen() && !chatting() && !(typeof menuOpen !== 'undefined' && menuOpen); } catch (x) { return false; } }
 
